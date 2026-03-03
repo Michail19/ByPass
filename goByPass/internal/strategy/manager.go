@@ -266,6 +266,6 @@ func (m *Manager) GetStats() ManagerStats {
 }
 
 // loadDefaultStrategies загружает стратегии по умолчанию
-func (m *Manager) loadDefaultStrategies() {
+var loadDefaultStrategies = func(m *Manager) {
 	// Будет заполнено из profiles.go
 }

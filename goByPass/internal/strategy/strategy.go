@@ -1,7 +1,7 @@
 package strategy
 
 import (
-	"encoding/json"
+	_ "encoding/json"
 	"fmt"
 	"time"
 )
