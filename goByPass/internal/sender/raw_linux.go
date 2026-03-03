@@ -15,13 +15,18 @@ import (
 // RawSender отправляет пакеты через raw socket (Linux)
 type RawSender struct {
 	fd    int
-	addr  unix.SockaddrInet4
 	cfg   Config
 	stats SenderStats
 }
 
-// NewSender создает новый raw socket отправитель для Linux
-func NewSender(cfg Config) (Sender, error) {
+// init регистрирует фабричную функцию для Linux
+func init() {
+	// Переопределяем NewSender для Linux
+	NewSender = newLinuxSender
+}
+
+// newLinuxSender создает новый отправитель для Linux
+func newLinuxSender(cfg Config) (Sender, error) {
 	// Создаем raw socket
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
 	if err != nil {

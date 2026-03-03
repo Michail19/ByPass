@@ -2,7 +2,6 @@ package sender
 
 import (
 	"errors"
-	_ "net"
 	"time"
 )
 
@@ -16,10 +15,10 @@ type Sender interface {
 
 // Config конфигурация отправителя
 type Config struct {
-	Interface   string // сетевой интерфейс
-	BufferSize  int    // размер буфера
-	SendTimeout time.Duration
-	BatchSize   int // размер батча для групповой отправки
+	Interface   string        // сетевой интерфейс
+	BufferSize  int           // размер буфера
+	SendTimeout time.Duration // таймаут отправки
+	BatchSize   int           // размер батча для групповой отправки
 }
 
 // PacketToSend пакет для отправки
@@ -44,8 +43,9 @@ var (
 	ErrNotSupported  = errors.New("platform not supported")
 )
 
-// NewSender создает отправителя в зависимости от платформы
-func NewSender(cfg Config) (Sender, error) {
+// NewSender — это заглушка. Реальная реализация в platform-specific файлах.
+// Она будет переопределена через build tags.
+var NewSender = func(cfg Config) (Sender, error) {
 	// Эта функция будет переопределена в платформозависимых файлах
 	return nil, ErrNotSupported
 }
