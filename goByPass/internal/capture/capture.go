@@ -1,6 +1,9 @@
 package capture
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Packet представляет перехваченный сетевой пакет
 type Packet struct {
@@ -22,4 +25,19 @@ type Capturer interface {
 // PacketModifier определяет интерфейс для модификации пакетов
 type PacketModifier interface {
 	Modify(packet *Packet) ([]byte, bool) // возвращает модифицированные данные и флаг "отправлять ли оригинал"
+}
+
+// Общие ошибки
+var (
+	ErrNotSupported = errors.New("platform not supported")
+	ErrQueueFull    = errors.New("queue is full")
+	ErrNotStarted   = errors.New("capturer not started")
+)
+
+// Config содержит общую конфигурацию для захвата
+type Config struct {
+	QueueNum     int    // номер очереди NFQUEUE
+	BufferSize   int    // размер буфера
+	Interface    string // интерфейс для захвата (пустая строка = все)
+	MaxPacketLen int    // максимальная длина пакета
 }
