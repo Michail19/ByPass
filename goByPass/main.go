@@ -1,20 +1,60 @@
 package main
 
 import (
-	"fmt"
+	"flag"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"mydpi/internal/cache"
+	"mydpi/internal/conntrack"
+	"mydpi/internal/core"
+	"mydpi/internal/strategy"
 )
 
-//TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
-// the <icon src="AllIcons.Actions.Execute"/> icon in the gutter and select the <b>Run</b> menu item from here.</p>
 func main() {
-	//TIP <p>Press <shortcut actionId="ShowIntentionActions"/> when your caret is at the underlined text
-	// to see how GoLand suggests fixing the warning.</p><p>Alternatively, if available, click the lightbulb to view possible fixes.</p>
-	s := "gopher"
-	fmt.Printf("Hello and welcome, %s!\n", s)
+	// Парсинг аргументов командной строки
+	var (
+		configFile = flag.String("config", "", "config file path")
+		queueNum   = flag.Int("queue", 0, "NFQUEUE number")
+		workers    = flag.Int("workers", 4, "number of worker goroutines")
+		cacheSize  = flag.Int("cache-size", 10000, "IP cache size")
+		cacheTTL   = flag.Duration("cache-ttl", 3600, "IP cache TTL")
+	)
+	flag.Parse()
 
-	for i := 1; i <= 5; i++ {
-		//TIP <p>To start your debugging session, right-click your code in the editor and select the Debug option.</p> <p>We have set one <icon src="AllIcons.Debugger.Db_set_breakpoint"/> breakpoint
-		// for you, but you can always add more by pressing <shortcut actionId="ToggleLineBreakpoint"/>.</p>
-		fmt.Println("i =", 100/i)
+	// Загрузка конфигурации
+	var config map[string]interface{}
+	if *configFile != "" {
+		// Загружаем из файла
+		data, err := os.ReadFile(*configFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// парсим JSON/YAML...
 	}
+
+	// Инициализация компонентов
+	ipCache := cache.NewIPCache(*cacheTTL, *cacheSize)
+	connManager := conntrack.NewManager(5*time.Minute, 100000)
+	strategyManager := strategy.NewManager()
+
+	// Создание и запуск ядра
+	dpiCore := core.NewCore(ipCache, connManager, strategyManager)
+
+	if err := dpiCore.Start("linux", config); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("DPI bypass started successfully")
+
+	// Ожидание сигнала завершения
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+
+	log.Println("Shutting down...")
+	dpiCore.Stop()
 }
