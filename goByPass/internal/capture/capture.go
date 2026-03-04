@@ -41,3 +41,7 @@ type Config struct {
 	Interface    string // интерфейс для захвата (пустая строка = все)
 	MaxPacketLen int    // максимальная длина пакета
 }
+
+func NewNFQueue(config Config) (Capturer, error) {
+	return nil, nil
+}
