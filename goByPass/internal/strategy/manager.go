@@ -236,17 +236,36 @@ func (m *Manager) LoadFromFile(filename string) error {
 		return err
 	}
 
-	var strategies map[int]*Strategy
-	if err := json.Unmarshal(data, &strategies); err != nil {
-		return err
+	// Пробуем загрузить как массив (новый формат)
+	var strategiesArray []*Strategy
+	if err := json.Unmarshal(data, &strategiesArray); err == nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		// Очищаем существующие стратегии
+		m.strategies = make(map[int]*Strategy)
+
+		// Добавляем каждую стратегию из массива
+		for _, s := range strategiesArray {
+			if s.ID == 0 {
+				continue
+			}
+			m.strategies[s.ID] = s
+		}
+		m.stats.TotalStrategies = len(m.strategies)
+		return nil
+	}
+
+	// Если не получилось как массив, пробуем как map (старый формат)
+	var strategiesMap map[int]*Strategy
+	if err := json.Unmarshal(data, &strategiesMap); err != nil {
+		return fmt.Errorf("failed to parse strategies: %v (tried array and map)", err)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	m.strategies = strategies
-	m.stats.TotalStrategies = len(strategies)
-
+	m.strategies = strategiesMap
+	m.stats.TotalStrategies = len(strategiesMap)
 	return nil
 }
 

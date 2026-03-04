@@ -1,8 +1,8 @@
 app:
     name: ByPass
     version: 1.0.0
-    pid_file: .\var\run\bypass.pid
-    working_dir: .\etc\bypass
+    pid_file: "bypass.pid"
+    working_dir: "."
     daemonize: false
 capture:
     type: windivert
@@ -17,7 +17,7 @@ firewall:
     ports:
         - 80
         - 443
-    direction: outgoing
+    direction: "outgoing"
     exclude_ips: []
     exclude_ports: []
     cleanup_on_exit: true
@@ -41,7 +41,7 @@ cache:
             - telegram.org
 strategy:
     default_strategy: moderate
-    strategy_file: .\etc\bypass\strategies.json
+    strategy_file: "configs/strategies/strategies.json"
     auto_discovery:
         enabled: false
         test_domains:
@@ -66,7 +66,7 @@ sender:
 logging:
     level: info
     output: stdout
-    file_path: .\var\log\bypass.log
+    file_path: "bypass.log"
     max_size: 10
     max_backups: 3
     compress: true

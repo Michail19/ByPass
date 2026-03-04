@@ -52,10 +52,10 @@ var (
 	ErrRuleNotFound     = errors.New("rule not found")
 )
 
-// NewManager создает менеджер файрвола в зависимости от бэкенда
+// NewManager создает менеджер файрвола в зависимости от бэкенда и платформы
 func NewManager(cfg Config) (Manager, error) {
-	// Проверяем права root
-	if !isRoot() {
+	// Проверяем права администратора на Windows
+	if runtime.GOOS == "windows" && !isAdmin() {
 		return nil, ErrPermissionDenied
 	}
 
@@ -66,10 +66,25 @@ func NewManager(cfg Config) (Manager, error) {
 
 	switch backend {
 	case "iptables":
+		if runtime.GOOS != "linux" {
+			return nil, fmt.Errorf("%w: iptables is Linux-only", ErrNotSupported)
+		}
 		return NewIPTablesManager(cfg)
 	case "nftables":
+		if runtime.GOOS != "linux" {
+			return nil, fmt.Errorf("%w: nftables is Linux-only", ErrNotSupported)
+		}
 		return NewNFTablesManager(cfg)
+	case "windows", "winfw":
+		if runtime.GOOS != "windows" {
+			return nil, fmt.Errorf("%w: Windows Firewall is Windows-only", ErrNotSupported)
+		}
+		return NewWindowsFirewallManager(cfg)
 	default:
+		// Для Windows по умолчанию используем свой менеджер
+		if runtime.GOOS == "windows" {
+			return NewWindowsFirewallManager(cfg)
+		}
 		return nil, fmt.Errorf("%w: %s", ErrNotSupported, backend)
 	}
 }

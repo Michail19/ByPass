@@ -93,8 +93,16 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 		if err := a.parseHTTP(packet, info); err != nil {
 			// Не фатально
 		}
+	case ProtocolTCP:
+		// Ничего не делаем для обычного TCP
+	case ProtocolUDP:
+		// Ничего не делаем для UDP
+	case ProtocolQUIC:
+		// TODO: добавить парсинг QUIC
+	case ProtocolWebSocket:
+		// TODO: добавить парсинг WebSocket
 	default:
-		panic("unhandled default case")
+		// Неизвестный протокол - игнорируем
 	}
 
 	return info, nil
@@ -103,31 +111,35 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 // detectProtocol определяет протокол по первым байтам пакета
 func (a *Analyzer) detectProtocol(data []byte) ProtocolType {
 	if len(data) < 2 {
-		return ProtocolTCP
+		return ProtocolUnknown
 	}
 
 	// Проверка на TLS (0x16 - Handshake, 0x03 - SSL/TLS version)
-	if data[0] == 0x16 && (data[1] == 0x03 || data[1] == 0x02) {
+	if data[0] == 0x16 && (data[1] == 0x03 || data[1] == 0x02 || data[1] == 0x01) {
 		return ProtocolTLS
 	}
 
 	// Проверка на HTTP методы
-	if bytes.HasPrefix(data, []byte("GET ")) ||
-		bytes.HasPrefix(data, []byte("POST ")) ||
-		bytes.HasPrefix(data, []byte("HEAD ")) ||
-		bytes.HasPrefix(data, []byte("PUT ")) ||
-		bytes.HasPrefix(data, []byte("DELETE ")) ||
-		bytes.HasPrefix(data, []byte("OPTIONS ")) ||
-		bytes.HasPrefix(data, []byte("CONNECT ")) ||
-		bytes.HasPrefix(data, []byte("HTTP/")) {
-		return ProtocolHTTP
+	if len(data) >= 4 {
+		if bytes.HasPrefix(data, []byte("GET ")) ||
+			bytes.HasPrefix(data, []byte("POST ")) ||
+			bytes.HasPrefix(data, []byte("HEAD ")) ||
+			bytes.HasPrefix(data, []byte("PUT ")) ||
+			bytes.HasPrefix(data, []byte("DELETE ")) ||
+			bytes.HasPrefix(data, []byte("OPTIONS ")) ||
+			bytes.HasPrefix(data, []byte("CONNECT ")) ||
+			bytes.HasPrefix(data, []byte("HTTP/")) {
+			return ProtocolHTTP
+		}
 	}
 
 	// Проверка на HTTP ответ
-	if bytes.HasPrefix(data, []byte("HTTP/1.")) ||
-		bytes.HasPrefix(data, []byte("HTTP/2.")) ||
-		bytes.HasPrefix(data, []byte("HTTP/3.")) {
-		return ProtocolHTTP
+	if len(data) >= 5 {
+		if bytes.HasPrefix(data, []byte("HTTP/1.")) ||
+			bytes.HasPrefix(data, []byte("HTTP/2.")) ||
+			bytes.HasPrefix(data, []byte("HTTP/3.")) {
+			return ProtocolHTTP
+		}
 	}
 
 	// Проверка на QUIC (первые биты: 0b1100xxxx)
@@ -136,10 +148,11 @@ func (a *Analyzer) detectProtocol(data []byte) ProtocolType {
 	}
 
 	// Проверка на WebSocket handshake
-	if bytes.Contains(data, []byte("Upgrade: websocket")) {
+	if len(data) >= 20 && bytes.Contains(data, []byte("Upgrade: websocket")) {
 		return ProtocolWebSocket
 	}
 
+	// По умолчанию возвращаем TCP
 	return ProtocolTCP
 }
 
