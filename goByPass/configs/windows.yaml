@@ -1,0 +1,72 @@
+app:
+    name: ByPass
+    version: 1.0.0
+    pid_file: /var/run/mydpi.pid
+    working_dir: /etc/mydpi
+    daemonize: false
+capture:
+    type: windivert
+    queue_num: 0
+    buffer_size: 65535
+    interface: any
+    max_packet_len: 65535
+    promiscuous: false
+    timeout: 100ms
+firewall:
+    backend: auto
+    ports:
+        - 80
+        - 443
+    direction: outgoing
+    exclude_ips: []
+    exclude_ports: []
+    cleanup_on_exit: true
+conntrack:
+    timeout: 5m0s
+    max_flows: 100000
+    cleanup_interval: 30s
+cache:
+    ip_cache:
+        enabled: true
+        ttl: 1h0m0s
+        max_size: 10000
+    domain_cache:
+        enabled: true
+        ttl: 1h0m0s
+        max_size: 5000
+        preload:
+            - google.com
+            - youtube.com
+            - discord.com
+            - telegram.org
+strategy:
+    default_strategy: moderate
+    strategy_file: /etc/mydpi/strategies.json
+    auto_discovery:
+        enabled: false
+        test_domains:
+            - google.com
+            - youtube.com
+            - discord.com
+        test_ports:
+            - 443
+        test_interval: 3600
+        min_success_rate: 0.7
+pipeline:
+    workers: 4
+    packet_queue_size: 10000
+    result_queue_size: 1000
+    process_timeout: 100ms
+sender:
+    type: raw
+    interface: ""
+    buffer_size: 65535
+    send_timeout: 1s
+    batch_size: 10
+logging:
+    level: info
+    output: stdout
+    file_path: /var/log/mydpi.log
+    max_size: 10
+    max_backups: 3
+    compress: true
