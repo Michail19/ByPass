@@ -198,7 +198,12 @@ func (c *DomainCache) GetStats() DomainCacheStats {
 // Preload популярные домены
 func (c *DomainCache) Preload(domains []string) error {
 	for _, domain := range domains {
-		go c.Resolve(domain)
+		go func() {
+			_, err := c.Resolve(domain)
+			if err != nil {
+
+			}
+		}()
 	}
 	return nil
 }

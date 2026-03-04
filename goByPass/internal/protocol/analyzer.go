@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	_ "fmt"
 )
 
 // ProtocolType определяет тип протокола
@@ -94,6 +93,8 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 		if err := a.parseHTTP(packet, info); err != nil {
 			// Не фатально
 		}
+	default:
+		panic("unhandled default case")
 	}
 
 	return info, nil

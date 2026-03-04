@@ -3,7 +3,6 @@ package modifier
 import (
 	"ByPass/internal/cache"
 	"ByPass/internal/conntrack"
-	_ "ByPass/internal/protocol"
 	"ByPass/internal/strategy"
 	"errors"
 )
@@ -50,7 +49,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	pm.stats.PacketsProcessed++
 
 	// Определяем стратегию для этого потока
-	strat := pm.strategyManager.SelectStrategy(flow.DstIP, "")
+	strat := pm.strategyManager.SelectStrategy()
 	if strat == nil {
 		// Нет стратегии - пропускаем без изменений
 		return &ModifyResult{
@@ -63,8 +62,8 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	}
 
 	// Применяем модификации в зависимости от стратегии
-	if strat.Split != strategy.SplitNone {
-		fragments, err := pm.ApplySplit(packet, strat.SplitPos, strat.SplitSNIOffset)
+	if strat.SplitMode != strategy.SplitNone {
+		fragments, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
 		if err == nil && len(fragments) > 0 {
 			result.ModifiedPackets = append(result.ModifiedPackets, fragments...)
 			result.SendOriginal = false
@@ -73,7 +72,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		}
 	}
 
-	if strat.Disorder != strategy.DisorderNone {
+	if strat.DisorderMode != strategy.DisorderNone {
 		disorderPkts, err := pm.ApplyDisorder(packet, strat.DisorderPos, strat.DisorderTTL)
 		if err == nil && len(disorderPkts) > 0 {
 			result.ModifiedPackets = append(result.ModifiedPackets, disorderPkts...)
@@ -82,8 +81,8 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		}
 	}
 
-	if strat.Fake != strategy.FakeNone {
-		fakePkts, err := pm.ApplyFake(packet, strat.FakePos, strat.FakeTTL, strat.Fake)
+	if strat.FakeMode != strategy.FakeNone {
+		fakePkts, err := pm.ApplyFake(packet, strat.FakePos, strat.FakeTTL, strat.FakeMode)
 		if err == nil && len(fakePkts) > 0 {
 			result.ModifiedPackets = append(result.ModifiedPackets, fakePkts...)
 			pm.stats.FakeCount++

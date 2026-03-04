@@ -83,7 +83,7 @@ func (m *Manager) GetStrategy(id int) (*Strategy, bool) {
 }
 
 // SelectStrategy выбирает стратегию для IP/хоста
-func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
+func (m *Manager) SelectStrategy() *Strategy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

@@ -1,12 +1,7 @@
 package config
 
 import (
-	_ "encoding/json"
-	_ "fmt"
-	_ "os"
 	"time"
-
-	_ "gopkg.in/yaml.v3"
 )
 
 // Config основная конфигурация приложения

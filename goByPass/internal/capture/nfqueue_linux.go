@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"time"
 
-	"github.com/google/nftables"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,8 +21,6 @@ type NFQueue struct {
 	packets  chan Packet
 	stopChan chan struct{}
 	fd       int
-	queue    *nftables.Queue
-	nfq      *nfqHandle
 	config   Config
 }
 
@@ -42,7 +40,7 @@ func NewNFQueue(cfg Config) (*NFQueue, error) {
 
 	return &NFQueue{
 		queueNum: cfg.QueueNum,
-		packets:  make(chan Packet, 1000),
+		packets:  make(chan Packet, cfg.BufferSize),
 		stopChan: make(chan struct{}),
 		config:   cfg,
 	}, nil
@@ -69,13 +67,13 @@ func (n *NFQueue) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to bind queue: %v", err)
 	}
 
-	// Настраиваем iptables правила (опционально)
+	// Настраиваем iptables правила
 	if err := n.setupIptables(); err != nil {
 		log.Printf("Warning: failed to setup iptables: %v", err)
 	}
 
 	// Запускаем обработку в горутине
-	go n.processPackets()
+	go n.processPackets(ctx)
 
 	log.Printf("NFQUEUE started on queue %d", n.queueNum)
 	return nil
@@ -106,13 +104,10 @@ func (n *NFQueue) Packets() <-chan Packet {
 
 // bindQueue привязывает сокет к очереди NFQUEUE
 func (n *NFQueue) bindQueue() error {
-	// Создаем и отправляем netlink сообщение для привязки к очереди
-	// Это упрощенная реализация - в реальном коде нужно использовать
-	// libnetfilter_queue или готовые биндинги
+	// Упрощенная реализация - в реальном проекте используйте github.com/chifflier/nfqueue-go
+	// или полную реализацию netlink протокола для NFQUEUE
 
-	// Для примера используем syscall к NFQUEUE
-	// В реальном проекте лучше использовать github.com/chifflier/nfqueue-go
-
+	// Пока просто заглушка
 	return nil
 }
 
@@ -123,34 +118,56 @@ func (n *NFQueue) setupIptables() error {
 		return fmt.Errorf("need root privileges to setup iptables")
 	}
 
-	// Команда iptables для перенаправления HTTPS трафика в очередь
-	// В реальном проекте лучше использовать github.com/coreos/go-iptables
-	cmd := fmt.Sprintf("iptables -t mangle -I OUTPUT -p tcp --dport 443 -j NFQUEUE --queue-num %d --queue-bypass", n.queueNum)
+	// Добавляем правило для HTTPS трафика (443 порт)
+	cmd := exec.Command("iptables", "-t", "mangle", "-I", "OUTPUT", "-p", "tcp",
+		"--dport", "443", "-j", "NFQUEUE", "--queue-num", fmt.Sprintf("%d", n.queueNum),
+		"--queue-bypass")
 
-	// Здесь нужно выполнить команду через exec.Command
-	// Для примера пропускаем
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to add iptables rule: %v", err)
+	}
+
+	// Добавляем правило для HTTP трафика (80 порт)
+	cmd = exec.Command("iptables", "-t", "mangle", "-I", "OUTPUT", "-p", "tcp",
+		"--dport", "80", "-j", "NFQUEUE", "--queue-num", fmt.Sprintf("%d", n.queueNum),
+		"--queue-bypass")
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to add iptables rule: %v", err)
+	}
 
 	return nil
 }
 
 // cleanupIptables удаляет правила
 func (n *NFQueue) cleanupIptables() error {
-	cmd := fmt.Sprintf("iptables -t mangle -D OUTPUT -p tcp --dport 443 -j NFQUEUE --queue-num %d", n.queueNum)
-	// Выполнить команду
+	// Удаляем правило для HTTPS
+	cmd := exec.Command("iptables", "-t", "mangle", "-D", "OUTPUT", "-p", "tcp",
+		"--dport", "443", "-j", "NFQUEUE", "--queue-num", fmt.Sprintf("%d", n.queueNum))
+	cmd.Run() // Игнорируем ошибку, правило может уже не существовать
+
+	// Удаляем правило для HTTP
+	cmd = exec.Command("iptables", "-t", "mangle", "-D", "OUTPUT", "-p", "tcp",
+		"--dport", "80", "-j", "NFQUEUE", "--queue-num", fmt.Sprintf("%d", n.queueNum))
+	cmd.Run()
+
 	return nil
 }
 
 // processPackets обрабатывает входящие пакеты
-func (n *NFQueue) processPackets() {
+func (n *NFQueue) processPackets(ctx context.Context) {
 	buf := make([]byte, n.config.MaxPacketLen)
 
 	for {
 		select {
 		case <-n.stopChan:
 			return
+		case <-ctx.Done():
+			return
 		default:
 			// Читаем пакет из очереди
-			n, from, err := unix.Recvfrom(n.fd, buf, 0)
+			// Используем другое имя переменной, чтобы не конфликтовать с получателем n
+			nRead, _, err := unix.Recvfrom(n.fd, buf, 0)
 			if err != nil {
 				if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
 					time.Sleep(10 * time.Millisecond)
@@ -161,7 +178,7 @@ func (n *NFQueue) processPackets() {
 			}
 
 			// Парсим netlink сообщение и извлекаем пакет
-			packet, err := n.parseNetlinkMessage(buf[:n])
+			packet, err := n.parseNetlinkMessage(buf[:nRead])
 			if err != nil {
 				log.Printf("Failed to parse netlink message: %v", err)
 				continue
@@ -170,10 +187,12 @@ func (n *NFQueue) processPackets() {
 			// Отправляем в канал
 			select {
 			case n.packets <- *packet:
+				// Пакет успешно отправлен в канал
+				n.setVerdict(packet.ID, 0, true) // NF_ACCEPT
 			default:
 				// Канал переполнен - дропаем пакет
 				log.Printf("Packet channel full, dropping packet")
-				n.setVerdict(packet.ID, 0, true) // NF_DROP
+				n.setVerdict(packet.ID, 0, false) // NF_DROP
 			}
 		}
 	}
@@ -191,7 +210,7 @@ func (n *NFQueue) parseNetlinkMessage(data []byte) (*Packet, error) {
 	// Извлекаем ID пакета (упрощенно)
 	id := binary.BigEndian.Uint32(data[4:8])
 
-	// Извлекаем payload (упрощенно)
+	// Извлекаем payload (упрощенно) - в реальности нужно парсить netlink заголовки
 	payload := data[20:]
 
 	return &Packet{
@@ -204,12 +223,9 @@ func (n *NFQueue) parseNetlinkMessage(data []byte) (*Packet, error) {
 
 // setVerdict устанавливает вердикт для пакета
 func (n *NFQueue) setVerdict(id uint32, mark uint32, accept bool) error {
-	// Отправляем вердикт обратно в очередь
 	// В реальном коде нужно сформировать правильное netlink сообщение
-	return nil
-}
+	// и отправить вердикт обратно в очередь
 
-// nfqHandle для совместимости с libnetfilter_queue
-type nfqHandle struct {
-	fd int
+	// Пока просто заглушка
+	return nil
 }

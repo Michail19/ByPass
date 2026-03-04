@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"ByPass/internal/cache"
 	"ByPass/internal/capture"
 	"ByPass/internal/config"
@@ -56,7 +58,7 @@ func main() {
 	// Генерируем конфигурацию по умолчанию
 	if *dumpConfig {
 		cfg := config.DefaultConfig()
-		data, err := cfg.MarshalYAML()
+		data, err := yaml.Marshal(cfg)
 		if err != nil {
 			log.Fatalf("Failed to marshal config: %v", err)
 		}
@@ -209,13 +211,22 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		return nil, fmt.Errorf("failed to create sender: %v", err)
 	}
 
-	// Захватчик
-	capturer, err := capture.NewNFQueue(capture.Config{
-		QueueNum:     cfg.Capture.QueueNum,
-		BufferSize:   cfg.Capture.BufferSize,
-		Interface:    cfg.Capture.Interface,
-		MaxPacketLen: cfg.Capture.MaxPacketLen,
-	})
+	// Захватчик - используем фабричный метод вместо прямого вызова NewNFQueue
+	var capturer capture.Capturer
+
+	// В зависимости от платформы создаем соответствующий захватчик
+	switch runtime.GOOS {
+	case "linux":
+		capturer, err = capture.NewNFQueue(capture.Config{
+			QueueNum:     cfg.Capture.QueueNum,
+			BufferSize:   cfg.Capture.BufferSize,
+			Interface:    cfg.Capture.Interface,
+			MaxPacketLen: cfg.Capture.MaxPacketLen,
+		})
+	default:
+		err = fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+
 	if err != nil {
 		sender.Close()
 		return nil, fmt.Errorf("failed to create capturer: %v", err)
@@ -254,8 +265,12 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 
 // cleanup освобождает ресурсы
 func (c *Components) cleanup() {
-	c.sender.Close()
-	c.capturer.Stop()
+	if c.sender != nil {
+		c.sender.Close()
+	}
+	if c.capturer != nil {
+		c.capturer.Stop()
+	}
 }
 
 // setupFirewall настраивает правила файрвола

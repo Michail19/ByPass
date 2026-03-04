@@ -228,7 +228,8 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		})
 	} else {
 		// Решаем, нужно ли обходить
-		strat := p.strategyMgr.SelectStrategy(dstIP.String(), flow.Hostname, int(dstPort), "tcp")
+		// Используем dstIP.String() для получения строки IP
+		strat := p.strategyMgr.SelectStrategy()
 		if strat != nil {
 			shouldBypass = true
 			strategyID = strat.ID
@@ -288,9 +289,19 @@ func (p *Pipeline) resultProcessor() {
 		case <-p.ctx.Done():
 			return
 		case result := <-p.resultChan:
-			// Здесь можно обновлять статистику стратегий
-			// или логировать результаты
-			_ = result
+			// Отправляем результат в менеджер стратегий для статистики
+			if p.strategyMgr != nil {
+				// Создаем StrategyResult из ModifyResult
+				strategyResult := &strategy.StrategyResult{
+					StrategyID:   0, // Здесь нужно получить ID стратегии
+					Success:      true,
+					ResponseTime: 0,
+					BytesSent:    0,
+					PacketsSent:  len(result.ModifiedPackets),
+					Timestamp:    time.Now(),
+				}
+				p.strategyMgr.ReportResult(strategyResult)
+			}
 		}
 	}
 }

@@ -198,3 +198,37 @@ func (f *Flow) GetInfo() map[string]interface{} {
 		"is_http":     f.IsHTTP,
 	}
 }
+
+// GetDstIP возвращает IP назначения как строку
+func (f *Flow) GetDstIP() string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	ip := make(net.IP, 4)
+	binary.BigEndian.PutUint32(ip, f.Key.DstIP)
+	return ip.String()
+}
+
+// GetSrcIP возвращает IP источника как строку
+func (f *Flow) GetSrcIP() string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	ip := make(net.IP, 4)
+	binary.BigEndian.PutUint32(ip, f.Key.SrcIP)
+	return ip.String()
+}
+
+// GetDstPort возвращает порт назначения
+func (f *Flow) GetDstPort() uint16 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.Key.DstPort
+}
+
+// GetSrcPort возвращает порт источника
+func (f *Flow) GetSrcPort() uint16 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.Key.SrcPort
+}

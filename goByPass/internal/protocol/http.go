@@ -99,37 +99,3 @@ func ExtractHost(data []byte) string {
 	}
 	return ""
 }
-
-// IsHTTPRequest проверяет, является ли пакет HTTP запросом
-func IsHTTPRequest(data []byte) bool {
-	if len(data) < 4 {
-		return false
-	}
-
-	methods := [][]byte{
-		[]byte("GET "),
-		[]byte("POST "),
-		[]byte("HEAD "),
-		[]byte("PUT "),
-		[]byte("DELETE "),
-		[]byte("OPTIONS "),
-		[]byte("CONNECT "),
-		[]byte("TRACE "),
-		[]byte("PATCH "),
-	}
-
-	for _, method := range methods {
-		if bytes.HasPrefix(data, method) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// IsHTTPResponse проверяет, является ли пакет HTTP ответом
-func IsHTTPResponse(data []byte) bool {
-	return bytes.HasPrefix(data, []byte("HTTP/1.")) ||
-		bytes.HasPrefix(data, []byte("HTTP/2.")) ||
-		bytes.HasPrefix(data, []byte("HTTP/3."))
-}

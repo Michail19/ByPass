@@ -35,7 +35,10 @@ func (pm *PacketModifier) ApplyFake(packet []byte, fakePos int, fakeTTL int, fak
 	}
 
 	// Устанавливаем низкий TTL для фейка
-	setIPTTL(fakePacket, fakeTTL)
+	err := setIPTTL(fakePacket, fakeTTL)
+	if err != nil {
+		return nil, err
+	}
 
 	return [][]byte{fakePacket, packet}, nil
 }

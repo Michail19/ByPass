@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ByPass/internal/config"
 	"ByPass/internal/strategy"
 )
 
@@ -24,33 +25,50 @@ func main() {
 	flag.Parse()
 
 	// Загружаем конфигурацию
-	cfg, err := loadConfig(*configFile)
+	cfg, err := config.Load(*configFile)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Warning: failed to load config: %v, using defaults", err)
+		cfg = config.DefaultConfig()
 	}
 
 	// Создаем менеджер стратегий
 	sm := strategy.NewManager()
 	defer sm.Stop()
 
-	// Загружаем стратегии
-	if err := sm.LoadFromFile(cfg.StrategyFile); err != nil {
-		log.Printf("Warning: %v", err)
+	// Загружаем стратегии из файла, если указан
+	if cfg.Strategy.StrategyFile != "" {
+		if err := sm.LoadFromFile(cfg.Strategy.StrategyFile); err != nil {
+			log.Printf("Warning: failed to load strategies from %s: %v",
+				cfg.Strategy.StrategyFile, err)
+		}
 	}
 
 	// Настраиваем тестовые домены
 	testDomains := parseList(*domains)
 	if len(testDomains) == 0 {
-		testDomains = []string{
-			"google.com",
-			"youtube.com",
-			"discord.com",
-			"github.com",
+		// Используем домены из конфига или значения по умолчанию
+		if len(cfg.Strategy.AutoDiscovery.TestDomains) > 0 {
+			testDomains = cfg.Strategy.AutoDiscovery.TestDomains
+		} else {
+			testDomains = []string{
+				"google.com",
+				"youtube.com",
+				"discord.com",
+				"github.com",
+			}
 		}
 	}
 
 	// Настраиваем тестовые порты
 	testPorts := parseIntList(*ports)
+	if len(testPorts) == 0 {
+		// Используем порты из конфига или значения по умолчанию
+		if len(cfg.Strategy.AutoDiscovery.TestPorts) > 0 {
+			testPorts = cfg.Strategy.AutoDiscovery.TestPorts
+		} else {
+			testPorts = []int{443}
+		}
+	}
 
 	// Создаем дискавери
 	discovery := strategy.NewDiscovery(sm, strategy.DiscoveryConfig{
@@ -59,7 +77,7 @@ func main() {
 		TestTimeout:    *timeout,
 		TestInterval:   100 * time.Millisecond,
 		SamplesPerTest: *samples,
-		MinSuccessRate: 0.7,
+		MinSuccessRate: cfg.Strategy.AutoDiscovery.MinSuccessRate,
 	})
 
 	// Запускаем
@@ -119,6 +137,15 @@ func main() {
 		// Применяем
 		if err := sm.SetActive(best.StrategyID); err != nil {
 			log.Printf("Failed to set active strategy: %v", err)
+		}
+
+		// Сохраняем лучшую стратегию как активную в файл
+		if cfg.Strategy.StrategyFile != "" {
+			// Можно сохранить обновленную стратегию с активной
+			err := sm.SaveToFile(cfg.Strategy.StrategyFile)
+			if err != nil {
+				return
+			}
 		}
 	}
 }

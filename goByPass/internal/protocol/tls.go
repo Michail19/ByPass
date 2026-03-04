@@ -139,7 +139,6 @@ func (a *Analyzer) parseClientHello(data []byte, info *ConnectionInfo) error {
 		return nil // нет расширений
 	}
 
-	//extensionsLen := int(binary.BigEndian.Uint16(data[pos:pos+2]))
 	pos += 2
 
 	// Парсим расширения
@@ -198,7 +197,6 @@ func (a *Analyzer) parseALPN(data []byte, info *ConnectionInfo) {
 	}
 
 	// ALPN содержит список протоколов
-	//listLen := int(binary.BigEndian.Uint16(data[0:2]))
 	pos := 2
 
 	for pos < len(data) && pos+1 < len(data) {

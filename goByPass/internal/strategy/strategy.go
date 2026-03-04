@@ -187,3 +187,20 @@ type StrategyResult struct {
 	Error        string
 	Timestamp    time.Time
 }
+
+func (h HTTPModMode) String() string {
+	switch h {
+	case HTTPModNone:
+		return "none"
+	case HTTPModHostCase:
+		return "host-case"
+	case HTTPModExtraSpace:
+		return "extra-space"
+	case HTTPModDotAtEnd:
+		return "dot-at-end"
+	case HTTPModAll:
+		return "all"
+	default:
+		return "unknown"
+	}
+}

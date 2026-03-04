@@ -4,12 +4,32 @@
 package core
 
 import (
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
-
-	"ByPass/pkg/api"
 )
+
+// MobileConfig конфигурация для мобильных устройств (дублируем структуру)
+type MobileConfig struct {
+	ServerAddr    string   `json:"server_addr"`
+	ServerPort    int      `json:"server_port"`
+	Password      string   `json:"password"`
+	Protocol      string   `json:"protocol"` // "trojan", "v2ray", "shadowsocks"
+	EnableVPN     bool     `json:"enable_vpn"`
+	BypassDomains []string `json:"bypass_domains"`
+	ProxyPort     int      `json:"proxy_port"`
+}
+
+// MobileStats статистика для мобильных устройств (дублируем структуру)
+type MobileStats struct {
+	BytesReceived   int64 `json:"bytes_received"`
+	BytesSent       int64 `json:"bytes_sent"`
+	PacketsReceived int64 `json:"packets_received"`
+	PacketsSent     int64 `json:"packets_sent"`
+	ActiveFlows     int   `json:"active_flows"`
+	UptimeSeconds   int64 `json:"uptime_seconds"`
+}
 
 var (
 	mobileCore   *MobileCore
@@ -18,12 +38,12 @@ var (
 
 // MobileCore ядро для мобильных устройств
 type MobileCore struct {
-	config     *api.MobileConfig
+	config     *MobileConfig
 	running    bool
 	proxyPort  int
 	bypassMu   sync.RWMutex
 	bypassList map[string]bool
-	stats      api.MobileStats
+	stats      MobileStats
 	startTime  time.Time
 }
 
@@ -36,9 +56,19 @@ func NewMobileCore() *MobileCore {
 }
 
 // StartMobile запускает мобильное ядро
-func StartMobile(config api.MobileConfig) error {
+func StartMobile(configJSON interface{}) error {
 	mobileCoreMu.Lock()
 	defer mobileCoreMu.Unlock()
+
+	// Конвертируем interface{} в MobileConfig
+	var config MobileConfig
+	jsonData, err := json.Marshal(configJSON)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(jsonData, &config); err != nil {
+		return err
+	}
 
 	if mobileCore == nil {
 		mobileCore = NewMobileCore()
@@ -59,12 +89,12 @@ func StopMobile() {
 }
 
 // GetMobileStats возвращает статистику
-func GetMobileStats() api.MobileStats {
+func GetMobileStats() MobileStats {
 	mobileCoreMu.Lock()
 	defer mobileCoreMu.Unlock()
 
 	if mobileCore == nil {
-		return api.MobileStats{}
+		return MobileStats{}
 	}
 	return mobileCore.getStats()
 }
@@ -100,7 +130,7 @@ func RemoveBypassDomain(domain string) {
 }
 
 // start запускает мобильное ядро
-func (m *MobileCore) start(config api.MobileConfig) error {
+func (m *MobileCore) start(config MobileConfig) error {
 	m.config = &config
 	m.running = true
 	m.startTime = time.Now()
@@ -122,7 +152,7 @@ func (m *MobileCore) stop() {
 }
 
 // getStats возвращает статистику
-func (m *MobileCore) getStats() api.MobileStats {
+func (m *MobileCore) getStats() MobileStats {
 	m.bypassMu.RLock()
 	defer m.bypassMu.RUnlock()
 
@@ -144,11 +174,4 @@ func (m *MobileCore) removeBypassDomain(domain string) {
 	defer m.bypassMu.Unlock()
 	delete(m.bypassList, domain)
 	log.Printf("Removed bypass domain: %s", domain)
-}
-
-// shouldBypass проверяет, нужно ли обходить домен
-func (m *MobileCore) shouldBypass(domain string) bool {
-	m.bypassMu.RLock()
-	defer m.bypassMu.RUnlock()
-	return m.bypassList[domain]
 }
