@@ -1,5 +1,5 @@
 ```
-mydpi-bypass/
+ByPass/
 ├── cmd/                           # Точки входа в приложение
 │   ├── mydpi/                     # Основной CLI инструмент
 │   │   └── main.go
@@ -58,10 +58,15 @@ mydpi-bypass/
 │   │   ├── nftables.go
 │   │   └── firewall.go
 │   │
-│   └── config/                       # Конфигурация
-│       ├── loader.go
-│       ├── validate.go
-│       └── defaults.go
+│   ├── config/                       # Конфигурация
+│   │    ├── loader.go
+│   │    ├── validate.go
+│   │    └── defaults.go
+│   │
+│   └── core/                         # Ядро приложения
+│       ├── core.go
+│       ├── mobile.go
+│       └── daemon.go
 │
 ├── pkg/                              # Публичные пакеты (можно импортировать)
 │   ├── api/                          # API для Java (gomobile)

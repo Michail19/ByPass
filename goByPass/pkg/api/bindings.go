@@ -8,10 +8,9 @@ package api
 */
 import "C"
 import (
+	"ByPass/internal/core"
 	"encoding/json"
 	"unsafe"
-
-	"mydpi-bypass/internal/core"
 )
 
 // Экспортируемые функции для gomobile
