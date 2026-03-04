@@ -1,0 +1,32 @@
+[
+  {
+    "StrategyID": 2,
+    "SuccessRate": 0.95,
+    "AvgResponse": "150ms",
+    "Samples": 10,
+    "SuccessSamples": 9,
+    "FailSamples": 1,
+    "Errors": ["Connection timeout on attempt 3"],
+    "Timestamp": "2024-01-15T10:30:00Z"
+  },
+  {
+    "StrategyID": 1,
+    "SuccessRate": 0.80,
+    "AvgResponse": "180ms",
+    "Samples": 10,
+    "SuccessSamples": 8,
+    "FailSamples": 2,
+    "Errors": [],
+    "Timestamp": "2024-01-15T10:30:00Z"
+  },
+  {
+    "StrategyID": 3,
+    "SuccessRate": 0.70,
+    "AvgResponse": "220ms",
+    "Samples": 10,
+    "SuccessSamples": 7,
+    "FailSamples": 3,
+    "Errors": ["Slow response"],
+    "Timestamp": "2024-01-15T10:30:00Z"
+  }
+]
