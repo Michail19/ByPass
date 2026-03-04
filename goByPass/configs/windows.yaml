@@ -1,8 +1,8 @@
 app:
     name: ByPass
     version: 1.0.0
-    pid_file: /var/run/mydpi.pid
-    working_dir: /etc/mydpi
+    pid_file: .\var\run\bypass.pid
+    working_dir: .\etc\bypass
     daemonize: false
 capture:
     type: windivert
@@ -41,7 +41,7 @@ cache:
             - telegram.org
 strategy:
     default_strategy: moderate
-    strategy_file: /etc/mydpi/strategies.json
+    strategy_file: .\etc\bypass\strategies.json
     auto_discovery:
         enabled: false
         test_domains:
@@ -66,7 +66,7 @@ sender:
 logging:
     level: info
     output: stdout
-    file_path: /var/log/mydpi.log
+    file_path: .\var\log\bypass.log
     max_size: 10
     max_backups: 3
     compress: true

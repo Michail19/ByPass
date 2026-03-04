@@ -8,8 +8,8 @@ func DefaultConfig() *Config {
 		App: AppConfig{
 			Name:       "ByPass",
 			Version:    "1.0.0",
-			PidFile:    "/var/run/mydpi.pid",
-			WorkingDir: "/etc/mydpi",
+			PidFile:    "/var/run/bypass.pid",
+			WorkingDir: "/etc/bypass",
 			Daemonize:  false,
 		},
 
@@ -68,7 +68,7 @@ func DefaultConfig() *Config {
 
 		Strategy: StrategyConfig{
 			DefaultStrategy: "moderate",
-			StrategyFile:    "/etc/mydpi/strategies.json",
+			StrategyFile:    "/etc/bypass/strategies.json",
 			AutoDiscovery: struct {
 				Enabled        bool     `yaml:"enabled" json:"enabled"`
 				TestDomains    []string `yaml:"test_domains" json:"test_domains"`
@@ -106,7 +106,7 @@ func DefaultConfig() *Config {
 		Logging: LoggingConfig{
 			Level:      "info",
 			Output:     "stdout",
-			FilePath:   "/var/log/mydpi.log",
+			FilePath:   "/var/log/bypass.log",
 			MaxSize:    10,
 			MaxBackups: 3,
 			Compress:   true,

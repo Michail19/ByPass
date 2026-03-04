@@ -45,3 +45,9 @@ type Config struct {
 func NewNFQueue(config Config) (Capturer, error) {
 	return nil, nil
 }
+
+// New создает захватчик в зависимости от платформы
+func New(cfg Config) (Capturer, error) {
+	// Эта функция будет переопределена в платформозависимых файлах
+	return newPlatformCapturer(cfg)
+}

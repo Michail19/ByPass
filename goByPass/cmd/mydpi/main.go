@@ -215,17 +215,12 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	var capturer capture.Capturer
 
 	// В зависимости от платформы создаем соответствующий захватчик
-	switch runtime.GOOS {
-	case "linux":
-		capturer, err = capture.NewNFQueue(capture.Config{
-			QueueNum:     cfg.Capture.QueueNum,
-			BufferSize:   cfg.Capture.BufferSize,
-			Interface:    cfg.Capture.Interface,
-			MaxPacketLen: cfg.Capture.MaxPacketLen,
-		})
-	default:
-		err = fmt.Errorf("unsupported platform: %s", runtime.GOOS)
-	}
+	capturer, err = capture.New(capture.Config{
+		QueueNum:     cfg.Capture.QueueNum,
+		BufferSize:   cfg.Capture.BufferSize,
+		Interface:    cfg.Capture.Interface,
+		MaxPacketLen: cfg.Capture.MaxPacketLen,
+	})
 
 	if err != nil {
 		sender.Close()

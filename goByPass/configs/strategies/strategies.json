@@ -1,0 +1,19 @@
+[
+  {
+    "id": 1,
+    "name": "minimal",
+    "description": "Минимальная стратегия",
+    "split_mode": 1,
+    "split_positions": [1],
+    "priority": 10
+  },
+  {
+    "id": 2,
+    "name": "moderate",
+    "description": "Умеренная стратегия",
+    "split_mode": 2,
+    "split_positions": [5, 10],
+    "host_case": true,
+    "priority": 20
+  }
+]
