@@ -21,7 +21,7 @@ import (
 type Pipeline struct {
 	capturer    capture.Capturer
 	conntrack   *conntrack.Manager
-	modifier    *modifier.PacketModifier
+	pktModifier *modifier.PacketModifier
 	sender      sender.Sender
 	analyzer    *protocol.Analyzer
 	ipCache     *cache.IPCache
@@ -66,7 +66,7 @@ type Config struct {
 func NewPipeline(
 	capturer capture.Capturer,
 	conntrack *conntrack.Manager,
-	modifier *modifier.PacketModifier,
+	pktModifier *modifier.PacketModifier,
 	sender sender.Sender,
 	analyzer *protocol.Analyzer,
 	ipCache *cache.IPCache,
@@ -88,7 +88,7 @@ func NewPipeline(
 	return &Pipeline{
 		capturer:    capturer,
 		conntrack:   conntrack,
-		modifier:    modifier,
+		pktModifier: pktModifier,
 		sender:      sender,
 		analyzer:    analyzer,
 		ipCache:     ipCache,
@@ -242,7 +242,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 	// Применяем модификацию если нужно
 	if shouldBypass {
-		result, err := p.modifier.ModifyPacket(pkt.Data, flow)
+		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
 		if err == nil && result != nil {
 			// Отправляем модифицированные пакеты
 			for _, modifiedPkt := range result.ModifiedPackets {
