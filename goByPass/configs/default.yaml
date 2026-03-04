@@ -1,0 +1,88 @@
+# Основная конфигурация ByPass DPI Bypass
+
+app:
+  name: "ByPass"
+  version: "1.0.0"
+  pid_file: "/var/run/bypass.pid"
+  working_dir: "/etc/bypass"
+  daemonize: false
+
+capture:
+  type: "nfqueue"           # nfqueue, windivert, pcap
+  queue_num: 0              # номер очереди NFQUEUE
+  buffer_size: 65535        # размер буфера
+  interface: "any"          # сетевой интерфейс (any = все)
+  max_packet_len: 65535     # максимальная длина пакета
+  promiscuous: false        # promiscuous mode
+  timeout: 100ms            # таймаут захвата
+
+firewall:
+  backend: "auto"           # iptables, nftables, auto
+  ports:                    # порты для обработки
+    - 80
+    - 443
+  direction: "outgoing"     # outgoing, incoming, both
+  exclude_ips: []           # IP для исключения
+  exclude_ports: []         # порты для исключения
+  cleanup_on_exit: true     # очищать правила при выходе
+
+conntrack:
+  timeout: 5m               # таймаут потока
+  max_flows: 100000         # максимум потоков
+  cleanup_interval: 30s     # интервал очистки
+
+cache:
+  ip_cache:
+    enabled: true
+    ttl: 1h                 # время жизни записи
+    max_size: 10000         # максимальный размер кэша
+
+  domain_cache:
+    enabled: true
+    ttl: 1h
+    max_size: 5000
+    preload:                # домены для предзагрузки
+      - google.com
+      - youtube.com
+      - discord.com
+      - telegram.org
+      - github.com
+      - reddit.com
+      - twitch.tv
+      - spotify.com
+
+strategy:
+  default_strategy: "moderate"
+  strategy_file: "/etc/bypass/strategies.json"
+  auto_discovery:
+    enabled: false
+    test_domains:
+      - google.com
+      - youtube.com
+      - discord.com
+    test_ports:
+      - 443
+    test_interval: 3600      # секунды
+    min_success_rate: 0.7    # 70% успеха
+
+pipeline:
+  workers: 4                 # количество воркеров
+  packet_queue_size: 10000   # размер очереди пакетов
+  result_queue_size: 1000    # размер очереди результатов
+  process_timeout: 100ms     # таймаут обработки
+
+sender:
+  type: "raw"                # raw, pcap, tun
+  interface: ""              # интерфейс отправки (пусто = авто)
+  buffer_size: 65535         # размер буфера
+  send_timeout: 1s           # таймаут отправки
+  batch_size: 10             # пакетов в батче
+
+logging:
+  level: "info"              # debug, info, warn, error
+  output: "stdout"           # stdout, stderr, file
+  file_path: "/var/log/bypass.log"
+  max_size: 10               # MB
+  max_backups: 3             # количество бэкапов
+  compress: true             # сжимать бэкапы
+  
