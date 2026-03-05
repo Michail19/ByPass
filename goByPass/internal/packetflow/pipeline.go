@@ -191,6 +191,13 @@ func (p *Pipeline) worker(id int) {
 func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	startTime := time.Now()
 
+	// Проверяем минимальную длину пакета
+	if len(pkt.Data) < 20 {
+		log.Printf("WARNING: Packet too short (%d bytes), forwarding original", len(pkt.Data))
+		p.sender.Send(pkt.Data)
+		return
+	}
+
 	// Извлекаем IP и порты
 	srcIP, dstIP, err := p.extractIPs(pkt.Data)
 	if err != nil {
@@ -232,13 +239,23 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		p.updateStats(func(stats *PipelineStats) {
 			stats.CacheHits++
 		})
+		log.Printf("DEBUG: Cache hit for %s: bypass=%v strategy=%d",
+			dstIP.String(), shouldBypass, strategyID)
 	} else {
 		// Решаем, нужно ли обходить
-		// Используем dstIP.String() для получения строки IP
-		strat := p.strategyMgr.SelectStrategy()
+		strat := p.strategyMgr.SelectStrategy(
+			dstIP.String(),
+			flow.Hostname,
+			int(dstPort),
+			"tcp",
+		)
 		if strat != nil {
 			shouldBypass = true
 			strategyID = strat.ID
+			log.Printf("DEBUG: Selected strategy %d (%s) for %s (hostname: %s)",
+				strategyID, strat.Name, dstIP.String(), flow.Hostname)
+		} else {
+			log.Printf("DEBUG: No strategy for %s", dstIP.String())
 		}
 		p.ipCache.PutByIP(dstIP, flow.Hostname, shouldBypass, strategyID)
 		p.updateStats(func(stats *PipelineStats) {
@@ -250,18 +267,24 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	if shouldBypass {
 		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
 		if err == nil && result != nil {
-			// Отправляем модифицированные пакеты
+			// Проверяем каждый модифицированный пакет на минимальную длину
 			for _, modifiedPkt := range result.ModifiedPackets {
+				if len(modifiedPkt) < 20 {
+					log.Printf("WARNING: Modified packet too short (%d bytes), skipping", len(modifiedPkt))
+					continue
+				}
 				if err := p.sender.Send(modifiedPkt); err == nil {
 					p.updateStats(func(stats *PipelineStats) {
 						stats.PacketsModified++
 						stats.PacketsSent++
 					})
+				} else {
+					log.Printf("ERROR: Failed to send modified packet: %v", err)
 				}
 			}
 
 			// Если нужно, отправляем оригинал
-			if result.SendOriginal {
+			if result.SendOriginal && len(pkt.Data) >= 20 {
 				if err := p.sender.Send(pkt.Data); err == nil {
 					p.updateStats(func(stats *PipelineStats) {
 						stats.PacketsSent++

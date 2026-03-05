@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"syscall"
 	"time"
 	"unsafe"
@@ -42,12 +43,20 @@ func NewWinDivert(cfg Config) (*WinDivert, error) {
 
 // Start запускает захват пакетов через WinDivert
 func (w *WinDivert) Start(ctx context.Context) error {
+	log.Printf("DEBUG: Initializing WinDivert...")
+
+	// Проверяем наличие DLL
+	if _, err := os.Stat("WinDivert.dll"); err != nil {
+		log.Printf("WARNING: WinDivert.dll not found in current directory")
+	}
+
 	// Загружаем WinDivert DLL
 	dll, err := syscall.LoadDLL("WinDivert.dll")
 	if err != nil {
-		return fmt.Errorf("failed to load WinDivert.dll: %v. Download from https://github.com/basil00/WinDivert", err)
+		return fmt.Errorf("failed to load WinDivert.dll: %v", err)
 	}
 	w.dll = dll
+	log.Printf("DEBUG: WinDivert.dll loaded successfully")
 
 	// Получаем функции
 	openProc, err := dll.FindProc("WinDivertOpen")
@@ -56,11 +65,8 @@ func (w *WinDivert) Start(ctx context.Context) error {
 	}
 
 	// Создаем фильтр для захвата трафика
-	// По умолчанию захватываем TCP трафик на указанные порты
-	filter := fmt.Sprintf("tcp.DstPort == %d or tcp.DstPort == %d", 80, 443)
-	if len(w.config.Interface) > 0 && w.config.Interface != "any" {
-		// Можно добавить фильтр по интерфейсу
-	}
+	filter := "tcp.DstPort == 80 or tcp.DstPort == 443"
+	log.Printf("DEBUG: Using filter: %s", filter)
 
 	filterPtr, err := syscall.BytePtrFromString(filter)
 	if err != nil {
@@ -76,9 +82,10 @@ func (w *WinDivert) Start(ctx context.Context) error {
 	)
 
 	if handle == 0 {
-		return fmt.Errorf("failed to open WinDivert")
+		return fmt.Errorf("failed to open WinDivert - check if running as Administrator")
 	}
 	w.handle = WinDivertHandle(handle)
+	log.Printf("DEBUG: WinDivert opened successfully, handle=%v", handle)
 
 	// Запускаем обработку
 	go w.processPackets(ctx)

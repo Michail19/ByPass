@@ -26,6 +26,7 @@ type ModifierStats struct {
 
 // ModifyResult содержит результат модификации
 type ModifyResult struct {
+	StrategyID      int      // ID использованной стратегии
 	ModifiedPackets [][]byte // модифицированные версии пакета
 	SendOriginal    bool     // нужно ли отправлять оригинал
 	Delay           int      // задержка перед отправкой (ms)
@@ -48,8 +49,17 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 
 	pm.stats.PacketsProcessed++
 
+	// Получаем IP назначения из потока
+	dstIP := flow.GetDstIP()
+
 	// Определяем стратегию для этого потока
-	strat := pm.strategyManager.SelectStrategy()
+	strat := pm.strategyManager.SelectStrategy(
+		dstIP,
+		flow.Hostname,
+		int(flow.GetDstPort()),
+		"tcp",
+	)
+
 	if strat == nil {
 		// Нет стратегии - пропускаем без изменений
 		return &ModifyResult{
@@ -58,6 +68,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	}
 
 	result := &ModifyResult{
+		StrategyID:   strat.ID, // сохраняем ID стратегии
 		SendOriginal: true,
 	}
 

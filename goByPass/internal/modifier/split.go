@@ -10,6 +10,9 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
+	// Минимальный размер фрагмента - 20 байт (минимальный IP-пакет)
+	const minFragmentSize = 20
+
 	var fragments [][]byte
 	data := packet
 
@@ -29,10 +32,15 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		}
 	}
 
-	// Применяем разбиение
+	// Применяем разбиение, но проверяем минимальный размер
 	lastPos := 0
 	for _, pos := range splitPos {
 		if pos > lastPos && pos < len(data) {
+			// Проверяем, что фрагмент не слишком маленький
+			if pos-lastPos < minFragmentSize && len(data)-pos >= minFragmentSize {
+				// Пропускаем это разбиение
+				continue
+			}
 			fragments = append(fragments, data[lastPos:pos])
 			lastPos = pos
 		}
@@ -40,7 +48,17 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 
 	// Добавляем оставшуюся часть
 	if lastPos < len(data) {
-		fragments = append(fragments, data[lastPos:])
+		if len(data)-lastPos >= minFragmentSize {
+			fragments = append(fragments, data[lastPos:])
+		} else {
+			// Последний фрагмент слишком маленький - объединяем с предыдущим
+			if len(fragments) > 0 {
+				lastIdx := len(fragments) - 1
+				fragments[lastIdx] = append(fragments[lastIdx], data[lastPos:]...)
+			} else {
+				fragments = [][]byte{data}
+			}
+		}
 	}
 
 	// Если разбиение не дало результата, возвращаем оригинал

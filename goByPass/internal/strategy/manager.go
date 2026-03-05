@@ -83,9 +83,25 @@ func (m *Manager) GetStrategy(id int) (*Strategy, bool) {
 }
 
 // SelectStrategy выбирает стратегию для IP/хоста
-func (m *Manager) SelectStrategy() *Strategy {
+func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// Сначала пробуем найти стратегию по hostname
+	if hostname != "" {
+		// TODO: добавить логику выбора стратегии по hostname
+		// Например, для youtube.com использовать стратегию 8
+		for _, strat := range m.strategies {
+			// Здесь можно добавить проверку по hostname
+			// Пока просто логируем
+			if hostname == "youtube.com" && strat.ID == 8 {
+				return strat
+			}
+			if hostname == "discord.com" && strat.ID == 9 {
+				return strat
+			}
+		}
+	}
 
 	// Если есть активная стратегия, используем её
 	if m.activeID > 0 {
