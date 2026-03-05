@@ -86,10 +86,12 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 	// Извлекаем специфичную для протокола информацию
 	switch info.Protocol {
 	case ProtocolTLS:
+		info.IsTLS = true
 		if err := a.parseTLS(packet, info); err != nil {
 			// Не фатально, просто не смогли извлечь SNI
 		}
 	case ProtocolHTTP:
+		info.IsHTTP = true
 		if err := a.parseHTTP(packet, info); err != nil {
 			// Не фатально
 		}
@@ -101,8 +103,10 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 		// TODO: добавить парсинг QUIC
 	case ProtocolWebSocket:
 		// TODO: добавить парсинг WebSocket
-	default:
+	case ProtocolUnknown:
 		// Неизвестный протокол - игнорируем
+	default:
+		// На всякий случай обрабатываем все остальные значения
 	}
 
 	return info, nil
@@ -152,7 +156,18 @@ func (a *Analyzer) detectProtocol(data []byte) ProtocolType {
 		return ProtocolWebSocket
 	}
 
-	// По умолчанию возвращаем TCP
+	// По умолчанию возвращаем TCP для TCP-пакетов
+	// Здесь нужно определить, TCP это или UDP
+	if len(data) >= 9 {
+		protocol := data[9] // protocol field in IPv4 header
+		if protocol == 6 {
+			return ProtocolTCP
+		} else if protocol == 17 {
+			return ProtocolUDP
+		}
+	}
+
+	// Если не можем определить, возвращаем TCP как наиболее вероятный
 	return ProtocolTCP
 }
 

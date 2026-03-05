@@ -214,6 +214,12 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		} else if info.Host != "" {
 			flow.SetHostname(info.Host)
 		}
+		if info.IsTLS {
+			flow.SetTLS()
+		}
+		if info.IsHTTP {
+			flow.SetHTTP()
+		}
 	}
 
 	// Проверяем кэш
