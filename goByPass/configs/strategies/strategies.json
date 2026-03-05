@@ -105,5 +105,22 @@
     "priority": 5,
     "success_count": 0,
     "fail_count": 0
+  },
+  {
+    "id": 10,
+    "name": "passthrough",
+    "description": "Тестовая стратегия - без модификаций",
+    "apply_to_http": true,
+    "apply_to_tls": true,
+    "split_mode": 0,
+    "split_positions": [],
+    "disorder_mode": 0,
+    "disorder_ttl": 0,
+    "fake_mode": 0,
+    "fake_ttl": 0,
+    "http_mod_mode": 0,
+    "host_case": false,
+    "tls_record_split": false,
+    "priority": 1
   }
 ]

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -86,6 +87,12 @@ func (m *Manager) GetStrategy(id int) (*Strategy, bool) {
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// ВРЕМЕННО: используем тестовую стратегию
+	if strat, exists := m.strategies[10]; exists {
+		log.Printf("DEBUG: Using passthrough strategy for %s", ip)
+		return strat
+	}
 
 	// Сначала пробуем найти стратегию по hostname
 	if hostname != "" {

@@ -4,6 +4,7 @@
 package sender
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -180,13 +181,15 @@ func (s *RawSocketSender) GetStats() SenderStats {
 	return s.stats
 }
 
-// Send отправляет пакет через WinDivert
+// Send отправляет пакет через WinDivert с проверкой
 func (s *RawSender) Send(packet []byte) error {
 	if len(packet) < 20 {
 		s.stats.PacketsFailed++
-		log.Printf("ERROR: Packet too short: %d bytes", len(packet))
-		return ErrInvalidPacket
+		return fmt.Errorf("packet too short: %d bytes", len(packet))
 	}
+
+	// Сохраняем контрольную сумму перед отправкой
+	originalChecksum := binary.BigEndian.Uint16(packet[10:12])
 
 	dll, err := syscall.LoadDLL("WinDivert.dll")
 	if err != nil {
@@ -202,9 +205,9 @@ func (s *RawSender) Send(packet []byte) error {
 	}
 
 	var sendLen uint
-	var addr [64]byte // WINDIVERT_ADDRESS
+	var addr [64]byte
 
-	ret, _, callErr := sendProc.Call(
+	ret, _, _ := sendProc.Call(
 		uintptr(s.handle),
 		uintptr(unsafe.Pointer(&packet[0])),
 		uintptr(len(packet)),
@@ -213,12 +216,22 @@ func (s *RawSender) Send(packet []byte) error {
 	)
 
 	if ret == 0 {
-		errMsg := "unknown error"
-		if callErr != nil {
-			errMsg = callErr.Error()
-		}
+		lastErr := syscall.GetLastError()
+		log.Printf("ERROR: WinDivertSend failed: %v", lastErr)
 		s.stats.PacketsFailed++
-		return fmt.Errorf("WinDivertSend failed: %s", errMsg)
+		return fmt.Errorf("WinDivertSend failed: %v", lastErr)
+	}
+
+	// Проверяем, не изменился ли пакет
+	if sendLen != uint(len(packet)) {
+		log.Printf("WARNING: Sent %d bytes but expected %d", sendLen, len(packet))
+	}
+
+	// Проверяем контрольную сумму после отправки (WinDivert мог ее изменить)
+	newChecksum := binary.BigEndian.Uint16(packet[10:12])
+	if newChecksum != originalChecksum {
+		log.Printf("WARNING: WinDivert modified packet checksum from %x to %x",
+			originalChecksum, newChecksum)
 	}
 
 	s.stats.PacketsSent++
