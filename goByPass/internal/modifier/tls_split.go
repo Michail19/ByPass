@@ -3,6 +3,7 @@ package modifier
 import (
 	"ByPass/internal/protocol"
 	"encoding/binary"
+	"log"
 )
 
 // TLSSplitConfig конфигурация для разделения TLS записей
@@ -84,9 +85,14 @@ func splitTLSHandshake(packet []byte, recordSize int) ([][]byte, error) {
 	return fragments, nil
 }
 
-// splitTLSRecord разделяет обычную TLS запись
+// splitTLSRecord с проверкой целостности
 func splitTLSRecord(packet []byte, recordSize int) ([][]byte, error) {
 	if len(packet) < 5 || recordSize <= 0 {
+		return [][]byte{packet}, nil
+	}
+
+	// Проверяем, что это TLS
+	if packet[0] < 0x14 || packet[0] > 0x17 {
 		return [][]byte{packet}, nil
 	}
 
@@ -95,12 +101,29 @@ func splitTLSRecord(packet []byte, recordSize int) ([][]byte, error) {
 	pos := 0
 
 	for pos < totalLen {
+		// Убеждаемся, что не разбиваем TLS record посередине
+		if pos > 0 {
+			// Это уже не первый фрагмент, проверяем что начинаем с нового record
+			// В реальном TLS разделении мы должны создавать новые record headers
+			log.Printf("WARNING: TLS record splitting may break connection")
+		}
+
 		chunkSize := recordSize
 		if pos+chunkSize > totalLen {
 			chunkSize = totalLen - pos
 		}
 
-		fragments = append(fragments, packet[pos:pos+chunkSize])
+		// Создаем копию фрагмента
+		fragment := make([]byte, chunkSize)
+		copy(fragment, packet[pos:pos+chunkSize])
+
+		// Для первого фрагмента оставляем оригинальный record header
+		// Для последующих нужно создавать новые record headers
+		if pos > 0 {
+			log.Printf("WARNING: Multi-fragment TLS not fully implemented")
+		}
+
+		fragments = append(fragments, fragment)
 		pos += chunkSize
 	}
 

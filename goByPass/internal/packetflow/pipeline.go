@@ -148,26 +148,54 @@ func (p *Pipeline) Stop() {
 	close(p.resultChan)
 }
 
-// packetForwarder передает пакеты из капчера в канал
+// packetForwarder с буферизацией и контролем переполнения
 func (p *Pipeline) packetForwarder() {
+	// Создаем временный буфер для пакетов, которые не влезли в канал
+	tempBuffer := make([]capture.Packet, 0, 100)
+
 	for {
 		select {
 		case <-p.ctx.Done():
+			// Отправляем все из временного буфера перед выходом
+			for _, packet := range tempBuffer {
+				p.processPacket(&packet)
+			}
 			return
+
 		case packet := <-p.capturer.Packets():
 			p.updateStats(func(stats *PipelineStats) {
 				stats.PacketsReceived++
 				stats.LastPacketTime = time.Now()
 			})
 
-			// Неблокирующая отправка с таймаутом
+			// Сначала отправляем все из временного буфера
+			for len(tempBuffer) > 0 {
+				select {
+				case p.packetChan <- tempBuffer[0]:
+					tempBuffer = tempBuffer[1:]
+				default:
+					// Канал все еще переполнен, выходим
+					break
+				}
+			}
+
+			// Пытаемся отправить новый пакет
 			select {
 			case p.packetChan <- packet:
-			case <-time.After(100 * time.Millisecond):
-				log.Printf("WARNING: Timeout sending to packet channel, dropping packet")
-				p.updateStats(func(stats *PipelineStats) {
-					stats.PacketsDropped++
-				})
+				// Успешно
+			default:
+				// Канал переполнен, сохраняем во временный буфер
+				if len(tempBuffer) < cap(tempBuffer) {
+					tempBuffer = append(tempBuffer, packet)
+					log.Printf("WARNING: Packet channel full, buffering (%d/%d)",
+						len(tempBuffer), cap(tempBuffer))
+				} else {
+					// Буфер тоже переполнен - дропаем
+					p.updateStats(func(stats *PipelineStats) {
+						stats.PacketsDropped++
+					})
+					log.Printf("ERROR: Buffer full, dropping packet")
+				}
 			}
 		}
 	}

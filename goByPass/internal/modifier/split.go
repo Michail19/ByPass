@@ -20,7 +20,7 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
-	// Определяем MTU для фрагментации (splitPos[0] должен быть > 20)
+	// Определяем MTU для фрагментации
 	mtu := splitPos[0]
 	if mtu < 40 {
 		mtu = 40
@@ -40,10 +40,6 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 
 	result := make([][]byte, 0, len(fragments))
 	for _, frag := range fragments {
-		// Для каждого фрагмента пересчитываем TCP checksum
-		if len(frag.Data) >= 40 {
-			FixTCPChecksum(frag.Data)
-		}
 		result = append(result, frag.Data)
 	}
 

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 )
 
-// ApplyDisorder применяет нарушение порядка (отправка части пакета с низким TTL)
+// ApplyDisorder применяет нарушение порядка (отправка префикса с низким TTL + оригинал)
 func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl int) ([][]byte, error) {
 	if len(disorderPos) == 0 || ttl <= 0 {
 		return nil, nil
@@ -17,24 +17,47 @@ func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl in
 			continue
 		}
 
-		// Создаем копию первой части с низким TTL
+		// Проверяем, что это IPv4 пакет
+		if len(packet) < 20 || packet[0]>>4 != 4 {
+			continue
+		}
+
+		ipHeaderLen := int(packet[0]&0x0F) * 4
+
+		// Первая часть должна включать полный IP заголовок
+		if pos < ipHeaderLen {
+			pos = ipHeaderLen // Минимум - весь IP заголовок
+		}
+
+		// Создаем первую часть (с низким TTL)
 		firstPart := make([]byte, pos)
 		copy(firstPart, packet[:pos])
 
-		// Устанавливаем TTL
-		if err := setIPTTL(firstPart, ttl); err == nil {
-			results = append(results, firstPart)
-		}
+		// Убеждаемся, что первая часть имеет валидный IP заголовок
+		if len(firstPart) >= 20 {
+			// Обновляем totalLen
+			binary.BigEndian.PutUint16(firstPart[2:4], uint16(pos))
 
-		// Вторая часть (оригинал или с пересчитанной checksum)
-		secondPart := make([]byte, len(packet)-pos)
-		copy(secondPart, packet[pos:])
+			// Устанавливаем TTL
+			if err := setIPTTL(firstPart, ttl); err == nil {
+				// Пересчитываем IP checksum
+				recalculateIPChecksum(firstPart)
 
-		// Для второй части нужно пересчитать TCP checksum
-		if len(secondPart) >= 40 {
-			FixTCPChecksum(secondPart)
+				// Пересчитываем TCP checksum (длина изменилась)
+				if packet[9] == 6 { // TCP
+					if err := FixTCPChecksum(firstPart); err == nil {
+						results = append(results, firstPart)
+					}
+				} else {
+					results = append(results, firstPart)
+				}
+			}
 		}
-		results = append(results, secondPart)
+	}
+
+	// Добавляем оригинал в конец (важно для disorder)
+	if len(results) > 0 {
+		results = append(results, packet)
 	}
 
 	return results, nil

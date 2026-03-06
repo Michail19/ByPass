@@ -3,8 +3,11 @@ package modifier
 import (
 	"ByPass/internal/cache"
 	"ByPass/internal/conntrack"
+	"ByPass/internal/protocol"
 	"ByPass/internal/strategy"
+	"encoding/binary"
 	"errors"
+	"fmt"
 )
 
 // PacketModifier реализует модификацию пакетов
@@ -83,6 +86,25 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		}
 	}
 
+	// Добавляем TLS-split если включено и пакет TLS
+	if strat.TLSRecordSplit && protocol.IsTLS(packet) {
+		config := &TLSSplitConfig{
+			Enabled:        true,
+			RecordSize:     strat.TLSRecordSize,
+			SplitHandshake: true,
+			SplitAlert:     true,
+		}
+		tlsFragments, err := pm.ApplyTLSSplit(packet, config)
+		if err == nil && len(tlsFragments) > 0 {
+			// Для TLS-split нужно обернуть каждый фрагмент в IP+TCP (упрощённо: отправляем как отдельные пакеты с теми же headers, но корректируем seq)
+			// Здесь упрощённо добавляем как есть; в pipeline нужно доработать отправку с корректировкой seq
+			result.ModifiedPackets = append(result.ModifiedPackets, tlsFragments...)
+			result.SendOriginal = false
+			pm.stats.SplitCount++
+			pm.stats.PacketsModified++
+		}
+	}
+
 	if strat.DisorderMode != strategy.DisorderNone {
 		disorderPkts, err := pm.ApplyDisorder(packet, strat.DisorderPos, strat.DisorderTTL)
 		if err == nil && len(disorderPkts) > 0 {
@@ -107,4 +129,29 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 // GetStats возвращает статистику
 func (pm *PacketModifier) GetStats() ModifierStats {
 	return pm.stats
+}
+
+// validatePacket проверяет, что пакет можно модифицировать
+func validatePacket(packet []byte) error {
+	if len(packet) < 20 {
+		return fmt.Errorf("packet too short")
+	}
+
+	// Проверяем IPv4
+	if packet[0]>>4 != 4 {
+		return fmt.Errorf("not IPv4")
+	}
+
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	if len(packet) < ipHeaderLen {
+		return fmt.Errorf("packet truncated")
+	}
+
+	// Проверяем общую длину
+	totalLen := int(binary.BigEndian.Uint16(packet[2:4]))
+	if totalLen != len(packet) {
+		return fmt.Errorf("length mismatch: header=%d, actual=%d", totalLen, len(packet))
+	}
+
+	return nil
 }

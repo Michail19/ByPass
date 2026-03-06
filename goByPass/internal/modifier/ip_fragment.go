@@ -2,6 +2,7 @@ package modifier
 
 import (
 	"encoding/binary"
+	"fmt"
 	"log"
 )
 
@@ -64,11 +65,21 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 	var fragments []*IPFragment
 	offset := 0
 
+	// Проверка на TLS перед фрагментацией
+	isTLS := len(packet) > 5 && packet[0] == 0x16 && (packet[1] == 0x03)
+
 	for offset < dataLen {
 		// Размер данных для этого фрагмента
 		thisDataSize := maxDataSize
 		if offset+thisDataSize > dataLen {
 			thisDataSize = dataLen - offset
+		}
+
+		// Для TLS пакетов проверяем, не разбили ли мы запись
+		if isTLS && offset > 0 {
+			// Проверяем, что не разбили TLS record посередине
+			// Это сложно, лучше использовать TLS record splitting вместо IP фрагментации
+			log.Printf("WARNING: IP fragmentation may break TLS records")
 		}
 
 		// Создаем заголовок фрагмента
@@ -132,4 +143,80 @@ func calculateIPChecksum(header []byte) uint16 {
 		sum = (sum & 0xFFFF) + (sum >> 16)
 	}
 	return ^uint16(sum)
+}
+
+// CalculateTCPChecksum вычисляет контрольную сумму TCP (с псевдозаголовком)
+func CalculateTCPChecksum(packet []byte) uint16 {
+	if len(packet) < 40 { // IP(20) + TCP(20) минимум
+		return 0
+	}
+
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpLen := len(packet) - ipHeaderLen
+
+	// Создаем псевдозаголовок IPv4 (12 байт)
+	pseudo := make([]byte, 12)
+	copy(pseudo[0:4], packet[12:16]) // Source IP
+	copy(pseudo[4:8], packet[16:20]) // Dest IP
+	pseudo[8] = 0                    // Zero
+	pseudo[9] = packet[9]            // Protocol (6 for TCP)
+	pseudo[10] = byte(tcpLen >> 8)   // TCP length high
+	pseudo[11] = byte(tcpLen & 0xFF) // TCP length low
+
+	// Суммируем псевдозаголовок + TCP сегмент
+	tcpData := packet[ipHeaderLen:]
+
+	var sum uint32
+	// Псевдозаголовок
+	for i := 0; i < 12; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(pseudo[i:]))
+	}
+	// TCP заголовок + данные
+	for i := 0; i < len(tcpData); i += 2 {
+		if i+1 < len(tcpData) {
+			sum += uint32(binary.BigEndian.Uint16(tcpData[i:]))
+		} else {
+			sum += uint32(tcpData[i]) << 8
+		}
+	}
+
+	// Дополнение до 16 бит
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+
+	return ^uint16(sum)
+}
+
+// FixTCPChecksum с проверками
+func FixTCPChecksum(packet []byte) error {
+	if len(packet) < 40 {
+		return fmt.Errorf("packet too short")
+	}
+
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	if len(packet) < ipHeaderLen+20 {
+		return fmt.Errorf("packet too short for TCP header")
+	}
+
+	// Проверяем, что это TCP
+	if packet[9] != 6 {
+		return nil // Не TCP, не трогаем
+	}
+
+	// Проверяем длину TCP заголовка
+	tcpHeaderLen := int(packet[ipHeaderLen+12]>>4) * 4
+	if tcpHeaderLen < 20 || tcpHeaderLen > 60 {
+		return fmt.Errorf("invalid TCP header length: %d", tcpHeaderLen)
+	}
+
+	tcpOffset := ipHeaderLen + 16
+	packet[tcpOffset] = 0
+	packet[tcpOffset+1] = 0
+
+	checksum := CalculateTCPChecksum(packet)
+	packet[tcpOffset] = byte(checksum >> 8)
+	packet[tcpOffset+1] = byte(checksum & 0xFF)
+
+	return nil
 }

@@ -3,6 +3,7 @@ package modifier
 import (
 	"ByPass/internal/strategy"
 	"encoding/binary"
+	"fmt"
 )
 
 // ApplyFake создает поддельный пакет
@@ -13,6 +14,19 @@ func (pm *PacketModifier) ApplyFake(packet []byte, fakePos int, fakeTTL int, fak
 
 	fakePacket := make([]byte, len(packet))
 	copy(fakePacket, packet)
+
+	// Проверяем, является ли пакет ACK (flags ACK, no data)
+	isACK := false
+	if len(packet) >= 40 && packet[9] == 6 { // TCP
+		ipHeaderLen := int(packet[0]&0x0F) * 4
+		tcpHeaderOffset := ipHeaderLen
+		tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
+		dataLen := len(packet) - tcpHeaderOffset - tcpHeaderLen
+		flags := packet[tcpHeaderOffset+13]
+		if (flags&0x10) != 0 && dataLen == 0 {
+			isACK = true
+		}
+	}
 
 	switch fakeMode {
 	case strategy.FakeMD5Sig:
@@ -40,6 +54,12 @@ func (pm *PacketModifier) ApplyFake(packet []byte, fakePos int, fakeTTL int, fak
 		FixTCPChecksum(fakePacket)
 	}
 
+	// Для ACK можно добавить специфическую модификацию (пример: занижаем window size)
+	if isACK {
+		modifyTCPWindow(fakePacket, 42) // Пример изменения window
+		FixTCPChecksum(fakePacket)
+	}
+
 	// Устанавливаем низкий TTL для фейка
 	if err := setIPTTL(fakePacket, fakeTTL); err != nil {
 		return nil, err
@@ -48,39 +68,85 @@ func (pm *PacketModifier) ApplyFake(packet []byte, fakePos int, fakeTTL int, fak
 	return [][]byte{fakePacket, packet}, nil
 }
 
-// Реальная реализация addTCPOptionMD5
-func addTCPOptionMD5(packet []byte) {
+// modifyTCPWindow изменяет window size (для ACK)
+func modifyTCPWindow(packet []byte, window uint16) {
 	if len(packet) < 40 {
 		return
+	}
+
+	ipHeaderLen := (packet[0] & 0x0F) * 4
+	tcpHeaderOffset := int(ipHeaderLen)
+
+	if len(packet) < tcpHeaderOffset+16 {
+		return
+	}
+
+	// Window size в байтах 14-15 TCP заголовка
+	binary.BigEndian.PutUint16(packet[tcpHeaderOffset+14:], window)
+}
+
+// addTCPOptionMD5 добавляет опцию MD5 Signature в TCP заголовок
+func addTCPOptionMD5(packet []byte) error {
+	if len(packet) < 40 {
+		return fmt.Errorf("packet too short")
 	}
 
 	ipHeaderLen := int(packet[0]&0x0F) * 4
 	tcpHeaderOffset := ipHeaderLen
 
-	// Определяем длину TCP заголовка
-	tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
+	if len(packet) < tcpHeaderOffset+20 {
+		return fmt.Errorf("packet too short for TCP header")
+	}
 
-	// Создаем новый TCP заголовок с опцией MD5
-	newTCPHeader := make([]byte, tcpHeaderLen+18) // +18 для MD5 опции
-	copy(newTCPHeader, packet[tcpHeaderOffset:tcpHeaderOffset+tcpHeaderLen])
+	// Определяем длину TCP заголовка (в 32-битных словах)
+	tcpHeaderLenWords := int(packet[tcpHeaderOffset+12] >> 4)
+	tcpHeaderLen := tcpHeaderLenWords * 4
 
-	// Добавляем опцию MD5 (kind=19, len=18)
-	newTCPHeader[tcpHeaderLen] = 19   // kind
-	newTCPHeader[tcpHeaderLen+1] = 18 // length
-	// Данные опции (16 байт) оставляем нулями (упрощенно)
+	// Создаем новый TCP заголовок с местом для опции MD5
+	newTCPHeaderLen := tcpHeaderLen + 20
+	if newTCPHeaderLen > 60 { // Максимальная длина TCP заголовка
+		return fmt.Errorf("TCP header too long")
+	}
 
-	// Обновляем длину TCP заголовка в оригинальном пакете
-	newTCPHeader[12] = byte(((tcpHeaderLen+18)/4)<<4) | (packet[tcpHeaderOffset+12] & 0x0F)
+	// Создаем новый полный пакет
+	newPacketLen := ipHeaderLen + newTCPHeaderLen + (len(packet) - tcpHeaderOffset - tcpHeaderLen)
+	newPacket := make([]byte, newPacketLen)
 
-	// Собираем новый пакет
-	newPacket := make([]byte, ipHeaderLen+len(newTCPHeader)+(len(packet)-tcpHeaderOffset-tcpHeaderLen))
-	copy(newPacket, packet[:ipHeaderLen])
-	copy(newPacket[ipHeaderLen:], newTCPHeader)
-	copy(newPacket[ipHeaderLen+len(newTCPHeader):], packet[tcpHeaderOffset+tcpHeaderLen:])
+	// Копируем IP заголовок
+	copy(newPacket[:ipHeaderLen], packet[:ipHeaderLen])
 
-	// Копируем обратно в оригинальный слайс (но это сложно, проще переписать логику)
-	// Для простоты будем считать, что fakePacket уже содержит новый пакет
+	// Копируем старый TCP заголовок
+	copy(newPacket[ipHeaderLen:ipHeaderLen+tcpHeaderLen], packet[tcpHeaderOffset:tcpHeaderOffset+tcpHeaderLen])
+
+	// Добавляем опцию MD5 в конец TCP заголовка
+	optPos := ipHeaderLen + tcpHeaderLen
+	newPacket[optPos] = 19   // kind MD5
+	newPacket[optPos+1] = 18 // length
+	// Данные опции (16 байт) оставляем нулями
+
+	// Копируем оставшиеся данные (после TCP заголовка)
+	if len(packet) > tcpHeaderOffset+tcpHeaderLen {
+		copy(newPacket[ipHeaderLen+newTCPHeaderLen:],
+			packet[tcpHeaderOffset+tcpHeaderLen:])
+	}
+
+	// Обновляем длину TCP заголовка в IP пакете
+	newTCPHeaderLenWords := newTCPHeaderLen / 4
+	newPacket[ipHeaderLen+12] = byte(newTCPHeaderLenWords<<4) | (packet[tcpHeaderOffset+12] & 0x0F)
+
+	// Обновляем общую длину в IP заголовке
+	newTotalLen := uint16(newPacketLen)
+	binary.BigEndian.PutUint16(newPacket[2:4], newTotalLen)
+
+	// Пересчитываем IP checksum
+	binary.BigEndian.PutUint16(newPacket[10:12], 0)
+	ipChecksum := calculateIPChecksum(newPacket[:ipHeaderLen])
+	binary.BigEndian.PutUint16(newPacket[10:12], ipChecksum)
+
+	// Заменяем оригинальный пакет
 	copy(packet, newPacket)
+
+	return nil
 }
 
 // modifyTCPSeq изменяет sequence number
