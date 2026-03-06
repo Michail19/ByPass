@@ -91,6 +91,10 @@ type Flow struct {
 	UpdatedAt  time.Time
 	LastPacket time.Time
 
+	// Исходные IP для определения направления
+	SrcIPStr string
+	DstIPStr string
+
 	// TCP specific
 	SeqClient uint32 // последний sequence number от клиента
 	SeqServer uint32 // последний sequence number от сервера
@@ -116,14 +120,21 @@ type Flow struct {
 }
 
 // NewFlow создает новый поток
-func NewFlow(key FlowKey) *Flow {
+func NewFlow(key FlowKey, srcIPStr, dstIPStr string) *Flow {
 	return &Flow{
-		Key:       key,
-		State:     FlowStateNew,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		Key:        key,
+		SrcIPStr:   srcIPStr,
+		DstIPStr:   dstIPStr,
+		State:      FlowStateNew,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+		ClientData: make([][]byte, 0, maxReassemblyPackets),
+		ServerData: make([][]byte, 0, maxReassemblyPackets),
 	}
 }
+
+// Максимальный размер буфера для reassembly (например, 10 пакетов)
+const maxReassemblyPackets = 10
 
 // Update обновляет состояние потока на основе пакета
 func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
@@ -138,16 +149,34 @@ func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
 		f.AckClient = ack
 		f.PacketsOut++
 		f.BytesOut += uint64(length)
+
+		// Ограничиваем размер буфера
 		if length > 0 && data != nil {
-			f.ClientData = append(f.ClientData, data)
+			// Создаем копию данных
+			dataCopy := make([]byte, length)
+			copy(dataCopy, data)
+
+			f.ClientData = append(f.ClientData, dataCopy)
+			// Ограничиваем размер
+			if len(f.ClientData) > maxReassemblyPackets {
+				// Удаляем самые старые данные
+				f.ClientData = f.ClientData[1:]
+			}
 		}
 	} else {
 		f.SeqServer = seq
 		f.AckServer = ack
 		f.PacketsIn++
 		f.BytesIn += uint64(length)
+
 		if length > 0 && data != nil {
-			f.ServerData = append(f.ServerData, data)
+			dataCopy := make([]byte, length)
+			copy(dataCopy, data)
+
+			f.ServerData = append(f.ServerData, dataCopy)
+			if len(f.ServerData) > maxReassemblyPackets {
+				f.ServerData = f.ServerData[1:]
+			}
 		}
 	}
 

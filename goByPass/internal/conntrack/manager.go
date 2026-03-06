@@ -78,7 +78,7 @@ func (m *Manager) GetOrCreate(
 		m.evictOldest()
 	}
 
-	flow = NewFlow(key)
+	flow = NewFlow(key, srcIP.String(), dstIP.String())
 	m.flows[key] = flow
 	m.stats.CreatedFlows++
 	m.stats.TotalFlows++
@@ -150,6 +150,13 @@ func (m *Manager) cleanupLoop() {
 	}
 }
 
+// IsExpired проверяет, истек ли поток
+func (f *Flow) IsExpired(timeout time.Duration, now time.Time) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return now.Sub(f.UpdatedAt) > timeout
+}
+
 // cleanup удаляет потоки, которые не обновлялись дольше timeout
 func (m *Manager) cleanup() {
 	m.mu.Lock()
@@ -157,7 +164,8 @@ func (m *Manager) cleanup() {
 
 	now := time.Now()
 	for key, flow := range m.flows {
-		if now.Sub(flow.UpdatedAt) > m.timeout {
+		// Используем метод с блокировкой
+		if flow.IsExpired(m.timeout, now) {
 			delete(m.flows, key)
 			m.stats.ExpiredFlows++
 		}
