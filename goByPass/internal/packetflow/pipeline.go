@@ -159,10 +159,11 @@ func (p *Pipeline) packetForwarder() {
 				stats.LastPacketTime = time.Now()
 			})
 
+			// Неблокирующая отправка с таймаутом
 			select {
 			case p.packetChan <- packet:
-			default:
-				// Канал переполнен - дропаем пакет
+			case <-time.After(100 * time.Millisecond):
+				log.Printf("WARNING: Timeout sending to packet channel, dropping packet")
 				p.updateStats(func(stats *PipelineStats) {
 					stats.PacketsDropped++
 				})
@@ -191,16 +192,33 @@ func (p *Pipeline) worker(id int) {
 func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	startTime := time.Now()
 
-	// Просто пересылаем пакет без изменений
-	if err := p.sender.Send(pkt.Data); err != nil {
-		log.Printf("ERROR: Failed to forward packet: %v", err)
-	} else {
-		p.updateStats(func(stats *PipelineStats) {
-			stats.PacketsReceived++
-			stats.PacketsSent++
-			stats.PacketsProcessed++
-		})
+	if len(pkt.Data) < 20 {
+		log.Printf("WARNING: Packet too short (%d bytes) from %v, hex: % x",
+			len(pkt.Data), pkt.Interface, pkt.Data[:len(pkt.Data)])
+		// Все равно пытаемся отправить, может быть это валидный пакет
 	}
+
+	// Сохраняем адрес из пакета
+	addr := pkt.Addr
+
+	// Используем специальный метод отправки с адресом
+	if rs, ok := p.sender.(*sender.RawSender); ok && len(addr) == 64 {
+		// Это WinDivert sender - используем SendWithAddr
+		if err := rs.SendWithAddr(pkt.Data, addr); err != nil {
+			log.Printf("ERROR: Failed to send packet via WinDivert: %v", err)
+		}
+	} else {
+		// Обычный sender (raw socket)
+		if err := p.sender.Send(pkt.Data); err != nil {
+			log.Printf("ERROR: Failed to send packet: %v", err)
+		}
+	}
+
+	p.updateStats(func(stats *PipelineStats) {
+		stats.PacketsReceived++
+		stats.PacketsSent++
+		stats.PacketsProcessed++
+	})
 
 	processTime := time.Since(startTime)
 	p.updateStats(func(stats *PipelineStats) {

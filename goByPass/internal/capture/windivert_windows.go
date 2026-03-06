@@ -41,7 +41,7 @@ func NewWinDivert(cfg Config) (*WinDivert, error) {
 	}, nil
 }
 
-// Start запускает захват пакетов через WinDivert
+// Start запускает захват пакетов
 func (w *WinDivert) Start(ctx context.Context) error {
 	log.Printf("DEBUG: Initializing WinDivert...")
 
@@ -59,43 +59,63 @@ func (w *WinDivert) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to find WinDivertOpen: %v", err)
 	}
 
-	// Ловим пакеты в обе стороны
-	filter := "tcp.DstPort == 80 or tcp.DstPort == 443 or tcp.SrcPort == 80 or tcp.SrcPort == 443"
-	log.Printf("DEBUG: Using filter: %s", filter)
-
+	// Проверяем, что фильтр корректен
+	filter := "tcp.DstPort == 443 or tcp.DstPort == 80"
 	filterPtr, err := syscall.BytePtrFromString(filter)
 	if err != nil {
 		return fmt.Errorf("failed to create filter: %v", err)
 	}
 
-	// WinDivertOpen(filter, layer, priority, flags)
-	handle, _, _ := openProc.Call(
-		uintptr(unsafe.Pointer(filterPtr)),
-		0, // WINDIVERT_LAYER_NETWORK
-		0, // priority
-		0, // flags
-	)
+	// Пробуем открыть с разными флагами
+	flags := []int{0, 1} // 0=normal, 1=sniff
 
-	if handle == 0 {
-		return fmt.Errorf("failed to open WinDivert")
+	for _, flag := range flags {
+		log.Printf("DEBUG: Trying to open WinDivert with flag=%d", flag)
+
+		handle, _, _ := openProc.Call(
+			uintptr(unsafe.Pointer(filterPtr)),
+			0, // WINDIVERT_LAYER_NETWORK
+			0, // priority
+			uintptr(flag),
+		)
+
+		if handle != 0 {
+			w.handle = WinDivertHandle(handle)
+			log.Printf("DEBUG: WinDivert opened successfully with flag=%d, handle=%v", flag, handle)
+
+			// Проверяем, что handle действительно работает
+			testProc, err := dll.FindProc("WinDivertGetParam")
+			if err == nil {
+				var param uint
+				ret, _, _ := testProc.Call(
+					uintptr(handle),
+					0, // WINDIVERT_PARAM_QUEUE_LEN
+					uintptr(unsafe.Pointer(&param)),
+				)
+				if ret != 0 {
+					log.Printf("DEBUG: WinDivert param test successful, queue_len=%d", param)
+				}
+			}
+
+			go w.processPackets(ctx)
+			log.Printf("WinDivert started on Windows with flag=%d", flag)
+			return nil
+		}
+
+		lastErr := syscall.GetLastError()
+		log.Printf("DEBUG: WinDivertOpen failed with flag=%d, lastError=%v", flag, lastErr)
 	}
-	w.handle = WinDivertHandle(handle)
-	log.Printf("DEBUG: WinDivert opened successfully, handle=%v", handle)
 
-	// Сохраняем процедуру для recv
-	recvProc, err := dll.FindProc("WinDivertRecv")
-	if err != nil {
-		return fmt.Errorf("failed to find WinDivertRecv: %v", err)
-	}
-	w.recvProc = recvProc
-
-	go w.processPackets(ctx)
-	log.Printf("WinDivert started")
-	return nil
+	return fmt.Errorf("failed to open WinDivert with any flags")
 }
 
 // GetHandle возвращает WinDivert handle
 func (w *WinDivert) GetHandle() uintptr {
+	if w == nil || w.handle == 0 {
+		log.Printf("WARNING: WinDivert.GetHandle called with nil or zero handle")
+		return 0
+	}
+	log.Printf("DEBUG: WinDivert.GetHandle returning: %v", uintptr(w.handle))
 	return uintptr(w.handle)
 }
 
@@ -127,6 +147,7 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 	}
 
 	buf := make([]byte, w.config.MaxPacketLen)
+	dropCount := 0
 
 	for {
 		select {
@@ -135,9 +156,8 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			// WinDivertRecv(handle, packet, packetLen, &recvLen, &addr)
 			var recvLen uint
-			var addr [64]byte // WINDIVERT_ADDRESS
+			var addr [64]byte
 
 			ret, _, _ := recvProc.Call(
 				uintptr(w.handle),
@@ -157,20 +177,29 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 			addrCopy := make([]byte, 64)
 			copy(addrCopy, addr[:])
 
+			dataCopy := make([]byte, recvLen)
+			copy(dataCopy, buf[:recvLen])
+
 			packet := Packet{
 				ID:        uint32(time.Now().UnixNano()),
-				Data:      make([]byte, recvLen),
+				Data:      dataCopy,
 				Length:    int(recvLen),
 				Timestamp: time.Now().UnixNano(),
-				Addr:      addrCopy, // Сохраняем адрес!
+				Addr:      addrCopy,
 			}
-			copy(packet.Data, buf[:recvLen])
 
-			// Отправляем в канал
+			// Неблокирующая отправка с подсчетом дропов
 			select {
 			case w.packets <- packet:
+				if dropCount > 0 {
+					log.Printf("Recovered from drop, %d packets were dropped", dropCount)
+					dropCount = 0
+				}
 			default:
-				log.Printf("Packet channel full")
+				dropCount++
+				if dropCount%100 == 0 {
+					log.Printf("WARNING: Packet channel full, dropped %d packets so far", dropCount)
+				}
 			}
 		}
 	}

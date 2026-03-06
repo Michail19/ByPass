@@ -200,7 +200,24 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	// Модификатор пакетов
 	packetModifier := modifier.NewPacketModifier(strategyMgr, ipCache)
 
-	// Захватчик
+	// Сначала создаем отправитель (может быть raw socket как fallback)
+	var s sender.Sender
+	var err error
+
+	// Пытаемся создать WinDivert отправитель сначала
+	// WinDivert.dll должен быть доступен
+	s, err = sender.NewSender(sender.Config{
+		Interface:   cfg.Sender.Interface,
+		BufferSize:  cfg.Sender.BufferSize,
+		SendTimeout: cfg.Sender.SendTimeout,
+		BatchSize:   cfg.Sender.BatchSize,
+	})
+	if err != nil {
+		log.Printf("Failed to create sender: %v", err)
+		return nil, err
+	}
+
+	// Теперь создаем захватчик
 	capturer, err := capture.New(capture.Config{
 		QueueNum:     cfg.Capture.QueueNum,
 		BufferSize:   cfg.Capture.BufferSize,
@@ -209,35 +226,40 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	})
 
 	if err != nil {
+		s.Close()
 		return nil, fmt.Errorf("failed to create capturer: %v", err)
 	}
 
-	// Отправитель - создаем после захватчика, чтобы проверить тип
-	var s sender.Sender
-
-	// Проверяем, является ли захватчик WinDivert
-	if wd, ok := capturer.(*capture.WinDivert); ok {
-		// Используем общий handle
-		s, err = sender.NewSenderWithHandle(wd.GetHandle(), sender.Config{
-			Interface:   cfg.Sender.Interface,
-			BufferSize:  cfg.Sender.BufferSize,
-			SendTimeout: cfg.Sender.SendTimeout,
-			BatchSize:   cfg.Sender.BatchSize,
-		})
-		log.Printf("Using WinDivert sender with shared handle")
-	} else {
-		// Обычный sender
-		s, err = sender.NewSender(sender.Config{
-			Interface:   cfg.Sender.Interface,
-			BufferSize:  cfg.Sender.BufferSize,
-			SendTimeout: cfg.Sender.SendTimeout,
-			BatchSize:   cfg.Sender.BatchSize,
-		})
+	// ВАЖНО: Запускаем захватчик, чтобы он открыл WinDivert и получил handle
+	if err := capturer.Start(ctx); err != nil {
+		s.Close()
+		capturer.Stop()
+		return nil, fmt.Errorf("failed to start capturer: %v", err)
 	}
 
-	if err != nil {
-		capturer.Stop()
-		return nil, fmt.Errorf("failed to create sender: %v", err)
+	// ТЕПЕРЬ можно получить handle
+	handle := capturer.GetHandle()
+	log.Printf("DEBUG: Got handle from capturer after Start: %v", handle)
+
+	// Если это WinDivert и handle валидный, пересоздаем sender с общим handle
+	if handle != 0 {
+		if _, ok := s.(*sender.RawSender); ok {
+			// Закрываем старый sender (он открыл свой собственный handle)
+			s.Close()
+
+			// Создаем новый sender с общим handle
+			s, err = sender.NewSenderWithHandle(handle, sender.Config{
+				Interface:   cfg.Sender.Interface,
+				BufferSize:  cfg.Sender.BufferSize,
+				SendTimeout: cfg.Sender.SendTimeout,
+				BatchSize:   cfg.Sender.BatchSize,
+			})
+			if err != nil {
+				capturer.Stop()
+				return nil, fmt.Errorf("failed to create sender with shared handle: %v", err)
+			}
+			log.Printf("Using WinDivert sender with shared handle: %v", handle)
+		}
 	}
 
 	// Конвейер

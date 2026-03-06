@@ -211,51 +211,121 @@ func (s *RawSocketSender) GetStats() SenderStats {
 	return s.stats
 }
 
-// Send отправляет пакет через WinDivert с проверкой
+// Send отправляет пакет через WinDivert с улучшенной диагностикой
 func (s *RawSender) Send(packet []byte) error {
 	if len(packet) < 20 {
 		s.stats.PacketsFailed++
-		return fmt.Errorf("%w: packet too short: %d bytes", ErrInvalidPacket, len(packet))
+		log.Printf("ERROR: Packet too short: %d bytes", len(packet))
+		return fmt.Errorf("packet too short: %d bytes", len(packet))
 	}
 
-	// Для отладки - логируем первые 20 байт пакета
-	log.Printf("DEBUG: Sending packet: first 20 bytes: % x", packet[:20])
-
-	// Проверяем IP-заголовок
+	// Детальный анализ пакета
 	version := packet[0] >> 4
-	if version != 4 {
-		log.Printf("WARNING: Non-IPv4 packet (version=%d) via WinDivert", version)
+	ihl := packet[0] & 0x0F
+	totalLen := int(packet[2])<<8 | int(packet[3])
+	protocol := packet[9]
+	srcIP := net.IP(packet[12:16])
+	dstIP := net.IP(packet[16:20])
+
+	log.Printf("DEBUG: Packet details - Version:%d IHL:%d TotalLen:%d Protocol:%d Src:%s Dst:%s",
+		version, ihl, totalLen, protocol, srcIP, dstIP)
+
+	if totalLen != len(packet) {
+		log.Printf("WARNING: Total length mismatch: header=%d, actual=%d", totalLen, len(packet))
 	}
 
-	// Адрес должен быть передан из capture
-	// В тестовом режиме используем нулевой адрес
-	var addr [64]byte
+	dll, err := syscall.LoadDLL("WinDivert.dll")
+	if err != nil {
+		s.stats.PacketsFailed++
+		return fmt.Errorf("failed to load WinDivert.dll: %v", err)
+	}
+	defer dll.Release()
+
+	sendProc, err := dll.FindProc("WinDivertSend")
+	if err != nil {
+		s.stats.PacketsFailed++
+		return fmt.Errorf("failed to find WinDivertSend: %v", err)
+	}
 
 	var sendLen uint
+	var addr [64]byte
 
-	// Используем сохраненную процедуру
-	ret, _, _ := s.sendProc.Call(
+	// Очищаем последнюю ошибку перед вызовом
+	//syscall.SetLastError(0)
+
+	log.Printf("DEBUG: Calling WinDivertSend with handle=%v, packetLen=%d", s.handle, len(packet))
+
+	ret, _, callErr := sendProc.Call(
 		uintptr(s.handle),
 		uintptr(unsafe.Pointer(&packet[0])),
 		uintptr(len(packet)),
 		uintptr(unsafe.Pointer(&sendLen)),
-		uintptr(unsafe.Pointer(&addr[0])), // Адрес может быть нулевым
+		uintptr(unsafe.Pointer(&addr[0])),
 	)
 
+	// Получаем последнюю ошибку Windows
+	lastErr := syscall.GetLastError()
+
 	if ret == 0 {
-		lastErr := syscall.GetLastError()
+		errMsg := "unknown error"
+		if callErr != nil {
+			errMsg = callErr.Error()
+			log.Printf(errMsg)
+		}
+		log.Printf("ERROR: WinDivertSend failed - ret=0, callErr=%v, lastError=%v", callErr, lastErr)
+		log.Printf("ERROR: Failed packet - length=%d, protocol=%d, dst=%s", len(packet), protocol, dstIP)
 		s.stats.PacketsFailed++
-		return fmt.Errorf("WinDivertSend failed: %v", lastErr)
+		return fmt.Errorf("WinDivertSend failed: %v (lastError: %v)", callErr, lastErr)
 	}
 
 	// Проверяем, что все данные отправлены
 	if sendLen != uint(len(packet)) {
-		log.Printf("WARNING: WinDivert sent %d bytes but expected %d", sendLen, len(packet))
+		log.Printf("WARNING: Sent %d bytes but expected %d", sendLen, len(packet))
+	}
+
+	log.Printf("DEBUG: Successfully sent %d bytes via WinDivert", sendLen)
+	s.stats.PacketsSent++
+	s.stats.BytesSent += uint64(sendLen)
+
+	return nil
+}
+
+// SendWithAddr отправляет пакет с адресом
+func (s *RawSender) SendWithAddr(packet []byte, addr []byte) error {
+	// Проверяем handle
+	if s.handle == 0 {
+		log.Printf("CRITICAL: Attempting to send with zero handle!")
+		s.stats.PacketsFailed++
+		return fmt.Errorf("invalid sender handle (0)")
+	}
+
+	log.Printf("DEBUG: SendWithAddr using handle=%v, packetLen=%d, addrLen=%d",
+		s.handle, len(packet), len(addr))
+
+	if len(packet) < 20 {
+		s.stats.PacketsFailed++
+		return fmt.Errorf("packet too short: %d bytes", len(packet))
+	}
+
+	var sendLen uint
+	ret, _, callErr := s.sendProc.Call(
+		uintptr(s.handle),
+		uintptr(unsafe.Pointer(&packet[0])),
+		uintptr(len(packet)),
+		uintptr(unsafe.Pointer(&sendLen)),
+		uintptr(unsafe.Pointer(&addr[0])),
+	)
+
+	if ret == 0 {
+		lastErr := syscall.GetLastError()
+		log.Printf("ERROR: WinDivertSend failed - handle=%v, ret=0, callErr=%v, lastErr=%v",
+			s.handle, callErr, lastErr)
+		s.stats.PacketsFailed++
+		return fmt.Errorf("WinDivertSend failed: %v (lastErr: %v)", callErr, lastErr)
 	}
 
 	s.stats.PacketsSent++
 	s.stats.BytesSent += uint64(sendLen)
-
 	return nil
 }
 
@@ -309,6 +379,12 @@ func (s *RawSender) GetStats() SenderStats {
 
 // newWindowsSenderWithHandle создает отправитель с существующим handle
 func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
+	log.Printf("DEBUG: Creating sender with handle: %v", handle)
+
+	if handle == 0 {
+		return nil, fmt.Errorf("invalid handle (0)")
+	}
+
 	// Загружаем DLL для отправки
 	dll, err := syscall.LoadDLL("WinDivert.dll")
 	if err != nil {
@@ -328,4 +404,54 @@ func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
 		dll:      dll,
 		sendProc: sendProc,
 	}, nil
+}
+
+// calculateChecksum вычисляет контрольную сумму для TCP/UDP
+func calculateChecksum(data []byte) uint16 {
+	var sum uint32
+	for i := 0; i < len(data)-1; i += 2 {
+		sum += uint32(data[i])<<8 | uint32(data[i+1])
+	}
+	if len(data)%2 == 1 {
+		sum += uint32(data[len(data)-1]) << 8
+	}
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
+
+// fixTCPChecksum пересчитывает TCP контрольную сумму
+func fixTCPChecksum(packet []byte) {
+	if len(packet) < 40 {
+		return
+	}
+
+	ipHeaderLen := (packet[0] & 0x0F) * 4
+	tcpOffset := int(ipHeaderLen)
+
+	if len(packet) < tcpOffset+20 {
+		return
+	}
+
+	// Обнуляем текущую контрольную сумму
+	packet[tcpOffset+16] = 0
+	packet[tcpOffset+17] = 0
+
+	// Создаем псевдо-заголовок для TCP
+	pseudo := make([]byte, 12)
+	copy(pseudo[0:4], packet[12:16])                // Source IP
+	copy(pseudo[4:8], packet[16:20])                // Dest IP
+	pseudo[8] = 0                                   // Zero
+	pseudo[9] = 6                                   // Protocol TCP
+	pseudo[10] = byte(len(packet)-tcpOffset) >> 8   // TCP length high
+	pseudo[11] = byte(len(packet)-tcpOffset) & 0xFF // TCP length low
+
+	// Вычисляем сумму для псевдо-заголовка + TCP заголовок + данные
+	tcpData := packet[tcpOffset:]
+	fullData := append(pseudo, tcpData...)
+
+	checksum := calculateChecksum(fullData)
+	packet[tcpOffset+16] = byte(checksum >> 8)
+	packet[tcpOffset+17] = byte(checksum & 0xFF)
 }
