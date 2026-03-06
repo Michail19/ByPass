@@ -2,6 +2,7 @@ package packetflow
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -207,15 +208,16 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		return
 	}
 
-	srcPort, dstPort, err := p.extractPorts(pkt.Data)
+	// В processPacket, замените вызов extractPorts:
+	srcPort, dstPort, protocol, err := p.extractPorts(pkt.Data)
 	if err != nil {
 		log.Printf("WARNING: Failed to extract ports: %v", err)
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
 	}
 
-	// Получаем или создаем поток
-	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, p.getProtocol(pkt.Data))
+	// При создании потока используйте правильный протокол
+	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
 
 	// Анализируем пакет
 	info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
@@ -395,22 +397,29 @@ func (p *Pipeline) extractIPs(packet []byte) (srcIP, dstIP net.IP, err error) {
 	return nil, nil, fmt.Errorf("unsupported IP version")
 }
 
-// extractPorts извлекает порты из пакета
-func (p *Pipeline) extractPorts(packet []byte) (srcPort, dstPort uint16, err error) {
+// extractPorts извлекает source и destination порты только для TCP/UDP
+func (p *Pipeline) extractPorts(packet []byte) (srcPort, dstPort uint16, protocol uint8, err error) {
 	if len(packet) < 20 {
-		return 0, 0, fmt.Errorf("packet too short")
+		return 0, 0, 0, fmt.Errorf("packet too short")
+	}
+
+	protocol = packet[9]
+
+	// Только для TCP (6) и UDP (17)
+	if protocol != 6 && protocol != 17 {
+		return 0, 0, protocol, nil
 	}
 
 	ipHeaderLen := (packet[0] & 0x0F) * 4
 	if len(packet) < int(ipHeaderLen)+4 {
-		return 0, 0, fmt.Errorf("packet too short for TCP header")
+		return 0, 0, protocol, fmt.Errorf("packet too short for transport header")
 	}
 
-	tcpOffset := int(ipHeaderLen)
-	srcPort = uint16(packet[tcpOffset])<<8 | uint16(packet[tcpOffset+1])
-	dstPort = uint16(packet[tcpOffset+2])<<8 | uint16(packet[tcpOffset+3])
+	transportOffset := int(ipHeaderLen)
+	srcPort = binary.BigEndian.Uint16(packet[transportOffset:])
+	dstPort = binary.BigEndian.Uint16(packet[transportOffset+2:])
 
-	return srcPort, dstPort, nil
+	return srcPort, dstPort, protocol, nil
 }
 
 // getProtocol возвращает протокол пакета

@@ -12,16 +12,14 @@ type IPFragment struct {
 	MoreFragments bool
 }
 
-// FragmentIPPacket разбивает IP-пакет на фрагменты
-func FragmentIPPacket(packet []byte, fragmentSize int) ([]*IPFragment, error) {
+// FragmentIPPacket разбивает IP-пакет на фрагменты (RFC 791)
+func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 	if len(packet) < 20 {
 		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
 	}
 
-	// Проверяем, что это IPv4
-	version := packet[0] >> 4
-	if version != 4 {
-		log.Printf("WARNING: Not an IPv4 packet (version=%d), cannot fragment", version)
+	// Проверяем IPv4
+	if packet[0]>>4 != 4 {
 		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
 	}
 
@@ -43,6 +41,9 @@ func FragmentIPPacket(packet []byte, fragmentSize int) ([]*IPFragment, error) {
 	id := binary.BigEndian.Uint16(packet[4:6])
 
 	// Данные начинаются после заголовка
+	flags := packet[6] >> 5
+
+	// Данные после заголовка
 	if totalLen <= ihl {
 		log.Printf("WARNING: No data in packet, totalLen=%d, ihl=%d", totalLen, ihl)
 		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
@@ -51,47 +52,44 @@ func FragmentIPPacket(packet []byte, fragmentSize int) ([]*IPFragment, error) {
 	data := packet[ihl:totalLen]
 	dataLen := len(data)
 
-	// Рассчитываем размер данных в каждом фрагменте (должен быть кратен 8 для IPv4)
-	fragDataSize := (fragmentSize - ihl) & ^7
-	if fragDataSize <= 8 { // Слишком маленький размер
-		fragDataSize = 1400 // безопасное значение по умолчанию
-		log.Printf("DEBUG: Using default fragment size: %d", fragDataSize)
+	// Максимальный размер данных во фрагменте (должен быть кратен 8)
+	maxDataSize := (mtu - ihl) & ^7
+	if maxDataSize <= 0 {
+		maxDataSize = 1400
 	}
 
-	log.Printf("DEBUG: Fragmenting packet ID=%d, totalLen=%d, ihl=%d, dataLen=%d, fragSize=%d",
-		id, totalLen, ihl, dataLen, fragDataSize)
+	log.Printf("DEBUG: Fragmenting packet ID=%d, totalLen=%d, ihl=%d, dataLen=%d, maxDataSize=%d",
+		id, totalLen, ihl, dataLen, maxDataSize)
 
 	var fragments []*IPFragment
-	fragOffset := 0
+	offset := 0
 
-	for fragOffset < dataLen {
+	for offset < dataLen {
 		// Размер данных для этого фрагмента
-		thisFragSize := fragDataSize
-		if fragOffset+thisFragSize > dataLen {
-			thisFragSize = dataLen - fragOffset
+		thisDataSize := maxDataSize
+		if offset+thisDataSize > dataLen {
+			thisDataSize = dataLen - offset
 		}
 
-		// Создаем новый IP-заголовок для фрагмента
+		// Создаем заголовок фрагмента
 		fragHeader := make([]byte, ihl)
 		copy(fragHeader, packet[:ihl])
 
-		// Устанавливаем длину фрагмента
-		fragTotalLen := ihl + thisFragSize
+		// Устанавливаем длину
+		fragTotalLen := ihl + thisDataSize
 		binary.BigEndian.PutUint16(fragHeader[2:4], uint16(fragTotalLen))
 
-		// Устанавливаем флаги фрагментации
+		// Устанавливаем флаги и смещение
 		moreFrags := 0
-		if fragOffset+thisFragSize < dataLen {
+		if offset+thisDataSize < dataLen {
 			moreFrags = 1
 		}
-		// Сохраняем оригинальные флаги, кроме флага фрагментации
-		fragHeader[6] = (packet[6] & 0xE0) | byte(moreFrags<<5) | byte(fragOffset>>8&0x1F)
+		// Смещение в 8-байтовых блоках
+		fragOffset := offset / 8
+		fragHeader[6] = (flags & 0xE0) | byte(moreFrags<<5) | byte(fragOffset>>8&0x1F)
+		fragHeader[7] = byte(fragOffset & 0xFF)
 
-		// Устанавливаем смещение фрагмента (в 8-байтовых блоках)
-		fragOffsetBytes := fragOffset / 8
-		fragHeader[7] = byte(fragOffsetBytes & 0xFF)
-
-		// Пересчитываем контрольную сумму
+		// Пересчитываем IP checksum
 		binary.BigEndian.PutUint16(fragHeader[10:12], 0)
 		checksum := calculateIPChecksum(fragHeader)
 		binary.BigEndian.PutUint16(fragHeader[10:12], checksum)
@@ -106,27 +104,15 @@ func FragmentIPPacket(packet []byte, fragmentSize int) ([]*IPFragment, error) {
 		// Собираем фрагмент
 		fragPacket := make([]byte, fragTotalLen)
 		copy(fragPacket[:ihl], fragHeader)
-		copy(fragPacket[ihl:], data[fragOffset:fragOffset+thisFragSize])
-
-		// Проверяем созданный фрагмент
-		if len(fragPacket) < 20 {
-			log.Printf("ERROR: Fragment too short: %d bytes", len(fragPacket))
-			continue
-		}
-		if fragPacket[0]>>4 != 4 {
-			log.Printf("ERROR: Fragment has invalid IP version: %d", fragPacket[0]>>4)
-		}
+		copy(fragPacket[ihl:], data[offset:offset+thisDataSize])
 
 		fragments = append(fragments, &IPFragment{
 			Data:          fragPacket,
-			Offset:        fragOffset,
+			Offset:        offset,
 			MoreFragments: moreFrags == 1,
 		})
 
-		log.Printf("DEBUG: Created fragment %d: size=%d, offset=%d, more=%v, version=%d",
-			len(fragments)-1, len(fragPacket), fragOffset, moreFrags == 1, fragPacket[0]>>4)
-
-		fragOffset += thisFragSize
+		offset += thisDataSize
 	}
 
 	return fragments, nil

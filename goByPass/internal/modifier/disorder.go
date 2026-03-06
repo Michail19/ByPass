@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 )
 
-// ApplyDisorder применяет нарушение порядка
+// ApplyDisorder применяет нарушение порядка (отправка части пакета с низким TTL)
 func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl int) ([][]byte, error) {
 	if len(disorderPos) == 0 || ttl <= 0 {
 		return nil, nil
@@ -13,30 +13,28 @@ func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl in
 	var results [][]byte
 
 	for _, pos := range disorderPos {
-		if pos >= len(packet) {
+		if pos <= 0 || pos >= len(packet) {
 			continue
 		}
 
-		// Создаем копию пакета с низким TTL
-		disorderPacket := make([]byte, len(packet))
-		copy(disorderPacket, packet)
+		// Создаем копию первой части с низким TTL
+		firstPart := make([]byte, pos)
+		copy(firstPart, packet[:pos])
 
-		// Модифицируем IP-заголовок, устанавливая TTL
-		if err := setIPTTL(disorderPacket, ttl); err != nil {
-			continue
+		// Устанавливаем TTL
+		if err := setIPTTL(firstPart, ttl); err == nil {
+			results = append(results, firstPart)
 		}
 
-		// Отправляем только часть пакета
-		if pos > 0 {
-			disorderPacket = disorderPacket[:pos]
+		// Вторая часть (оригинал или с пересчитанной checksum)
+		secondPart := make([]byte, len(packet)-pos)
+		copy(secondPart, packet[pos:])
+
+		// Для второй части нужно пересчитать TCP checksum
+		if len(secondPart) >= 40 {
+			FixTCPChecksum(secondPart)
 		}
-
-		results = append(results, disorderPacket)
-	}
-
-	// Добавляем оригинал в конец
-	if len(results) > 0 {
-		results = append(results, packet)
+		results = append(results, secondPart)
 	}
 
 	return results, nil
