@@ -188,178 +188,172 @@ func (p *Pipeline) worker(id int) {
 	}
 }
 
-// processPacket временная версия для тестирования
+// processPacket обрабатывает один пакет (полная версия)
 func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	startTime := time.Now()
 
+	// Проверяем минимальную длину пакета
 	if len(pkt.Data) < 20 {
-		log.Printf("WARNING: Packet too short (%d bytes) from %v, hex: % x",
-			len(pkt.Data), pkt.Interface, pkt.Data[:len(pkt.Data)])
-		// Все равно пытаемся отправить, может быть это валидный пакет
+		log.Printf("WARNING: Packet too short (%d bytes), forwarding original", len(pkt.Data))
+		p.sendPacket(pkt.Data, pkt.Addr)
+		return
 	}
 
-	// Сохраняем адрес из пакета
-	addr := pkt.Addr
+	// Извлекаем IP и порты
+	srcIP, dstIP, err := p.extractIPs(pkt.Data)
+	if err != nil {
+		log.Printf("WARNING: Failed to extract IPs: %v", err)
+		p.sendPacket(pkt.Data, pkt.Addr)
+		return
+	}
 
-	// Используем специальный метод отправки с адресом
-	if rs, ok := p.sender.(*sender.RawSender); ok && len(addr) == 64 {
-		// Это WinDivert sender - используем SendWithAddr
-		if err := rs.SendWithAddr(pkt.Data, addr); err != nil {
-			log.Printf("ERROR: Failed to send packet via WinDivert: %v", err)
+	srcPort, dstPort, err := p.extractPorts(pkt.Data)
+	if err != nil {
+		log.Printf("WARNING: Failed to extract ports: %v", err)
+		p.sendPacket(pkt.Data, pkt.Addr)
+		return
+	}
+
+	// Получаем или создаем поток
+	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, p.getProtocol(pkt.Data))
+
+	// Анализируем пакет
+	info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
+	if err == nil && info != nil {
+		// Сохраняем информацию в поток
+		if info.SNI != "" {
+			flow.SetHostname(info.SNI)
+		} else if info.Host != "" {
+			flow.SetHostname(info.Host)
+		}
+		if info.IsTLS {
+			flow.SetTLS()
+		}
+		if info.IsHTTP {
+			flow.SetHTTP()
+		}
+	}
+
+	// Проверяем кэш
+	var shouldBypass bool
+	var strategyID int
+
+	if cached, exists := p.ipCache.GetByIP(dstIP); exists {
+		shouldBypass = cached.ShouldBypass
+		strategyID = cached.StrategyID
+		p.updateStats(func(stats *PipelineStats) {
+			stats.CacheHits++
+		})
+		log.Printf("DEBUG: Cache hit for %s: bypass=%v strategy=%d",
+			dstIP.String(), shouldBypass, strategyID)
+	} else {
+		// Решаем, нужно ли обходить
+		strat := p.strategyMgr.SelectStrategy(
+			dstIP.String(),
+			flow.Hostname,
+			int(dstPort),
+			"tcp",
+		)
+		if strat != nil {
+			shouldBypass = true
+			strategyID = strat.ID
+			log.Printf("DEBUG: Selected strategy %d (%s) for %s (hostname: %s)",
+				strategyID, strat.Name, dstIP.String(), flow.Hostname)
+		} else {
+			log.Printf("DEBUG: No strategy for %s", dstIP.String())
+		}
+		p.ipCache.PutByIP(dstIP, flow.Hostname, shouldBypass, strategyID)
+		p.updateStats(func(stats *PipelineStats) {
+			stats.CacheMisses++
+		})
+	}
+
+	// Применяем модификацию если нужно
+	if shouldBypass {
+		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
+		if err == nil && result != nil {
+			validPackets := 0
+			for i, modifiedPkt := range result.ModifiedPackets {
+				// Проверяем целостность модифицированного пакета
+				if len(modifiedPkt) < 20 {
+					log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping",
+						i, len(modifiedPkt))
+					continue
+				}
+
+				// Проверяем, что это похоже на IP-пакет
+				if modifiedPkt[0]>>4 != 4 {
+					log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)",
+						i, modifiedPkt[0]>>4)
+				}
+
+				if p.sendPacket(modifiedPkt, pkt.Addr) {
+					validPackets++
+					p.updateStats(func(stats *PipelineStats) {
+						stats.PacketsModified++
+						stats.PacketsSent++
+					})
+				}
+			}
+
+			log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
+				validPackets, len(result.ModifiedPackets), dstIP.String())
+
+			// Если нужно, отправляем оригинал
+			if result.SendOriginal && len(pkt.Data) >= 20 {
+				if p.sendPacket(pkt.Data, pkt.Addr) {
+					p.updateStats(func(stats *PipelineStats) {
+						stats.PacketsSent++
+					})
+				}
+			}
 		}
 	} else {
-		// Обычный sender (raw socket)
-		if err := p.sender.Send(pkt.Data); err != nil {
-			log.Printf("ERROR: Failed to send packet: %v", err)
+		// Просто отправляем оригинал
+		if p.sendPacket(pkt.Data, pkt.Addr) {
+			p.updateStats(func(stats *PipelineStats) {
+				stats.PacketsSent++
+			})
 		}
 	}
 
-	p.updateStats(func(stats *PipelineStats) {
-		stats.PacketsReceived++
-		stats.PacketsSent++
-		stats.PacketsProcessed++
-	})
-
+	// Обновляем статистику обработки
 	processTime := time.Since(startTime)
 	p.updateStats(func(stats *PipelineStats) {
+		stats.PacketsProcessed++
 		stats.AvgProcessTime = (stats.AvgProcessTime + processTime) / 2
 	})
 }
 
-// processPacket обрабатывает один пакет
-//func (p *Pipeline) processPacket(pkt *capture.Packet) {
-//	startTime := time.Now()
-//
-//	// Проверяем минимальную длину пакета
-//	if len(pkt.Data) < 20 {
-//		log.Printf("WARNING: Packet too short (%d bytes), forwarding original", len(pkt.Data))
-//		p.sender.Send(pkt.Data)
-//		return
-//	}
-//
-//	// Извлекаем IP и порты
-//	srcIP, dstIP, err := p.extractIPs(pkt.Data)
-//	if err != nil {
-//		return
-//	}
-//
-//	srcPort, dstPort, err := p.extractPorts(pkt.Data)
-//	if err != nil {
-//		return
-//	}
-//
-//	// Получаем или создаем поток
-//	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, p.getProtocol(pkt.Data))
-//
-//	// Анализируем пакет
-//	info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
-//	if err == nil && info != nil {
-//		// Сохраняем информацию в поток
-//		if info.SNI != "" {
-//			flow.SetHostname(info.SNI)
-//		} else if info.Host != "" {
-//			flow.SetHostname(info.Host)
-//		}
-//		if info.IsTLS {
-//			flow.SetTLS()
-//		}
-//		if info.IsHTTP {
-//			flow.SetHTTP()
-//		}
-//	}
-//
-//	// Проверяем кэш
-//	var shouldBypass bool
-//	var strategyID int
-//
-//	if cached, exists := p.ipCache.GetByIP(dstIP); exists {
-//		shouldBypass = cached.ShouldBypass
-//		strategyID = cached.StrategyID
-//		p.updateStats(func(stats *PipelineStats) {
-//			stats.CacheHits++
-//		})
-//		log.Printf("DEBUG: Cache hit for %s: bypass=%v strategy=%d",
-//			dstIP.String(), shouldBypass, strategyID)
-//	} else {
-//		// Решаем, нужно ли обходить
-//		strat := p.strategyMgr.SelectStrategy(
-//			dstIP.String(),
-//			flow.Hostname,
-//			int(dstPort),
-//			"tcp",
-//		)
-//		if strat != nil {
-//			shouldBypass = true
-//			strategyID = strat.ID
-//			log.Printf("DEBUG: Selected strategy %d (%s) for %s (hostname: %s)",
-//				strategyID, strat.Name, dstIP.String(), flow.Hostname)
-//		} else {
-//			log.Printf("DEBUG: No strategy for %s", dstIP.String())
-//		}
-//		p.ipCache.PutByIP(dstIP, flow.Hostname, shouldBypass, strategyID)
-//		p.updateStats(func(stats *PipelineStats) {
-//			stats.CacheMisses++
-//		})
-//	}
-//
-//	// Применяем модификацию если нужно
-//	if shouldBypass {
-//		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
-//		if err == nil && result != nil {
-//			validPackets := 0
-//			for i, modifiedPkt := range result.ModifiedPackets {
-//				// Проверяем целостность модифицированного пакета
-//				if len(modifiedPkt) < 20 {
-//					log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping",
-//						i, len(modifiedPkt))
-//					continue
-//				}
-//
-//				// Проверяем, что это похоже на IP-пакет
-//				if modifiedPkt[0]>>4 != 4 {
-//					log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)",
-//						i, modifiedPkt[0]>>4)
-//				}
-//
-//				if err := p.sender.Send(modifiedPkt); err == nil {
-//					validPackets++
-//					p.updateStats(func(stats *PipelineStats) {
-//						stats.PacketsModified++
-//						stats.PacketsSent++
-//					})
-//				} else {
-//					log.Printf("ERROR: Failed to send modified packet %d: %v", i, err)
-//				}
-//			}
-//
-//			log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
-//				validPackets, len(result.ModifiedPackets), dstIP.String())
-//
-//			// Если нужно, отправляем оригинал
-//			if result.SendOriginal && len(pkt.Data) >= 20 {
-//				if err := p.sender.Send(pkt.Data); err == nil {
-//					p.updateStats(func(stats *PipelineStats) {
-//						stats.PacketsSent++
-//					})
-//				}
-//			}
-//		}
-//	} else {
-//		// Просто отправляем оригинал
-//		if err := p.sender.Send(pkt.Data); err == nil {
-//			p.updateStats(func(stats *PipelineStats) {
-//				stats.PacketsSent++
-//			})
-//		}
-//	}
-//
-//	// Обновляем статистику обработки
-//	processTime := time.Since(startTime)
-//	p.updateStats(func(stats *PipelineStats) {
-//		stats.PacketsProcessed++
-//		stats.AvgProcessTime = (stats.AvgProcessTime + processTime) / 2
-//	})
-//}
+// sendPacket отправляет пакет с учетом типа sender
+func (p *Pipeline) sendPacket(data []byte, addr []byte) bool {
+	if len(data) < 20 {
+		log.Printf("WARNING: Attempted to send packet too short (%d bytes)", len(data))
+		return false
+	}
+
+	// Для WinDivert sender используем SendWithAddr
+	if rs, ok := p.sender.(*sender.RawSender); ok {
+		// Проверяем, что адрес не nil
+		if addr == nil {
+			log.Printf("WARNING: Nil address for WinDivert, creating dummy")
+			addr = make([]byte, 64)
+		}
+
+		if err := rs.SendWithAddr(data, addr); err != nil {
+			log.Printf("ERROR: Failed to send packet via WinDivert: %v", err)
+			return false
+		}
+		return true
+	}
+
+	// Для обычного sender
+	if err := p.sender.Send(data); err != nil {
+		log.Printf("ERROR: Failed to send packet: %v", err)
+		return false
+	}
+	return true
+}
 
 // resultProcessor обрабатывает результаты модификации
 func (p *Pipeline) resultProcessor() {
@@ -374,10 +368,10 @@ func (p *Pipeline) resultProcessor() {
 			if p.strategyMgr != nil {
 				// Создаем StrategyResult из ModifyResult
 				strategyResult := &strategy.StrategyResult{
-					StrategyID:   0, // Здесь нужно получить ID стратегии
+					StrategyID:   result.StrategyID, // Теперь StrategyID сохраняется!
 					Success:      true,
-					ResponseTime: 0,
-					BytesSent:    0,
+					ResponseTime: time.Duration(result.Delay) * time.Millisecond,
+					BytesSent:    len(result.ModifiedPackets) * 1500, // Примерно
 					PacketsSent:  len(result.ModifiedPackets),
 					Timestamp:    time.Now(),
 				}

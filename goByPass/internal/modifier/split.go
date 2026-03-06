@@ -1,72 +1,36 @@
 package modifier
 
 import (
-	"ByPass/internal/protocol"
+	"log"
 )
 
-// ApplySplit применяет разбиение пакета
+// ApplySplit применяет разбиение пакета с правильной IP-фрагментацией
 func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI bool) ([][]byte, error) {
 	if len(splitPos) == 0 {
 		return [][]byte{packet}, nil
 	}
 
-	// Минимальный размер фрагмента - 20 байт (минимальный IP-пакет)
-	const minFragmentSize = 20
-
-	var fragments [][]byte
-	data := packet
-
-	// Если нужно выравнивание по SNI
-	if alignSNI {
-		sniPos, err := protocol.FindSNI(packet)
-		if err == nil && sniPos >= 0 {
-			// Корректируем позиции разбиения относительно SNI
-			adjustedPos := make([]int, len(splitPos))
-			for i, pos := range splitPos {
-				adjustedPos[i] = sniPos + pos
-				if adjustedPos[i] < 0 {
-					adjustedPos[i] = 0
-				}
-			}
-			splitPos = adjustedPos
-		}
+	// Определяем размер фрагмента на основе первой позиции split
+	fragmentSize := 20 // минимальный размер
+	if len(splitPos) > 0 && splitPos[0] > 20 {
+		fragmentSize = splitPos[0]
 	}
 
-	// Применяем разбиение, но проверяем минимальный размер
-	lastPos := 0
-	for _, pos := range splitPos {
-		if pos > lastPos && pos < len(data) {
-			// Проверяем, что фрагмент не слишком маленький
-			if pos-lastPos < minFragmentSize && len(data)-pos >= minFragmentSize {
-				// Пропускаем это разбиение
-				continue
-			}
-			fragments = append(fragments, data[lastPos:pos])
-			lastPos = pos
-		}
-	}
-
-	// Добавляем оставшуюся часть
-	if lastPos < len(data) {
-		if len(data)-lastPos >= minFragmentSize {
-			fragments = append(fragments, data[lastPos:])
-		} else {
-			// Последний фрагмент слишком маленький - объединяем с предыдущим
-			if len(fragments) > 0 {
-				lastIdx := len(fragments) - 1
-				fragments[lastIdx] = append(fragments[lastIdx], data[lastPos:]...)
-			} else {
-				fragments = [][]byte{data}
-			}
-		}
-	}
-
-	// Если разбиение не дало результата, возвращаем оригинал
-	if len(fragments) == 0 {
+	// Используем правильную IP-фрагментацию
+	fragments, err := FragmentIPPacket(packet, fragmentSize)
+	if err != nil {
+		log.Printf("ERROR: Failed to fragment packet: %v", err)
 		return [][]byte{packet}, nil
 	}
 
-	return fragments, nil
+	result := make([][]byte, len(fragments))
+	for i, frag := range fragments {
+		result[i] = frag.Data
+		log.Printf("DEBUG: Created fragment %d: size=%d, offset=%d, more=%v",
+			i, len(frag.Data), frag.Offset, frag.MoreFragments)
+	}
+
+	return result, nil
 }
 
 // SplitAtPosition разбивает пакет в указанной позиции

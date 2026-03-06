@@ -294,8 +294,6 @@ func (s *RawSender) Send(packet []byte) error {
 func (s *RawSender) SendWithAddr(packet []byte, addr []byte) error {
 	// Проверяем handle
 	if s.handle == 0 {
-		log.Printf("CRITICAL: Attempting to send with zero handle!")
-		s.stats.PacketsFailed++
 		return fmt.Errorf("invalid sender handle (0)")
 	}
 
@@ -303,12 +301,22 @@ func (s *RawSender) SendWithAddr(packet []byte, addr []byte) error {
 		s.handle, len(packet), len(addr))
 
 	if len(packet) < 20 {
-		s.stats.PacketsFailed++
 		return fmt.Errorf("packet too short: %d bytes", len(packet))
 	}
 
+	// Убеждаемся, что адрес имеет правильный размер
+	if len(addr) < 64 {
+		log.Printf("WARNING: Address too short (%d), padding to 64", len(addr))
+		newAddr := make([]byte, 64)
+		copy(newAddr, addr)
+		addr = newAddr
+	}
+
+	// Логируем первые несколько байт адреса для отладки
+	log.Printf("DEBUG: Address first 16 bytes: % x", addr[:16])
+
 	var sendLen uint
-	ret, _, callErr := s.sendProc.Call(
+	ret, _, _ := s.sendProc.Call(
 		uintptr(s.handle),
 		uintptr(unsafe.Pointer(&packet[0])),
 		uintptr(len(packet)),
@@ -318,10 +326,14 @@ func (s *RawSender) SendWithAddr(packet []byte, addr []byte) error {
 
 	if ret == 0 {
 		lastErr := syscall.GetLastError()
-		log.Printf("ERROR: WinDivertSend failed - handle=%v, ret=0, callErr=%v, lastErr=%v",
-			s.handle, callErr, lastErr)
+		log.Printf("ERROR: WinDivertSend failed - handle=%v, len=%d, lastErr=%v",
+			s.handle, len(packet), lastErr)
 		s.stats.PacketsFailed++
-		return fmt.Errorf("WinDivertSend failed: %v (lastErr: %v)", callErr, lastErr)
+		return fmt.Errorf("WinDivertSend failed: %v", lastErr)
+	}
+
+	if sendLen != uint(len(packet)) {
+		log.Printf("WARNING: Sent %d bytes but expected %d", sendLen, len(packet))
 	}
 
 	s.stats.PacketsSent++

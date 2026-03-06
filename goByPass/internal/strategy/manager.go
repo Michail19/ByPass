@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -88,23 +88,17 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// ВРЕМЕННО: используем тестовую стратегию
-	if strat, exists := m.strategies[10]; exists {
-		log.Printf("DEBUG: Using passthrough strategy for %s", ip)
-		return strat
-	}
-
 	// Сначала пробуем найти стратегию по hostname
 	if hostname != "" {
-		// TODO: добавить логику выбора стратегии по hostname
-		// Например, для youtube.com использовать стратегию 8
-		for _, strat := range m.strategies {
-			// Здесь можно добавить проверку по hostname
-			// Пока просто логируем
-			if hostname == "youtube.com" && strat.ID == 8 {
+		// Для youtube.com использовать стратегию 8
+		if hostname == "youtube.com" || strings.Contains(hostname, "youtube") {
+			if strat, exists := m.strategies[8]; exists {
 				return strat
 			}
-			if hostname == "discord.com" && strat.ID == 9 {
+		}
+		// Для discord.com использовать стратегию 9
+		if hostname == "discord.com" || strings.Contains(hostname, "discord") {
+			if strat, exists := m.strategies[9]; exists {
 				return strat
 			}
 		}
@@ -117,7 +111,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// Иначе используем стратегию по умолчанию
+	// Иначе используем стратегию по умолчанию (2 - moderate)
 	if m.defaultID > 0 {
 		if strat, exists := m.strategies[m.defaultID]; exists {
 			return strat
