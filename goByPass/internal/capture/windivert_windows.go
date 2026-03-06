@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"syscall"
 	"time"
 	"unsafe"
@@ -23,6 +22,7 @@ type WinDivert struct {
 	stopChan chan struct{}
 	config   Config
 	dll      *syscall.DLL
+	recvProc *syscall.Proc
 }
 
 // NewWinDivert создает новый захватчик для Windows
@@ -45,12 +45,7 @@ func NewWinDivert(cfg Config) (*WinDivert, error) {
 func (w *WinDivert) Start(ctx context.Context) error {
 	log.Printf("DEBUG: Initializing WinDivert...")
 
-	// Проверяем наличие DLL
-	if _, err := os.Stat("WinDivert.dll"); err != nil {
-		log.Printf("WARNING: WinDivert.dll not found in current directory")
-	}
-
-	// Загружаем WinDivert DLL
+	// Загружаем DLL один раз
 	dll, err := syscall.LoadDLL("WinDivert.dll")
 	if err != nil {
 		return fmt.Errorf("failed to load WinDivert.dll: %v", err)
@@ -64,8 +59,8 @@ func (w *WinDivert) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to find WinDivertOpen: %v", err)
 	}
 
-	// Создаем фильтр для захвата трафика
-	filter := "tcp.DstPort == 80 or tcp.DstPort == 443"
+	// Ловим пакеты в обе стороны
+	filter := "tcp.DstPort == 80 or tcp.DstPort == 443 or tcp.SrcPort == 80 or tcp.SrcPort == 443"
 	log.Printf("DEBUG: Using filter: %s", filter)
 
 	filterPtr, err := syscall.BytePtrFromString(filter)
@@ -82,16 +77,26 @@ func (w *WinDivert) Start(ctx context.Context) error {
 	)
 
 	if handle == 0 {
-		return fmt.Errorf("failed to open WinDivert - check if running as Administrator")
+		return fmt.Errorf("failed to open WinDivert")
 	}
 	w.handle = WinDivertHandle(handle)
 	log.Printf("DEBUG: WinDivert opened successfully, handle=%v", handle)
 
-	// Запускаем обработку
-	go w.processPackets(ctx)
+	// Сохраняем процедуру для recv
+	recvProc, err := dll.FindProc("WinDivertRecv")
+	if err != nil {
+		return fmt.Errorf("failed to find WinDivertRecv: %v", err)
+	}
+	w.recvProc = recvProc
 
-	log.Printf("WinDivert started on Windows")
+	go w.processPackets(ctx)
+	log.Printf("WinDivert started")
 	return nil
+}
+
+// GetHandle возвращает WinDivert handle
+func (w *WinDivert) GetHandle() uintptr {
+	return uintptr(w.handle)
 }
 
 // Stop останавливает захват
@@ -99,10 +104,9 @@ func (w *WinDivert) Stop() error {
 	close(w.stopChan)
 
 	if w.handle != 0 && w.dll != nil {
-		closeProc, err := w.dll.FindProc("WinDivertClose")
-		if err == nil {
-			closeProc.Call(uintptr(w.handle))
-		}
+		closeProc, _ := w.dll.FindProc("WinDivertClose")
+		closeProc.Call(uintptr(w.handle))
+		w.dll.Release()
 	}
 
 	close(w.packets)
@@ -116,13 +120,6 @@ func (w *WinDivert) Packets() <-chan Packet {
 
 // processPackets обрабатывает входящие пакеты
 func (w *WinDivert) processPackets(ctx context.Context) {
-	// Получаем функции WinDivert
-	recvProc, err := w.dll.FindProc("WinDivertRecv")
-	if err != nil {
-		log.Printf("Failed to find WinDivertRecv: %v", err)
-		return
-	}
-
 	buf := make([]byte, w.config.MaxPacketLen)
 
 	for {
@@ -134,9 +131,9 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 		default:
 			// WinDivertRecv(handle, packet, packetLen, &recvLen, &addr)
 			var recvLen uint
-			var addr [64]byte // WINDIVERT_ADDRESS
+			var addr [64]byte
 
-			ret, _, _ := recvProc.Call(
+			ret, _, _ := w.recvProc.Call(
 				uintptr(w.handle),
 				uintptr(unsafe.Pointer(&buf[0])),
 				uintptr(len(buf)),
@@ -150,22 +147,23 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 				continue
 			}
 
-			// Создаем пакет
-			packet := &Packet{
+			addrCopy := make([]byte, 64)
+			copy(addrCopy, addr[:])
+
+			packet := Packet{
 				ID:        uint32(time.Now().UnixNano()),
 				Data:      make([]byte, recvLen),
 				Length:    int(recvLen),
 				Timestamp: time.Now().UnixNano(),
+				Addr:      addrCopy,
 			}
 			copy(packet.Data, buf[:recvLen])
 
 			// Отправляем в канал
 			select {
-			case w.packets <- *packet:
-				// Пакет отправлен успешно
+			case w.packets <- packet:
 			default:
-				// Канал переполнен
-				log.Printf("Packet channel full, dropping packet")
+				log.Printf("Packet channel full")
 			}
 		}
 	}

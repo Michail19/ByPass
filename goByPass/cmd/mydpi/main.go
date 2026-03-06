@@ -200,22 +200,8 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	// Модификатор пакетов
 	packetModifier := modifier.NewPacketModifier(strategyMgr, ipCache)
 
-	// Отправитель
-	sender, err := sender.NewSender(sender.Config{
-		Interface:   cfg.Sender.Interface,
-		BufferSize:  cfg.Sender.BufferSize,
-		SendTimeout: cfg.Sender.SendTimeout,
-		BatchSize:   cfg.Sender.BatchSize,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create sender: %v", err)
-	}
-
-	// Захватчик - используем фабричный метод вместо прямого вызова NewNFQueue
-	var capturer capture.Capturer
-
-	// В зависимости от платформы создаем соответствующий захватчик
-	capturer, err = capture.New(capture.Config{
+	// Захватчик
+	capturer, err := capture.New(capture.Config{
 		QueueNum:     cfg.Capture.QueueNum,
 		BufferSize:   cfg.Capture.BufferSize,
 		Interface:    cfg.Capture.Interface,
@@ -223,8 +209,35 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	})
 
 	if err != nil {
-		sender.Close()
 		return nil, fmt.Errorf("failed to create capturer: %v", err)
+	}
+
+	// Отправитель - создаем после захватчика, чтобы проверить тип
+	var s sender.Sender
+
+	// Проверяем, является ли захватчик WinDivert
+	if wd, ok := capturer.(*capture.WinDivert); ok {
+		// Используем общий handle
+		s, err = sender.NewSenderWithHandle(wd.GetHandle(), sender.Config{
+			Interface:   cfg.Sender.Interface,
+			BufferSize:  cfg.Sender.BufferSize,
+			SendTimeout: cfg.Sender.SendTimeout,
+			BatchSize:   cfg.Sender.BatchSize,
+		})
+		log.Printf("Using WinDivert sender with shared handle")
+	} else {
+		// Обычный sender
+		s, err = sender.NewSender(sender.Config{
+			Interface:   cfg.Sender.Interface,
+			BufferSize:  cfg.Sender.BufferSize,
+			SendTimeout: cfg.Sender.SendTimeout,
+			BatchSize:   cfg.Sender.BatchSize,
+		})
+	}
+
+	if err != nil {
+		capturer.Stop()
+		return nil, fmt.Errorf("failed to create sender: %v", err)
 	}
 
 	// Конвейер
@@ -232,7 +245,7 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		capturer,
 		connManager,
 		packetModifier,
-		sender,
+		s,
 		analyzer,
 		ipCache,
 		domainCache,
@@ -252,7 +265,7 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		analyzer:    analyzer,
 		strategyMgr: strategyMgr,
 		modifier:    packetModifier,
-		sender:      sender,
+		sender:      s,
 		capturer:    capturer,
 		pipeline:    pipeline,
 	}, nil

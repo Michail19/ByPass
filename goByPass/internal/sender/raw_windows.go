@@ -4,7 +4,7 @@
 package sender
 
 import (
-	"encoding/binary"
+	_ "encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -25,9 +25,11 @@ type WinDivertHandle uintptr
 
 // RawSender отправляет пакеты через WinDivert (Windows)
 type RawSender struct {
-	handle WinDivertHandle
-	cfg    Config
-	stats  SenderStats
+	handle   WinDivertHandle
+	cfg      Config
+	stats    SenderStats
+	dll      *syscall.DLL  // Сохраняем DLL
+	sendProc *syscall.Proc // Сохраняем процедуру
 }
 
 // RawSocketSender для raw socket в Windows
@@ -41,41 +43,50 @@ type RawSocketSender struct {
 func init() {
 	// Переопределяем NewSender для Windows
 	NewSender = newWindowsSender
+	NewSenderWithHandle = newWindowsSenderWithHandle
 }
 
 // newWindowsSender создает новый отправитель для Windows
 func newWindowsSender(cfg Config) (Sender, error) {
-	// Сначала пробуем WinDivert
-	handle, err := openWinDivert()
-	if err == nil {
-		return &RawSender{
-			handle: handle,
-			cfg:    cfg,
-		}, nil
-	}
-	log.Printf("WinDivert failed: %v, falling back to raw socket", err)
-
-	// Если WinDivert не доступен, пробуем raw socket
-	return newRawSocketSender(cfg)
-}
-
-// openWinDivert открывает WinDivert с правильными параметрами
-func openWinDivert() (WinDivertHandle, error) {
-	// Загружаем WinDivert DLL
+	// Загружаем DLL один раз
 	dll, err := syscall.LoadDLL("WinDivert.dll")
 	if err != nil {
-		return 0, fmt.Errorf("failed to load WinDivert.dll: %v", err)
+		log.Printf("WinDivert.dll not found, falling back to raw socket: %v", err)
+		return newRawSocketSender(cfg)
 	}
-	defer dll.Release()
 
-	// Получаем функции
+	sendProc, err := dll.FindProc("WinDivertSend")
+	if err != nil {
+		dll.Release()
+		log.Printf("WinDivertSend not found, falling back to raw socket: %v", err)
+		return newRawSocketSender(cfg)
+	}
+
+	handle, err := openWinDivertWithDLL(dll)
+	if err != nil {
+		dll.Release()
+		log.Printf("Failed to open WinDivert, falling back to raw socket: %v", err)
+		return newRawSocketSender(cfg)
+	}
+
+	log.Printf("WinDivert initialized successfully with handle: %v", handle)
+	return &RawSender{
+		handle:   handle,
+		cfg:      cfg,
+		dll:      dll,
+		sendProc: sendProc,
+	}, nil
+}
+
+// openWinDivertWithDLL открывает WinDivert с использованием загруженной DLL
+func openWinDivertWithDLL(dll *syscall.DLL) (WinDivertHandle, error) {
 	openProc, err := dll.FindProc("WinDivertOpen")
 	if err != nil {
 		return 0, fmt.Errorf("failed to find WinDivertOpen: %v", err)
 	}
 
-	// Открываем WinDivert с фильтром
-	filter := "tcp.DstPort == 443 or tcp.DstPort == 80"
+	// Открываем WinDivert с фильтром для всех пакетов на 80/443 портах
+	filter := "tcp.DstPort == 443 or tcp.DstPort == 80 or tcp.SrcPort == 443 or tcp.SrcPort == 80"
 	log.Printf("DEBUG: Opening WinDivert with filter: %s", filter)
 
 	filterPtr, err := syscall.BytePtrFromString(filter)
@@ -99,6 +110,16 @@ func openWinDivert() (WinDivertHandle, error) {
 	return WinDivertHandle(handle), nil
 }
 
+// openWinDivert (legacy) оставлен для обратной совместимости
+func openWinDivert() (WinDivertHandle, error) {
+	dll, err := syscall.LoadDLL("WinDivert.dll")
+	if err != nil {
+		return 0, fmt.Errorf("failed to load WinDivert.dll: %v", err)
+	}
+	defer dll.Release()
+	return openWinDivertWithDLL(dll)
+}
+
 // newRawSocketSender создает raw socket отправитель
 func newRawSocketSender(cfg Config) (Sender, error) {
 	// Для raw socket используем IPPROTO_RAW
@@ -114,6 +135,7 @@ func newRawSocketSender(cfg Config) (Sender, error) {
 		return nil, fmt.Errorf("failed to set IP_HDRINCL: %v", err)
 	}
 
+	log.Printf("Raw socket created successfully, fd=%v", fd)
 	return &RawSocketSender{
 		fd:  fd,
 		cfg: cfg,
@@ -124,7 +146,13 @@ func newRawSocketSender(cfg Config) (Sender, error) {
 func (s *RawSocketSender) Send(packet []byte) error {
 	if len(packet) < 20 {
 		s.stats.PacketsFailed++
-		return ErrInvalidPacket
+		return fmt.Errorf("%w: packet too short: %d bytes", ErrInvalidPacket, len(packet))
+	}
+
+	// Проверяем IP-заголовок
+	version := packet[0] >> 4
+	if version != 4 {
+		log.Printf("WARNING: Non-IPv4 packet (version=%d) via raw socket", version)
 	}
 
 	// Получаем IP назначения из пакета
@@ -171,7 +199,9 @@ func (s *RawSocketSender) SendBatch(packets [][]byte) error {
 // Close закрывает сокет
 func (s *RawSocketSender) Close() error {
 	if s.fd != 0 {
-		return syscall.Close(s.fd)
+		err := syscall.Close(s.fd)
+		s.fd = 0
+		return err
 	}
 	return nil
 }
@@ -185,29 +215,20 @@ func (s *RawSocketSender) GetStats() SenderStats {
 func (s *RawSender) Send(packet []byte) error {
 	if len(packet) < 20 {
 		s.stats.PacketsFailed++
-		return fmt.Errorf("packet too short: %d bytes", len(packet))
+		return fmt.Errorf("%w: packet too short: %d bytes", ErrInvalidPacket, len(packet))
 	}
 
-	// Сохраняем контрольную сумму перед отправкой
-	originalChecksum := binary.BigEndian.Uint16(packet[10:12])
-
-	dll, err := syscall.LoadDLL("WinDivert.dll")
-	if err != nil {
-		s.stats.PacketsFailed++
-		return fmt.Errorf("failed to load WinDivert.dll: %v", err)
-	}
-	defer dll.Release()
-
-	sendProc, err := dll.FindProc("WinDivertSend")
-	if err != nil {
-		s.stats.PacketsFailed++
-		return fmt.Errorf("failed to find WinDivertSend: %v", err)
+	// Проверяем IP-заголовок
+	version := packet[0] >> 4
+	if version != 4 {
+		log.Printf("WARNING: Non-IPv4 packet (version=%d) via WinDivert", version)
 	}
 
 	var sendLen uint
-	var addr [64]byte
+	var addr [64]byte // Адресная структура WinDivert (может быть пустой для отправки)
 
-	ret, _, _ := sendProc.Call(
+	// Используем сохраненную процедуру
+	ret, _, _ := s.sendProc.Call(
 		uintptr(s.handle),
 		uintptr(unsafe.Pointer(&packet[0])),
 		uintptr(len(packet)),
@@ -217,21 +238,13 @@ func (s *RawSender) Send(packet []byte) error {
 
 	if ret == 0 {
 		lastErr := syscall.GetLastError()
-		log.Printf("ERROR: WinDivertSend failed: %v", lastErr)
 		s.stats.PacketsFailed++
 		return fmt.Errorf("WinDivertSend failed: %v", lastErr)
 	}
 
-	// Проверяем, не изменился ли пакет
+	// Проверяем, что все данные отправлены
 	if sendLen != uint(len(packet)) {
-		log.Printf("WARNING: Sent %d bytes but expected %d", sendLen, len(packet))
-	}
-
-	// Проверяем контрольную сумму после отправки (WinDivert мог ее изменить)
-	newChecksum := binary.BigEndian.Uint16(packet[10:12])
-	if newChecksum != originalChecksum {
-		log.Printf("WARNING: WinDivert modified packet checksum from %x to %x",
-			originalChecksum, newChecksum)
+		log.Printf("WARNING: WinDivert sent %d bytes but expected %d", sendLen, len(packet))
 	}
 
 	s.stats.PacketsSent++
@@ -257,25 +270,56 @@ func (s *RawSender) SendBatch(packets [][]byte) error {
 	return nil
 }
 
-// Close закрывает WinDivert
+// Close закрывает WinDivert и освобождает ресурсы
 func (s *RawSender) Close() error {
-	if s.handle != 0 {
-		dll, err := syscall.LoadDLL("WinDivert.dll")
-		if err != nil {
-			return err
-		}
-		defer dll.Release()
+	var lastErr error
 
-		closeProc, err := dll.FindProc("WinDivertClose")
-		if err != nil {
-			return err
+	if s.handle != 0 {
+		closeProc, err := s.dll.FindProc("WinDivertClose")
+		if err == nil {
+			ret, _, _ := closeProc.Call(uintptr(s.handle))
+			if ret == 0 {
+				lastErr = fmt.Errorf("failed to close WinDivert handle")
+			}
+			s.handle = 0
+		} else {
+			lastErr = fmt.Errorf("failed to find WinDivertClose: %v", err)
 		}
-		closeProc.Call(uintptr(s.handle))
 	}
-	return nil
+
+	if s.dll != nil {
+		s.dll.Release()
+		s.dll = nil
+	}
+
+	s.sendProc = nil
+	return lastErr
 }
 
 // GetStats возвращает статистику
 func (s *RawSender) GetStats() SenderStats {
 	return s.stats
+}
+
+// newWindowsSenderWithHandle создает отправитель с существующим handle
+func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
+	// Загружаем DLL для отправки
+	dll, err := syscall.LoadDLL("WinDivert.dll")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load WinDivert.dll: %v", err)
+	}
+
+	sendProc, err := dll.FindProc("WinDivertSend")
+	if err != nil {
+		dll.Release()
+		return nil, fmt.Errorf("failed to find WinDivertSend: %v", err)
+	}
+
+	log.Printf("WinDivert sender created with shared handle: %v", handle)
+	return &RawSender{
+		handle:   WinDivertHandle(handle),
+		cfg:      cfg,
+		dll:      dll,
+		sendProc: sendProc,
+	}, nil
 }

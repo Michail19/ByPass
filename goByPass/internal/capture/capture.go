@@ -13,6 +13,7 @@ type Packet struct {
 	Length    int
 	Interface string
 	Timestamp int64
+	Addr      []byte // WinDivert address
 }
 
 // Capturer определяет интерфейс для перехватчиков пакетов
@@ -20,6 +21,7 @@ type Capturer interface {
 	Start(ctx context.Context) error
 	Stop() error
 	Packets() <-chan Packet
+	GetHandle() uintptr // Для передачи handle в sender
 }
 
 // PacketModifier определяет интерфейс для модификации пакетов

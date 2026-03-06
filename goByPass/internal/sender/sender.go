@@ -49,3 +49,9 @@ var NewSender = func(cfg Config) (Sender, error) {
 	// Эта функция будет переопределена в платформозависимых файлах
 	return nil, ErrNotSupported
 }
+
+// NewSenderWithHandle создает отправитель с существующим handle (для WinDivert)
+// Это отдельная функция, НЕ метод интерфейса!
+var NewSenderWithHandle = func(handle uintptr, cfg Config) (Sender, error) {
+	return nil, ErrNotSupported
+}
