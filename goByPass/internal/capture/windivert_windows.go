@@ -120,6 +120,12 @@ func (w *WinDivert) Packets() <-chan Packet {
 
 // processPackets обрабатывает входящие пакеты
 func (w *WinDivert) processPackets(ctx context.Context) {
+	recvProc, err := w.dll.FindProc("WinDivertRecv")
+	if err != nil {
+		log.Printf("Failed to find WinDivertRecv: %v", err)
+		return
+	}
+
 	buf := make([]byte, w.config.MaxPacketLen)
 
 	for {
@@ -131,9 +137,9 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 		default:
 			// WinDivertRecv(handle, packet, packetLen, &recvLen, &addr)
 			var recvLen uint
-			var addr [64]byte
+			var addr [64]byte // WINDIVERT_ADDRESS
 
-			ret, _, _ := w.recvProc.Call(
+			ret, _, _ := recvProc.Call(
 				uintptr(w.handle),
 				uintptr(unsafe.Pointer(&buf[0])),
 				uintptr(len(buf)),
@@ -147,6 +153,7 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 				continue
 			}
 
+			// Копируем адрес
 			addrCopy := make([]byte, 64)
 			copy(addrCopy, addr[:])
 
@@ -155,7 +162,7 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 				Data:      make([]byte, recvLen),
 				Length:    int(recvLen),
 				Timestamp: time.Now().UnixNano(),
-				Addr:      addrCopy,
+				Addr:      addrCopy, // Сохраняем адрес!
 			}
 			copy(packet.Data, buf[:recvLen])
 

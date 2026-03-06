@@ -218,14 +218,20 @@ func (s *RawSender) Send(packet []byte) error {
 		return fmt.Errorf("%w: packet too short: %d bytes", ErrInvalidPacket, len(packet))
 	}
 
+	// Для отладки - логируем первые 20 байт пакета
+	log.Printf("DEBUG: Sending packet: first 20 bytes: % x", packet[:20])
+
 	// Проверяем IP-заголовок
 	version := packet[0] >> 4
 	if version != 4 {
 		log.Printf("WARNING: Non-IPv4 packet (version=%d) via WinDivert", version)
 	}
 
+	// Адрес должен быть передан из capture
+	// В тестовом режиме используем нулевой адрес
+	var addr [64]byte
+
 	var sendLen uint
-	var addr [64]byte // Адресная структура WinDivert (может быть пустой для отправки)
 
 	// Используем сохраненную процедуру
 	ret, _, _ := s.sendProc.Call(
@@ -233,7 +239,7 @@ func (s *RawSender) Send(packet []byte) error {
 		uintptr(unsafe.Pointer(&packet[0])),
 		uintptr(len(packet)),
 		uintptr(unsafe.Pointer(&sendLen)),
-		uintptr(unsafe.Pointer(&addr[0])),
+		uintptr(unsafe.Pointer(&addr[0])), // Адрес может быть нулевым
 	)
 
 	if ret == 0 {
