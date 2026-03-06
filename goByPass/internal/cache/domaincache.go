@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"context"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -72,29 +74,41 @@ func (c *DomainCache) Get(domain string) (*DomainCacheEntry, bool) {
 	return entry, true
 }
 
-// Resolve разрешает домен в IP (с кэшированием)
+// Resolve разрешает домен в IP (с кэшированием и таймаутом)
 func (c *DomainCache) Resolve(domain string) ([]net.IP, error) {
 	// Проверяем кэш
 	if entry, exists := c.Get(domain); exists {
 		return entry.IPs, nil
 	}
 
-	// Выполняем DNS-запрос
+	// Создаем контекст с таймаутом
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resolver := &net.Resolver{}
 	start := time.Now()
-	ips, err := net.LookupIP(domain)
+
+	ips, err := resolver.LookupIPAddr(ctx, domain)
 	resolveTime := time.Since(start)
 
+	c.mu.Lock()
 	c.stats.ResolveCount++
+	c.mu.Unlock()
 
 	if err != nil {
+		c.mu.Lock()
 		c.stats.ResolveErrors++
+		c.mu.Unlock()
 		return nil, err
 	}
 
-	// Сохраняем в кэш
-	c.Put(domain, ips, "", resolveTime)
+	result := make([]net.IP, len(ips))
+	for i, ip := range ips {
+		result[i] = ip.IP
+	}
 
-	return ips, nil
+	c.Put(domain, result, "", resolveTime)
+	return result, nil
 }
 
 // Put добавляет запись в кэш
@@ -197,13 +211,17 @@ func (c *DomainCache) GetStats() DomainCacheStats {
 
 // Preload популярные домены
 func (c *DomainCache) Preload(domains []string) error {
-	for _, domain := range domains {
-		go func() {
-			_, err := c.Resolve(domain)
-			if err != nil {
+	semaphore := make(chan struct{}, 5) // Максимум 5 одновременных запросов
 
+	for _, domain := range domains {
+		semaphore <- struct{}{}
+		go func(d string) {
+			defer func() { <-semaphore }()
+			_, err := c.Resolve(d)
+			if err != nil {
+				log.Printf("Failed to preload domain %s: %v", d, err)
 			}
-		}()
+		}(domain)
 	}
 	return nil
 }
