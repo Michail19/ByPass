@@ -8,8 +8,8 @@ func DefaultConfig() *Config {
 		App: AppConfig{
 			Name:       "ByPass",
 			Version:    "1.0.0",
-			PidFile:    "/var/run/bypass.pid",
-			WorkingDir: "/etc/bypass",
+			PidFile:    "bypass.pid",
+			WorkingDir: ".",
 			Daemonize:  false,
 		},
 
@@ -68,7 +68,7 @@ func DefaultConfig() *Config {
 
 		Strategy: StrategyConfig{
 			DefaultStrategy: "moderate",
-			StrategyFile:    "/etc/bypass/strategies.json",
+			StrategyFile:    "configs\\strategies\\strategies.json",
 			AutoDiscovery: struct {
 				Enabled        bool     `yaml:"enabled" json:"enabled"`
 				TestDomains    []string `yaml:"test_domains" json:"test_domains"`
@@ -81,6 +81,7 @@ func DefaultConfig() *Config {
 					"google.com",
 					"youtube.com",
 					"discord.com",
+					"telegram.org",
 				},
 				TestPorts:      []int{443},
 				TestInterval:   3600,
@@ -106,7 +107,7 @@ func DefaultConfig() *Config {
 		Logging: LoggingConfig{
 			Level:      "info",
 			Output:     "stdout",
-			FilePath:   "/var/log/bypass.log",
+			FilePath:   "var/log/bypass.log",
 			MaxSize:    10,
 			MaxBackups: 3,
 			Compress:   true,

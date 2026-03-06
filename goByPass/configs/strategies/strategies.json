@@ -22,11 +22,11 @@
   {
     "id": 2,
     "name": "moderate",
-    "description": "Умеренная стратегия - только hostcase",
+    "description": "Умеренная стратегия - split после 50 и 100 байт",
     "apply_to_http": true,
     "apply_to_tls": true,
-    "split_mode": 0,
-    "split_positions": [],
+    "split_mode": 2,
+    "split_positions": [50, 100],
     "split_sni_offset": true,
     "disorder_mode": 0,
     "disorder_ttl": 0,
@@ -121,6 +121,75 @@
     "http_mod_mode": 0,
     "host_case": false,
     "tls_record_split": false,
+    "priority": 1
+  },
+  {
+    "id": 11,
+    "name": "split-100",
+    "description": "Split на 100 байт",
+    "apply_to_http": true,
+    "apply_to_tls": true,
+    "split_mode": 2,
+    "split_positions": [100],
+    "split_sni_offset": true,
+    "priority": 1
+  },
+  {
+    "id": 12,
+    "name": "split-50",
+    "description": "Split на 50 байт",
+    "apply_to_http": true,
+    "apply_to_tls": true,
+    "split_mode": 2,
+    "split_positions": [50],
+    "split_sni_offset": true,
+    "priority": 2
+  },
+  {
+    "id": 13,
+    "name": "split-20",
+    "description": "Split на 20 байт",
+    "apply_to_http": true,
+    "apply_to_tls": true,
+    "split_mode": 2,
+    "split_positions": [20],
+    "split_sni_offset": true,
+    "priority": 3
+  },
+  {
+    "id": 14,
+    "name": "split-1",
+    "description": "Split первого байта",
+    "apply_to_http": true,
+    "apply_to_tls": true,
+    "split_mode": 1,
+    "split_positions": [1],
+    "split_sni_offset": true,
+    "priority": 4
+  },
+  {
+    "id": 15,
+    "name": "mixed",
+    "description": "Split + hostcase",
+    "apply_to_http": true,
+    "apply_to_tls": true,
+    "split_mode": 2,
+    "split_positions": [1, 50],
+    "split_sni_offset": true,
+    "http_mod_mode": 1,
+    "host_case": true,
+    "priority": 5
+  },
+  {
+    "id": 16,
+    "name": "hostcase-only",
+    "description": "Только изменение регистра Host:",
+    "apply_to_http": true,
+    "apply_to_tls": true,
+    "split_mode": 0,
+    "split_positions": [],
+    "http_mod_mode": 1,
+    "host_case": true,
     "priority": 1
   }
 ]

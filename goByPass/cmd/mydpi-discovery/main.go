@@ -13,29 +13,52 @@ import (
 	"ByPass/internal/strategy"
 )
 
+var (
+	version   = "1.0.0"
+	buildTime = "unknown"
+	commit    = "unknown"
+)
+
 func main() {
 	var (
-		configFile = flag.String("config", "config.yaml", "config file")
-		domains    = flag.String("domains", "", "comma-separated domains to test")
-		ports      = flag.String("ports", "443", "comma-separated ports to test")
-		outputFile = flag.String("output", "discovery.json", "output file")
-		samples    = flag.Int("samples", 10, "samples per test")
-		timeout    = flag.Duration("timeout", 5*time.Second, "test timeout")
+		configFile  = flag.String("config", "", "path to config file (optional)")
+		domains     = flag.String("domains", "", "comma-separated domains to test")
+		ports       = flag.String("ports", "443", "comma-separated ports to test")
+		outputFile  = flag.String("output", "discovery.json", "output file")
+		samples     = flag.Int("samples", 10, "samples per test")
+		timeout     = flag.Duration("timeout", 5*time.Second, "test timeout")
+		showVersion = flag.Bool("version", false, "show version information")
 	)
 	flag.Parse()
 
-	// Загружаем конфигурацию
-	cfg, err := config.Load(*configFile)
-	if err != nil {
-		log.Printf("Warning: failed to load config: %v, using defaults", err)
+	// Показываем версию
+	if *showVersion {
+		fmt.Printf("ByPass Discovery version %s\n", version)
+		fmt.Printf("  build time: %s\n", buildTime)
+		fmt.Printf("  commit: %s\n", commit)
+		return
+	}
+
+	// Загружаем конфигурацию (опционально)
+	var cfg *config.Config
+	var err error
+
+	if *configFile != "" {
+		cfg, err = config.Load(*configFile)
+		if err != nil {
+			log.Printf("Warning: failed to load config from %s: %v, using defaults", *configFile, err)
+			cfg = config.DefaultConfig()
+		}
+	} else {
 		cfg = config.DefaultConfig()
+		log.Println("No config file specified, using default configuration")
 	}
 
 	// Создаем менеджер стратегий
 	sm := strategy.NewManager()
 	defer sm.Stop()
 
-	// Загружаем стратегии из файла, если указан
+	// Загружаем стратегии из файла, если указан в конфиге
 	if cfg.Strategy.StrategyFile != "" {
 		if err := sm.LoadFromFile(cfg.Strategy.StrategyFile); err != nil {
 			log.Printf("Warning: failed to load strategies from %s: %v",
@@ -55,6 +78,7 @@ func main() {
 				"youtube.com",
 				"discord.com",
 				"github.com",
+				"telegram.org",
 			}
 		}
 	}
@@ -84,13 +108,22 @@ func main() {
 	fmt.Printf("Starting discovery with %d domains, %d ports, %d samples\n",
 		len(testDomains), len(testPorts), *samples)
 	fmt.Printf("Testing %d strategies...\n", len(sm.ListStrategies()))
+	fmt.Printf("Min success rate: %.1f%%\n", cfg.Strategy.AutoDiscovery.MinSuccessRate*100)
 
 	start := time.Now()
 	if err := discovery.Start(); err != nil {
 		log.Fatal(err)
 	}
 
-	// Ждем завершения
+	// Ждем завершения (в реальном коде нужно дождаться окончания)
+	// Для простоты подождем расчетное время
+	estimatedTime := time.Duration(len(testDomains)*len(testPorts)*len(sm.ListStrategies())*(*samples)) * 100 * time.Millisecond
+	fmt.Printf("Estimated time: %v\n", estimatedTime)
+
+	// Здесь нужно добавить ожидание завершения
+	// В реальном коде discovery должен сигнализировать о завершении
+	time.Sleep(estimatedTime + 5*time.Second)
+
 	discovery.Stop()
 	duration := time.Since(start)
 
@@ -100,8 +133,8 @@ func main() {
 	// Выводим результаты
 	fmt.Printf("\nDiscovery completed in %v\n", duration)
 	fmt.Printf("Results:\n")
-	fmt.Printf("%-4s %-20s %-10s %-15s %s\n", "ID", "Strategy", "Success", "Avg Response", "Errors")
-	fmt.Println("--------------------------------------------------------")
+	fmt.Printf("%-4s %-20s %-12s %-15s %s\n", "ID", "Strategy", "Success Rate", "Avg Response", "Errors")
+	fmt.Println("--------------------------------------------------------------------------------")
 
 	for _, r := range results {
 		strat, _ := sm.GetStrategy(r.StrategyID)
@@ -115,7 +148,7 @@ func main() {
 			errMsg = fmt.Sprintf("%d errors", len(r.Errors))
 		}
 
-		fmt.Printf("%-4d %-20s %-10.1f%% %-15v %s\n",
+		fmt.Printf("%-4d %-20s %-11.1f%% %-15v %s\n",
 			r.StrategyID,
 			name,
 			r.SuccessRate*100,
@@ -126,27 +159,47 @@ func main() {
 	// Сохраняем в файл
 	if err := saveResults(*outputFile, results); err != nil {
 		log.Printf("Failed to save results: %v", err)
+	} else {
+		fmt.Printf("\nResults saved to %s\n", *outputFile)
 	}
 
 	// Выбираем лучшую стратегию
 	best := discovery.GetBestStrategy()
 	if best != nil {
-		fmt.Printf("\nBest strategy: ID=%d with success rate %.1f%%\n",
+		fmt.Printf("\n🎯 Best strategy: ID=%d with success rate %.1f%%\n",
 			best.StrategyID, best.SuccessRate*100)
 
-		// Применяем
-		if err := sm.SetActive(best.StrategyID); err != nil {
-			log.Printf("Failed to set active strategy: %v", err)
+		// Показываем детали лучшей стратегии
+		if strat, exists := sm.GetStrategy(best.StrategyID); exists {
+			fmt.Printf("   Name: %s\n", strat.Name)
+			fmt.Printf("   Description: %s\n", strat.Description)
+			fmt.Printf("   Split mode: %v\n", strat.SplitMode)
+			fmt.Printf("   Split positions: %v\n", strat.SplitPositions)
 		}
 
-		// Сохраняем лучшую стратегию как активную в файл
-		if cfg.Strategy.StrategyFile != "" {
-			// Можно сохранить обновленную стратегию с активной
-			err := sm.SaveToFile(cfg.Strategy.StrategyFile)
-			if err != nil {
-				return
+		// Применяем (опционально)
+		fmt.Print("\nApply this strategy as active? (y/n): ")
+		var response string
+		fmt.Scanln(&response)
+		if response == "y" || response == "Y" {
+			if err := sm.SetActive(best.StrategyID); err != nil {
+				log.Printf("Failed to set active strategy: %v", err)
+			} else {
+				fmt.Println("✅ Strategy activated successfully")
+
+				// Сохраняем обновленную стратегию в файл
+				if cfg.Strategy.StrategyFile != "" {
+					err := sm.SaveToFile(cfg.Strategy.StrategyFile)
+					if err != nil {
+						log.Printf("Failed to save strategies: %v", err)
+					} else {
+						fmt.Printf("Strategies saved to %s\n", cfg.Strategy.StrategyFile)
+					}
+				}
 			}
 		}
+	} else {
+		fmt.Println("\n❌ No strategy meets the minimum success rate")
 	}
 }
 

@@ -90,15 +90,22 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 
 	// Сначала пробуем найти стратегию по hostname
 	if hostname != "" {
-		// Для youtube.com использовать стратегию 8
-		if hostname == "youtube.com" || strings.Contains(hostname, "youtube") {
-			if strat, exists := m.strategies[8]; exists {
+		// Кастомные правила для известных сайтов
+		switch {
+		case strings.Contains(hostname, "google"):
+			if strat, exists := m.strategies[11]; exists { // split-100 для Google
 				return strat
 			}
-		}
-		// Для discord.com использовать стратегию 9
-		if hostname == "discord.com" || strings.Contains(hostname, "discord") {
-			if strat, exists := m.strategies[9]; exists {
+		case strings.Contains(hostname, "youtube"):
+			if strat, exists := m.strategies[14]; exists { // split-1 для YouTube
+				return strat
+			}
+		case strings.Contains(hostname, "discord"):
+			if strat, exists := m.strategies[15]; exists { // mixed для Discord
+				return strat
+			}
+		case strings.Contains(hostname, "telegram"):
+			if strat, exists := m.strategies[12]; exists { // split-50 для Telegram
 				return strat
 			}
 		}

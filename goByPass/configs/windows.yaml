@@ -40,14 +40,16 @@ cache:
             - discord.com
             - telegram.org
 strategy:
-    default_strategy: moderate
+    default_strategy: "moderate"
     strategy_file: "configs/strategies/strategies.json"
     auto_discovery:
-        enabled: false
+        enabled: true
         test_domains:
             - google.com
             - youtube.com
             - discord.com
+            - telegram.org
+            - github.com
         test_ports:
             - 443
         test_interval: 3600
