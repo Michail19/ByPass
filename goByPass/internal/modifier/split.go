@@ -30,6 +30,11 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 	var segments [][]byte
 	prevPos := 0
 	for _, pos := range splitPos {
+		if pos < 5 || (pos > 5 && pos%5 != 0) { // safe alignments
+			log.Printf("Invalid split pos %d for TLS, skipping", pos)
+			continue
+		}
+
 		if pos > prevPos && pos < payloadLen {
 			segments = append(segments, packet[payloadOffset+prevPos:payloadOffset+pos])
 			prevPos = pos

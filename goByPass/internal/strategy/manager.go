@@ -96,8 +96,8 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 			if strat, exists := m.strategies[11]; exists { // split-100 для Google
 				return strat
 			}
-		case strings.Contains(hostname, "youtube"):
-			if strat, exists := m.strategies[14]; exists { // split-1 для YouTube
+		case strings.Contains(hostname, "youtube") || strings.Contains(hostname, "googlevideo"):
+			if strat, exists := m.strategies[20]; exists {
 				return strat
 			}
 		case strings.Contains(hostname, "discord"):
@@ -215,6 +215,10 @@ func (m *Manager) processResults() {
 	for {
 		select {
 		case <-m.closeChan:
+			// Drain channel to avoid leaks
+			for len(m.updateChan) > 0 {
+				<-m.updateChan
+			}
 			return
 		case result := <-m.updateChan:
 			m.UpdateStrategy(result.StrategyID, result.Success, result.ResponseTime)

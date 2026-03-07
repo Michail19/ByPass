@@ -5,6 +5,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,7 +46,7 @@ type Discovery struct {
 // DiscoveryProgress прогресс автоподбора
 type DiscoveryProgress struct {
 	TotalTests     int
-	CompletedTests int
+	CompletedTests int64
 	CurrentDomain  string
 	CurrentPort    int
 	StartTime      time.Time
@@ -97,6 +98,7 @@ func (d *Discovery) Start() error {
 func (d *Discovery) Stop() {
 	if d.running {
 		close(d.stopChan)
+		//wg.Wait() // из runDiscovery
 		d.running = false
 	}
 }
@@ -181,6 +183,8 @@ func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 	d.mu.Lock()
 	d.results[strategy.ID] = result
 	d.mu.Unlock()
+
+	atomic.AddInt64(&d.progress.CompletedTests, 1)
 }
 
 // testConnection тестирует соединение с доменом

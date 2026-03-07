@@ -51,6 +51,7 @@ type PipelineStats struct {
 	CacheHits        uint64
 	CacheMisses      uint64
 	AvgProcessTime   time.Duration
+	TotalProcessTime time.Duration
 	StartTime        time.Time
 	LastPacketTime   time.Time
 }
@@ -211,7 +212,10 @@ func (p *Pipeline) worker(id int) {
 		select {
 		case <-p.ctx.Done():
 			return
-		case packet := <-p.packetChan:
+		case packet, ok := <-p.packetChan:
+			if !ok {
+				return // channel closed
+			}
 			p.processPacket(&packet)
 		}
 	}
@@ -267,6 +271,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// Проверяем кэш
 	var shouldBypass bool
 	var strategyID int
+	var strats strategy.Strategy
 
 	if cached, exists := p.ipCache.GetByIP(dstIP); exists {
 		shouldBypass = cached.ShouldBypass
@@ -284,8 +289,9 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			int(dstPort),
 			"tcp",
 		)
-		if strat != nil {
+		if strat != nil && strat.FailCount < 3 {
 			shouldBypass = true
+			strats = *strat
 			strategyID = strat.ID
 			log.Printf("DEBUG: Selected strategy %d (%s) for %s (hostname: %s)",
 				strategyID, strat.Name, dstIP.String(), flow.Hostname)
@@ -300,50 +306,57 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 	// Применяем модификацию если нужно
 	if shouldBypass {
-		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
-		if err == nil && result != nil {
-			validPackets := 0
-			for i, modifiedPkt := range result.ModifiedPackets {
-				// Проверяем целостность модифицированного пакета
-				if len(modifiedPkt) < 20 {
-					log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping",
-						i, len(modifiedPkt))
-					continue
+		// Определить тип пакета
+		ipHeaderLen := int(pkt.Data[0]&0x0F) * 4
+		tcpOffset := ipHeaderLen
+		flags := pkt.Data[tcpOffset+13]
+		isSYN := (flags & 0x02) != 0
+		isACK := (flags & 0x10) != 0
+		isData := len(pkt.Data) > tcpOffset+int(pkt.Data[tcpOffset+12]>>4)*4
+		isClientHello := isData && pkt.Data[tcpOffset+20] == 0x16 // TLS ContentType Handshake
+
+		// Применять strat только если matches
+		if (isClientHello && strats.ApplyToTLS) || (isSYN || isACK) {
+			result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
+			if err == nil && result != nil {
+				validPackets := 0
+				for i, modifiedPkt := range result.ModifiedPackets {
+					// Проверяем целостность модифицированного пакета
+					if len(modifiedPkt) < 20 {
+						log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping",
+							i, len(modifiedPkt))
+						continue
+					}
+
+					// Проверяем, что это похоже на IP-пакет
+					if modifiedPkt[0]>>4 != 4 {
+						log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)",
+							i, modifiedPkt[0]>>4)
+					}
+
+					if p.sendPacket(modifiedPkt, pkt.Addr) {
+						validPackets++
+						p.updateStats(func(stats *PipelineStats) {
+							stats.PacketsModified++
+							stats.PacketsSent++
+						})
+					}
 				}
 
-				// Проверяем, что это похоже на IP-пакет
-				if modifiedPkt[0]>>4 != 4 {
-					log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)",
-						i, modifiedPkt[0]>>4)
-				}
+				log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
+					validPackets, len(result.ModifiedPackets), dstIP.String())
 
-				if p.sendPacket(modifiedPkt, pkt.Addr) {
-					validPackets++
-					p.updateStats(func(stats *PipelineStats) {
-						stats.PacketsModified++
-						stats.PacketsSent++
-					})
+				// Если нужно, отправляем оригинал
+				if result.SendOriginal && len(pkt.Data) >= 20 {
+					if p.sendPacket(pkt.Data, pkt.Addr) {
+						p.updateStats(func(stats *PipelineStats) {
+							stats.PacketsSent++
+						})
+					}
 				}
 			}
-
-			log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
-				validPackets, len(result.ModifiedPackets), dstIP.String())
-
-			// Если нужно, отправляем оригинал
-			if result.SendOriginal && len(pkt.Data) >= 20 {
-				if p.sendPacket(pkt.Data, pkt.Addr) {
-					p.updateStats(func(stats *PipelineStats) {
-						stats.PacketsSent++
-					})
-				}
-			}
-		}
-	} else {
-		// Просто отправляем оригинал
-		if p.sendPacket(pkt.Data, pkt.Addr) {
-			p.updateStats(func(stats *PipelineStats) {
-				stats.PacketsSent++
-			})
+		} else {
+			p.sendPacket(pkt.Data, pkt.Addr) // Пропустить data-пакеты
 		}
 	}
 
@@ -351,7 +364,8 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	processTime := time.Since(startTime)
 	p.updateStats(func(stats *PipelineStats) {
 		stats.PacketsProcessed++
-		stats.AvgProcessTime = (stats.AvgProcessTime + processTime) / 2
+		stats.TotalProcessTime += processTime
+		stats.AvgProcessTime = stats.TotalProcessTime / time.Duration(stats.PacketsProcessed)
 	})
 }
 
@@ -365,9 +379,9 @@ func (p *Pipeline) sendPacket(data []byte, addr []byte) bool {
 	// Для WinDivert sender используем SendWithAddr
 	if rs, ok := p.sender.(*sender.RawSender); ok {
 		// Проверяем, что адрес не nil
-		if addr == nil {
-			log.Printf("WARNING: Nil address for WinDivert, creating dummy")
-			addr = make([]byte, 64)
+		if addr == nil || len(addr) < 64 {
+			log.Printf("WARNING: Invalid addr for WinDivert, skipping send")
+			return false
 		}
 
 		if err := rs.SendWithAddr(data, addr); err != nil {
