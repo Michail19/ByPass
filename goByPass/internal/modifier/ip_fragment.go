@@ -15,6 +15,13 @@ type IPFragment struct {
 
 // FragmentIPPacket разбивает IP-пакет на фрагменты (RFC 791)
 func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
+	// Add DF check
+	df := (packet[6] & 0x40) != 0
+	if df {
+		log.Printf("DF bit set, skipping fragmentation")
+		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
+	}
+
 	if len(packet) < 20 {
 		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
 	}

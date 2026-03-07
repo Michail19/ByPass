@@ -1,6 +1,9 @@
 package modifier
 
-import "log"
+import (
+	"encoding/binary"
+	"log"
+)
 
 // ApplySplit применяет разбиение пакета
 func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI bool) ([][]byte, error) {
@@ -9,41 +12,50 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 	}
 
 	// Проверяем, что пакет достаточно большой
-	if len(packet) < 40 {
+	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
 		log.Printf("DEBUG: Packet too small for split (%d bytes), returning original", len(packet))
 		return [][]byte{packet}, nil
 	}
 
-	// Проверяем IPv4
-	if packet[0]>>4 != 4 {
-		log.Printf("DEBUG: Not IPv4, skipping split")
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpHeaderOffset := ipHeaderLen
+	tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
+	payloadOffset := tcpHeaderOffset + tcpHeaderLen
+	payloadLen := len(packet) - payloadOffset
+	if payloadLen <= 0 {
 		return [][]byte{packet}, nil
 	}
 
-	// Определяем MTU для фрагментации
-	splitMtu := splitPos[0]
-	if splitMtu < 576 {
-		splitMtu = 576
+	// Split at positions (like zapret split-pos)
+	var segments [][]byte
+	prevPos := 0
+	for _, pos := range splitPos {
+		if pos > prevPos && pos < payloadLen {
+			segments = append(segments, packet[payloadOffset+prevPos:payloadOffset+pos])
+			prevPos = pos
+		}
 	}
-	if splitMtu > 1400 {
-		splitMtu = 1400
+	segments = append(segments, packet[payloadOffset+prevPos:])
+
+	// Create TCP segments
+	var results [][]byte
+	seq := binary.BigEndian.Uint32(packet[tcpHeaderOffset+4:])
+	for _, seg := range segments {
+		segLen := len(seg)
+		newPkt := make([]byte, ipHeaderLen+tcpHeaderLen+segLen)
+		copy(newPkt, packet[:payloadOffset])
+		binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
+		binary.BigEndian.PutUint32(newPkt[tcpHeaderOffset+4:], seq)
+		copy(newPkt[payloadOffset:], seg)
+		// Clear DF if set
+		newPkt[6] &= ^byte(0x40)
+		recalculateIPChecksum(newPkt)
+		FixTCPChecksum(newPkt)
+		results = append(results, newPkt)
+		seq += uint32(segLen)
 	}
 
-	log.Printf("DEBUG: Splitting packet of size %d with fragment size %d", len(packet), splitMtu)
-
-	// Фрагментируем пакет
-	fragments, err := FragmentIPPacket(packet, splitMtu)
-	if err != nil {
-		log.Printf("ERROR: Failed to fragment packet: %v", err)
-		return [][]byte{packet}, nil
-	}
-
-	result := make([][]byte, 0, len(fragments))
-	for _, frag := range fragments {
-		result = append(result, frag.Data)
-	}
-
-	return result, nil
+	return results, nil
 }
 
 // SplitAtPosition разбивает пакет в указанной позиции

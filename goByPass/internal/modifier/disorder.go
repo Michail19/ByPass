@@ -4,83 +4,92 @@ import (
 	"encoding/binary"
 )
 
-// ApplyDisorder применяет нарушение порядка (отправка префикса с низким TTL + оригинал)
+// ApplyDisorder применяет нарушение порядка (reverse order segments + optional low TTL fake prefix)
 func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl int) ([][]byte, error) {
 	if len(disorderPos) == 0 || ttl <= 0 {
 		return nil, nil
 	}
 
+	// Проверяем TCP/IPv4
+	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
+		return nil, nil
+	}
+
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpHeaderOffset := ipHeaderLen
+	tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
+	payloadOffset := tcpHeaderOffset + tcpHeaderLen
+	payloadLen := len(packet) - payloadOffset
+	if payloadLen <= 0 {
+		return nil, nil // No payload to disorder
+	}
+
 	var results [][]byte
 
+	// Split payload into segments at positions
+	segments := [][]byte{}
+	prevPos := 0
 	for _, pos := range disorderPos {
-		if pos <= 0 || pos >= len(packet) {
+		if pos <= prevPos || pos >= payloadLen {
 			continue
 		}
+		segments = append(segments, packet[payloadOffset+prevPos:payloadOffset+pos])
+		prevPos = pos
+	}
+	segments = append(segments, packet[payloadOffset+prevPos:]) // Last segment
 
-		// Проверяем, что это IPv4 пакет
-		if len(packet) < 20 || packet[0]>>4 != 4 {
-			continue
+	// Reverse order for disorder (like GoodbyeDPI reverse-frag)
+	for i := len(segments) - 1; i >= 0; i-- {
+		seg := segments[i]
+		segLen := len(seg)
+
+		// Create new TCP segment packet
+		newPkt := make([]byte, ipHeaderLen+tcpHeaderLen+segLen)
+		copy(newPkt, packet[:payloadOffset]) // Copy headers
+
+		// Update totalLen in IP
+		binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
+
+		// Update seq (increment by previous segments total len)
+		seq := binary.BigEndian.Uint32(newPkt[tcpHeaderOffset+4:])
+		seq += uint32(payloadOffset + (payloadLen - segLen - prevPos)) // Adjust for position
+		binary.BigEndian.PutUint32(newPkt[tcpHeaderOffset+4:], seq)
+
+		// Copy segment data
+		copy(newPkt[payloadOffset:], seg)
+
+		// Optional low TTL for first "fake" segment
+		if i == len(segments)-1 { // First in reverse = last original
+			err := setIPTTL(newPkt, ttl)
+			if err != nil {
+				return nil, err
+			} // Low TTL for disorder fake
 		}
 
-		ipHeaderLen := int(packet[0]&0x0F) * 4
-		if packet[9] != 6 { // Не TCP — пропустить
-			continue
+		// Recalculate checksums only once
+		recalculateIPChecksum(newPkt)
+		err := FixTCPChecksum(newPkt)
+		if err != nil {
+			return nil, err
 		}
 
-		tcpHeaderOffset := ipHeaderLen
-		tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
-		minPos := ipHeaderLen + tcpHeaderLen // Минимум — полный TCP header
-
-		if pos < minPos {
-			continue // Не обрезаем header
-		}
-
-		// firstPart до pos (полный header + часть payload)
-		firstPart := make([]byte, pos)
-		copy(firstPart, packet[:pos])
-
-		// Обновляем totalLen в IP
-		binary.BigEndian.PutUint16(firstPart[2:4], uint16(pos))
-
-		// Устанавливаем TTL и пересчитываем IP checksum
-		if err := setIPTTL(firstPart, ttl); err == nil {
-			// Пересчитываем IP checksum
-			recalculateIPChecksum(firstPart)
-
-			// Пересчитываем TCP checksum (поскольку payload обрезан, но header полный)
-			if err := FixTCPChecksum(firstPart); err == nil {
-				results = append(results, firstPart)
-			}
-		}
+		results = append(results, newPkt)
 	}
 
-	// Добавляем оригинал
-	if len(results) > 0 {
-		results = append(results, make([]byte, len(packet))) // Копия, чтобы избежать гонки
-		copy(results[len(results)-1], packet)
-	}
-
+	// No original if full disorder
 	return results, nil
 }
 
-// setIPTTL изменяет TTL в IP-заголовке
+// setIPTTL + recalculate in one (optimized)
 func setIPTTL(packet []byte, ttl int) error {
-	if len(packet) < 20 {
-		return nil // не IP пакет
+	if len(packet) < 20 || (packet[0]>>4 != 4) {
+		return nil
 	}
 
-	// Проверяем версию IP
-	version := packet[0] >> 4
-	if version != 4 {
-		return nil // пока только IPv4
-	}
+	packet[8] = byte(ttl)
 
-	// TTL находится в байте 8 IPv4 заголовка
-	if len(packet) > 8 {
-		packet[8] = byte(ttl)
-		// Пересчитываем контрольную сумму
-		recalculateIPChecksum(packet)
-	}
+	// Пересчитываем контрольную сумму
+	recalculateIPChecksum(packet)
 
 	return nil
 }
