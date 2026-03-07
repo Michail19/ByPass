@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"log"
+	"strings"
 )
 
 // ProtocolType определяет тип протокола
@@ -45,163 +47,162 @@ type ConnectionInfo struct {
 	Host        string // Host заголовок (для HTTP)
 	Method      string // HTTP метод
 	Path        string // HTTP путь
-	JA3         string // TLS fingerprint
-	JA3Hash     string // MD5 хеш JA3
-	UserAgent   string // User-Agent
-	ContentType string // Content-Type
 	IsTLS       bool
 	IsHTTP      bool
 	IsHandshake bool
-	Payload     []byte // первые байты полезной нагрузки
+	IsQUIC      bool
 	PayloadLen  int
+	UserAgent   string // User-Agent заголовок
+	ContentType string // Content-Type заголовок
 }
 
 // Analyzer анализирует пакеты и определяет протокол
-type Analyzer struct {
-	// Кэш для результатов анализа (опционально)
-	cache map[string]*ConnectionInfo
-}
+type Analyzer struct{}
 
 // NewAnalyzer создает новый анализатор
 func NewAnalyzer() *Analyzer {
-	return &Analyzer{
-		cache: make(map[string]*ConnectionInfo),
-	}
+	return &Analyzer{}
 }
 
 // Analyze анализирует пакет и возвращает информацию о соединении
 func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort uint16) (*ConnectionInfo, error) {
-	if len(packet) == 0 {
-		return nil, errors.New("empty packet")
+	if len(packet) < 20 {
+		return nil, errors.New("packet too short")
 	}
 
 	info := &ConnectionInfo{
-		Payload:    packet,
 		PayloadLen: len(packet),
 	}
 
-	// Определяем протокол по первым байтам
-	info.Protocol = a.detectProtocol(packet)
+	// 1. Определяем транспортный протокол
+	if packet[9] == 6 {
+		info.Protocol = ProtocolTCP
+	} else if packet[9] == 17 {
+		info.Protocol = ProtocolUDP
+	} else {
+		return info, nil
+	}
 
-	// Извлекаем специфичную для протокола информацию
-	switch info.Protocol {
-	case ProtocolTLS:
+	// 2. Находим начало payload
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	if len(packet) < ipHeaderLen+20 {
+		return info, nil
+	}
+	tcpHeaderLen := int(packet[ipHeaderLen+12]>>4) * 4
+	payload := packet[ipHeaderLen+tcpHeaderLen:]
+	if len(payload) == 0 {
+		// SYN/ACK без данных — hostname не заполнится
+		return info, nil
+	}
+
+	// 3. Определяем протокол по payload
+	if len(payload) >= 5 && payload[0] == 0x16 && payload[1] == 0x03 {
+		// TLS Handshake или Application Data
 		info.IsTLS = true
-		if err := a.parseTLS(packet, info); err != nil {
-			// Не фатально, просто не смогли извлечь SNI
+		info.IsHandshake = payload[5] == 0x01 // ClientHello
+		if sni := extractSNI(payload); sni != "" {
+			info.SNI = sni
+			log.Printf("[Analyzer] Extracted SNI: %s from %s:%d → %s:%d", sni, srcIP, srcPort, dstIP, dstPort)
 		}
-	case ProtocolHTTP:
+	} else if bytes.HasPrefix(payload, []byte("GET ")) ||
+		bytes.HasPrefix(payload, []byte("POST ")) ||
+		bytes.HasPrefix(payload, []byte("HTTP/")) {
 		info.IsHTTP = true
-		if err := a.parseHTTP(packet, info); err != nil {
-			// Не фатально
+		if host := extractHTTPHost(payload); host != "" {
+			info.Host = host
+			log.Printf("[Analyzer] Extracted HTTP Host: %s", host)
 		}
-	case ProtocolTCP:
-		// Ничего не делаем для обычного TCP
-	case ProtocolUDP:
-		// Ничего не делаем для UDP
-	case ProtocolQUIC:
-		// TODO: добавить парсинг QUIC
-	case ProtocolWebSocket:
-		// TODO: добавить парсинг WebSocket
-	case ProtocolUnknown:
-		// Неизвестный протокол - игнорируем
-	default:
-		// На всякий случай обрабатываем все остальные значения
+	} else if (payload[0]&0xF0) == 0xC0 && len(payload) > 1 {
+		info.IsQUIC = true
+		info.Protocol = ProtocolQUIC
 	}
 
 	return info, nil
 }
 
-// detectProtocol определяет протокол по первым байтам пакета
-func (a *Analyzer) detectProtocol(data []byte) ProtocolType {
-	if len(data) < 2 {
-		return ProtocolUnknown
+// extractSNI — надёжный парсер SNI из TLS ClientHello
+func extractSNI(data []byte) string {
+	if len(data) < 43 {
+		return ""
 	}
 
-	// Проверка на TLS (0x16 - Handshake, 0x03 - SSL/TLS version)
-	if data[0] == 0x16 && (data[1] == 0x03 || data[1] == 0x02 || data[1] == 0x01) {
-		return ProtocolTLS
-	}
+	pos := 5 // skip TLS record header
 
-	// Проверка на HTTP методы
-	if len(data) >= 4 {
-		if bytes.HasPrefix(data, []byte("GET ")) ||
-			bytes.HasPrefix(data, []byte("POST ")) ||
-			bytes.HasPrefix(data, []byte("HEAD ")) ||
-			bytes.HasPrefix(data, []byte("PUT ")) ||
-			bytes.HasPrefix(data, []byte("DELETE ")) ||
-			bytes.HasPrefix(data, []byte("OPTIONS ")) ||
-			bytes.HasPrefix(data, []byte("CONNECT ")) ||
-			bytes.HasPrefix(data, []byte("HTTP/")) {
-			return ProtocolHTTP
+	// Handshake type == 1 (ClientHello)
+	if data[pos] != 0x01 {
+		return ""
+	}
+	pos += 4 // handshake header
+
+	// Skip version (2) + random (32)
+	pos += 34
+
+	// Session ID
+	sessionLen := int(data[pos])
+	pos += 1 + sessionLen
+
+	// Cipher suites
+	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2 + cipherLen
+
+	// Compression methods
+	compLen := int(data[pos])
+	pos += 1 + compLen
+
+	// Extensions length
+	if pos+2 > len(data) {
+		return ""
+	}
+	extLen := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2
+	end := pos + extLen
+
+	for pos+4 <= end && pos < len(data) {
+		extType := binary.BigEndian.Uint16(data[pos : pos+2])
+		extDataLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
+		pos += 4
+
+		if extType == 0x0000 { // server_name
+			if pos+2 > len(data) {
+				return ""
+			}
+			//listLen := int(binary.BigEndian.Uint16(data[pos:]))
+			pos += 2
+
+			if pos+3 > len(data) {
+				return ""
+			}
+			nameType := data[pos]
+			pos += 1
+			if nameType == 0 { // host_name
+				nameLen := int(binary.BigEndian.Uint16(data[pos:]))
+				pos += 2
+				if pos+nameLen <= len(data) {
+					return string(data[pos : pos+nameLen])
+				}
+			}
 		}
+		pos += extDataLen
 	}
-
-	// Проверка на HTTP ответ
-	if len(data) >= 5 {
-		if bytes.HasPrefix(data, []byte("HTTP/1.")) ||
-			bytes.HasPrefix(data, []byte("HTTP/2.")) ||
-			bytes.HasPrefix(data, []byte("HTTP/3.")) {
-			return ProtocolHTTP
-		}
-	}
-
-	// Проверка на QUIC (первые биты: 0b1100xxxx)
-	if len(data) >= 1 && (data[0]&0xF0) == 0xC0 {
-		return ProtocolQUIC
-	}
-
-	// Проверка на WebSocket handshake
-	if len(data) >= 20 && bytes.Contains(data, []byte("Upgrade: websocket")) {
-		return ProtocolWebSocket
-	}
-
-	// По умолчанию возвращаем TCP для TCP-пакетов
-	// Здесь нужно определить, TCP это или UDP
-	if len(data) >= 9 {
-		protocol := data[9] // protocol field in IPv4 header
-		if protocol == 6 {
-			return ProtocolTCP
-		} else if protocol == 17 {
-			return ProtocolUDP
-		}
-	}
-
-	// Если не можем определить, возвращаем TCP как наиболее вероятный
-	return ProtocolTCP
+	return ""
 }
 
-// IsTLS проверяет, является ли пакет TLS
+// extractHTTPHost — извлечение Host из HTTP
+func extractHTTPHost(data []byte) string {
+	lines := bytes.Split(data, []byte("\r\n"))
+	for _, line := range lines {
+		lowerLine := bytes.ToLower(line)
+		if bytes.HasPrefix(lowerLine, []byte("host:")) {
+			parts := bytes.SplitN(line, []byte(":"), 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(string(parts[1]))
+			}
+		}
+	}
+	return ""
+}
+
+// IsTLS — простая проверка
 func IsTLS(data []byte) bool {
-	if len(data) < 3 {
-		return false
-	}
-
-	// TLS record types: 0x14-0x17 (ChangeCipherSpec, Alert, Handshake, ApplicationData)
-	recordType := data[0]
-	if recordType < 0x14 || recordType > 0x17 {
-		return false
-	}
-
-	// TLS version: 0x0300-0x0304 (SSLv3, TLSv1.0-1.3)
-	version := binary.BigEndian.Uint16(data[1:3])
-	return version >= 0x0300 && version <= 0x0304
-}
-
-// IsHTTP проверяет, является ли пакет HTTP
-func IsHTTP(data []byte) bool {
-	if len(data) < 4 {
-		return false
-	}
-
-	// Проверяем начало запроса
-	if bytes.HasPrefix(data, []byte("GET ")) ||
-		bytes.HasPrefix(data, []byte("POST ")) ||
-		bytes.HasPrefix(data, []byte("HTTP/")) {
-		return true
-	}
-
-	// Проверяем наличие HTTP заголовков
-	return bytes.Contains(data, []byte("HTTP/1.")) ||
-		bytes.Contains(data, []byte("HTTP/2."))
+	return len(data) >= 5 && data[0] == 0x16 && data[1] == 0x03
 }

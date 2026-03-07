@@ -72,10 +72,10 @@ func (a *Analyzer) parseHTTPHeaders(data []byte, info *ConnectionInfo) {
 			continue
 		}
 
-		key := string(parts[0])
-		value := string(parts[1])
+		key := strings.ToLower(string(parts[0]))
+		value := strings.TrimSpace(string(parts[1]))
 
-		switch strings.ToLower(key) {
+		switch key {
 		case "host":
 			info.Host = value
 		case "user-agent":

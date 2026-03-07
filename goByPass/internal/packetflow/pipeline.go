@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -258,6 +259,23 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// При создании потока используйте правильный протокол
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
 
+	// Если hostname пустой — пробуем заполнить из кэша или reverse DNS
+	if flow.Hostname == "" {
+		// 1. Пробуем из domainCache (если есть forward lookup)
+		if entry, ok := p.domainCache.Get(dstIP.String()); ok && entry.Domain != "" {
+			flow.SetHostname(entry.Domain)
+			log.Printf("Hostname from domainCache: %s for %s", entry.Domain, dstIP.String())
+		} else {
+			// 2. Reverse DNS (медленно, но работает)
+			names, err := net.LookupAddr(dstIP.String())
+			if err == nil && len(names) > 0 {
+				hostname := strings.TrimSuffix(names[0], ".")
+				flow.SetHostname(hostname)
+				log.Printf("Reverse DNS hostname: %s for %s", hostname, dstIP.String())
+			}
+		}
+	}
+
 	// Анализируем пакет
 	info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
 	if err == nil && info != nil {
@@ -289,6 +307,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		log.Printf("DEBUG: Cache hit for %s: bypass=%v strategy=%d",
 			dstIP.String(), shouldBypass, strategyID)
 	} else {
+		log.Printf("Hostname before: %v", flow.Hostname)
 		// Решаем, нужно ли обходить
 		strat := p.strategyMgr.SelectStrategy(
 			dstIP.String(),

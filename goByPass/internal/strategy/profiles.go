@@ -175,6 +175,20 @@ func (m *Manager) loadDefaultStrategies() {
 		Priority: 5,
 	})
 
+	m.AddStrategy(&Strategy{
+		ID:             12,
+		Name:           "telegram",
+		Description:    "Для Telegram: split + fake",
+		ApplyToTLS:     true,
+		SplitMode:      SplitAfterSNI,
+		SplitPositions: []int{1, 5},
+		SplitSNIOffset: true,
+		FakeMode:       FakeMD5Sig,
+		FakePos:        0,
+		FakeTTL:        8,
+		Priority:       3,
+	})
+
 	// Устанавливаем стратегию по умолчанию
-	m.defaultID = 2 // moderate
+	//m.defaultID = 2 // moderate
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -88,40 +89,79 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Сначала пробуем найти стратегию по hostname
-	hostMap := map[string]int{
-		"youtube.com":     20,
-		"googlevideo.com": 20,
-		"discord.com":     15,
-		"telegram.org":    12,
-		// добавляй по необходимости
-	}
 	lower := strings.ToLower(hostname)
-	if id, ok := hostMap[lower]; ok {
-		if strat, exists := m.strategies[id]; exists {
-			return strat
+
+	log.Printf("Hostname after: %v", lower)
+
+	// Точные и поддоменные совпадения
+	if lower != "" {
+		hostRules := map[string]int{
+			"youtube.com":           20,
+			"www.youtube.com":       20,
+			"m.youtube.com":         20,
+			"youtu.be":              20,
+			"googlevideo.com":       20,
+			"ytimg.com":             20,
+			"ggpht.com":             20,
+			"discord.com":           21,
+			"discord.gg":            21,
+			"telegram.org":          12,
+			"kws2.web.telegram.org": 12,
+		}
+
+		// Проверяем поддомены через contains
+		if strings.Contains(lower, "youtube") || strings.Contains(lower, "googlevideo") ||
+			strings.Contains(lower, "ytimg") || strings.Contains(lower, "ggpht") {
+			if strat, exists := m.strategies[20]; exists {
+				log.Printf("YouTube subdomain match: %s → strategy 20", hostname)
+				return strat
+			}
+		}
+
+		if strings.Contains(lower, "discord") {
+			if strat, exists := m.strategies[21]; exists {
+				log.Printf("Discord match: %s → strategy 21", hostname)
+				return strat
+			}
+		}
+
+		if strings.Contains(lower, "telegram.org") {
+			if strat, exists := m.strategies[12]; exists {
+				log.Printf("Telegram subdomain match: %s → strategy 12", hostname)
+				return strat
+			}
+		}
+
+		// Проверяем точное совпадение
+		if id, ok := hostRules[lower]; ok {
+			if strat, exists := m.strategies[id]; exists {
+				log.Printf("Exact hostname match: %s → strategy %d", hostname, id)
+				return strat
+			}
 		}
 	}
 
-	// Если есть активная стратегия, используем её
-	if m.activeID > 0 {
-		if strat, exists := m.strategies[m.activeID]; exists {
-			return strat
-		}
-	}
+	// Fallback на приоритет (как в уровне 1)
+	var best *Strategy
+	bestPriority := 999999
 
-	// Иначе используем стратегию по умолчанию (2 - moderate)
-	if m.defaultID > 0 {
-		if strat, exists := m.strategies[m.defaultID]; exists {
-			return strat
-		}
-	}
-
-	// Если ничего нет, возвращаем первую попавшуюся
 	for _, strat := range m.strategies {
-		return strat
+		if (protocol == "tcp" && (strat.ApplyToTLS || strat.ApplyToHTTP)) ||
+			(protocol == "udp" && strat.ApplyToQUIC) {
+			if strat.Priority < bestPriority {
+				best = strat
+				bestPriority = strat.Priority
+			}
+		}
 	}
 
+	if best != nil {
+		log.Printf("No specific match, fallback to priority %d: strategy %d (%s)",
+			best.Priority, best.ID, best.Name)
+		return best
+	}
+
+	log.Printf("No strategy found for %s:%d (hostname: %s)", ip, port, hostname)
 	return nil
 }
 
