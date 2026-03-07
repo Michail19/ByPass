@@ -21,18 +21,18 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 	}
 
 	// Определяем MTU для фрагментации
-	mtu := splitPos[0]
-	if mtu < 40 {
-		mtu = 40
+	splitMtu := splitPos[0]
+	if splitMtu < 576 {
+		splitMtu = 576
 	}
-	if mtu > 1400 {
-		mtu = 1400
+	if splitMtu > 1400 {
+		splitMtu = 1400
 	}
 
-	log.Printf("DEBUG: Splitting packet of size %d with fragment size %d", len(packet), mtu)
+	log.Printf("DEBUG: Splitting packet of size %d with fragment size %d", len(packet), splitMtu)
 
 	// Фрагментируем пакет
-	fragments, err := FragmentIPPacket(packet, mtu)
+	fragments, err := FragmentIPPacket(packet, splitMtu)
 	if err != nil {
 		log.Printf("ERROR: Failed to fragment packet: %v", err)
 		return [][]byte{packet}, nil

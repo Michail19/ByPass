@@ -42,7 +42,7 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 	id := binary.BigEndian.Uint16(packet[4:6])
 
 	// Данные начинаются после заголовка
-	flags := packet[6] >> 5
+	//flags := packet[6] >> 5
 
 	// Данные после заголовка
 	if totalLen <= ihl {
@@ -66,7 +66,11 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 	offset := 0
 
 	// Проверка на TLS перед фрагментацией
-	isTLS := len(packet) > 5 && packet[0] == 0x16 && (packet[1] == 0x03)
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpHeaderOffset := ipHeaderLen
+	tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
+	payloadOffset := ipHeaderLen + tcpHeaderLen
+	isTLS := len(packet) > payloadOffset+5 && packet[payloadOffset] == 0x16 && packet[payloadOffset+1] == 0x03 && packet[payloadOffset+2] <= 0x03
 
 	for offset < dataLen {
 		// Размер данных для этого фрагмента
@@ -91,14 +95,17 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 		binary.BigEndian.PutUint16(fragHeader[2:4], uint16(fragTotalLen))
 
 		// Устанавливаем флаги и смещение
-		moreFrags := 0
+		moreFragsBit := uint16(0)
 		if offset+thisDataSize < dataLen {
-			moreFrags = 1
+			moreFragsBit = 1 << 13 // MF bit
 		}
+		fragOffset := uint16(offset/8) & 0x1FFF     // 13 бит offset
+		flagsAndOffset := moreFragsBit | fragOffset // DF bit игнорируем
+		binary.BigEndian.PutUint16(fragHeader[6:8], flagsAndOffset)
+
 		// Смещение в 8-байтовых блоках
-		fragOffset := offset / 8
-		fragHeader[6] = (flags & 0xE0) | byte(moreFrags<<5) | byte(fragOffset>>8&0x1F)
-		fragHeader[7] = byte(fragOffset & 0xFF)
+		//fragHeader[6] = (flags & 0xE0) | byte(moreFragsBit<<5) | byte(fragOffset>>8&0x1F)
+		//fragHeader[7] = byte(fragOffset & 0xFF)
 
 		// Пересчитываем IP checksum
 		binary.BigEndian.PutUint16(fragHeader[10:12], 0)
@@ -120,7 +127,7 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 		fragments = append(fragments, &IPFragment{
 			Data:          fragPacket,
 			Offset:        offset,
-			MoreFragments: moreFrags == 1,
+			MoreFragments: moreFragsBit == 1,
 		})
 
 		offset += thisDataSize

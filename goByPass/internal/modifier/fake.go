@@ -30,9 +30,12 @@ func (pm *PacketModifier) ApplyFake(packet []byte, fakePos int, fakeTTL int, fak
 
 	switch fakeMode {
 	case strategy.FakeMD5Sig:
-		// Добавляем TCP опцию MD5 Signature (kind=19, len=18)
-		addTCPOptionMD5(fakePacket)
-		// После добавления опции нужно пересчитать checksum
+		newFake, err := addTCPOptionMD5(fakePacket)
+		if err != nil {
+			// log или пропустить
+			break
+		}
+		fakePacket = newFake
 		FixTCPChecksum(fakePacket)
 
 	case strategy.FakeBadSeq:
@@ -70,14 +73,12 @@ func (pm *PacketModifier) ApplyFake(packet []byte, fakePos int, fakeTTL int, fak
 
 // modifyTCPWindow изменяет window size (для ACK)
 func modifyTCPWindow(packet []byte, window uint16) {
-	if len(packet) < 40 {
-		return
+	if len(packet) < 40 || packet[9] != 6 {
+		return // или error
 	}
-
-	ipHeaderLen := (packet[0] & 0x0F) * 4
-	tcpHeaderOffset := int(ipHeaderLen)
-
-	if len(packet) < tcpHeaderOffset+16 {
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpHeaderOffset := ipHeaderLen
+	if len(packet) < tcpHeaderOffset+20 {
 		return
 	}
 
@@ -85,30 +86,35 @@ func modifyTCPWindow(packet []byte, window uint16) {
 	binary.BigEndian.PutUint16(packet[tcpHeaderOffset+14:], window)
 }
 
-// addTCPOptionMD5 добавляет опцию MD5 Signature в TCP заголовок
-func addTCPOptionMD5(packet []byte) error {
+// addTCPOptionMD5 добавляет опцию MD5 Signature в TCP заголовок и возвращает новый пакет
+func addTCPOptionMD5(packet []byte) ([]byte, error) {
 	if len(packet) < 40 {
-		return fmt.Errorf("packet too short")
+		return nil, fmt.Errorf("packet too short")
+	}
+
+	// Проверяем, что это TCP
+	if packet[9] != 6 {
+		return nil, fmt.Errorf("not TCP packet")
 	}
 
 	ipHeaderLen := int(packet[0]&0x0F) * 4
 	tcpHeaderOffset := ipHeaderLen
 
 	if len(packet) < tcpHeaderOffset+20 {
-		return fmt.Errorf("packet too short for TCP header")
+		return nil, fmt.Errorf("packet too short for TCP header")
 	}
 
-	// Определяем длину TCP заголовка (в 32-битных словах)
+	// Определяем длину TCP заголовка
 	tcpHeaderLenWords := int(packet[tcpHeaderOffset+12] >> 4)
 	tcpHeaderLen := tcpHeaderLenWords * 4
 
-	// Создаем новый TCP заголовок с местом для опции MD5
+	// Новый TCP заголовок с опцией MD5 (18 байт, но выравниваем на 20 для простоты)
 	newTCPHeaderLen := tcpHeaderLen + 20
-	if newTCPHeaderLen > 60 { // Максимальная длина TCP заголовка
-		return fmt.Errorf("TCP header too long")
+	if newTCPHeaderLen > 60 {
+		return nil, fmt.Errorf("TCP header too long")
 	}
 
-	// Создаем новый полный пакет
+	// Новый полный пакет
 	newPacketLen := ipHeaderLen + newTCPHeaderLen + (len(packet) - tcpHeaderOffset - tcpHeaderLen)
 	newPacket := make([]byte, newPacketLen)
 
@@ -118,23 +124,22 @@ func addTCPOptionMD5(packet []byte) error {
 	// Копируем старый TCP заголовок
 	copy(newPacket[ipHeaderLen:ipHeaderLen+tcpHeaderLen], packet[tcpHeaderOffset:tcpHeaderOffset+tcpHeaderLen])
 
-	// Добавляем опцию MD5 в конец TCP заголовка
+	// Добавляем опцию MD5
 	optPos := ipHeaderLen + tcpHeaderLen
 	newPacket[optPos] = 19   // kind MD5
 	newPacket[optPos+1] = 18 // length
-	// Данные опции (16 байт) оставляем нулями
+	// 16 байт данных (нулями)
 
-	// Копируем оставшиеся данные (после TCP заголовка)
+	// Копируем данные после TCP заголовка
 	if len(packet) > tcpHeaderOffset+tcpHeaderLen {
-		copy(newPacket[ipHeaderLen+newTCPHeaderLen:],
-			packet[tcpHeaderOffset+tcpHeaderLen:])
+		copy(newPacket[ipHeaderLen+newTCPHeaderLen:], packet[tcpHeaderOffset+tcpHeaderLen:])
 	}
 
-	// Обновляем длину TCP заголовка в IP пакете
+	// Обновляем длину TCP заголовка
 	newTCPHeaderLenWords := newTCPHeaderLen / 4
 	newPacket[ipHeaderLen+12] = byte(newTCPHeaderLenWords<<4) | (packet[tcpHeaderOffset+12] & 0x0F)
 
-	// Обновляем общую длину в IP заголовке
+	// Обновляем totalLen в IP
 	newTotalLen := uint16(newPacketLen)
 	binary.BigEndian.PutUint16(newPacket[2:4], newTotalLen)
 
@@ -143,22 +148,19 @@ func addTCPOptionMD5(packet []byte) error {
 	ipChecksum := calculateIPChecksum(newPacket[:ipHeaderLen])
 	binary.BigEndian.PutUint16(newPacket[10:12], ipChecksum)
 
-	// Заменяем оригинальный пакет
-	copy(packet, newPacket)
+	// Пересчитываем TCP checksum (позже в вызывающем коде)
 
-	return nil
+	return newPacket, nil
 }
 
 // modifyTCPSeq изменяет sequence number
 func modifyTCPSeq(packet []byte, delta uint32) {
-	if len(packet) < 40 {
-		return
+	if len(packet) < 40 || packet[9] != 6 {
+		return // или error
 	}
-
-	ipHeaderLen := (packet[0] & 0x0F) * 4
-	tcpHeaderOffset := int(ipHeaderLen)
-
-	if len(packet) < tcpHeaderOffset+8 {
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpHeaderOffset := ipHeaderLen
+	if len(packet) < tcpHeaderOffset+20 {
 		return
 	}
 
@@ -170,14 +172,12 @@ func modifyTCPSeq(packet []byte, delta uint32) {
 
 // clearTCPACK сбрасывает флаг ACK
 func clearTCPACK(packet []byte) {
-	if len(packet) < 40 {
-		return
+	if len(packet) < 40 || packet[9] != 6 {
+		return // или error
 	}
-
-	ipHeaderLen := (packet[0] & 0x0F) * 4
-	tcpHeaderOffset := int(ipHeaderLen)
-
-	if len(packet) < tcpHeaderOffset+13 {
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpHeaderOffset := ipHeaderLen
+	if len(packet) < tcpHeaderOffset+20 {
 		return
 	}
 

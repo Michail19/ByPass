@@ -23,41 +23,41 @@ func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl in
 		}
 
 		ipHeaderLen := int(packet[0]&0x0F) * 4
-
-		// Первая часть должна включать полный IP заголовок
-		if pos < ipHeaderLen {
-			pos = ipHeaderLen // Минимум - весь IP заголовок
+		if packet[9] != 6 { // Не TCP — пропустить
+			continue
 		}
 
-		// Создаем первую часть (с низким TTL)
+		tcpHeaderOffset := ipHeaderLen
+		tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
+		minPos := ipHeaderLen + tcpHeaderLen // Минимум — полный TCP header
+
+		if pos < minPos {
+			continue // Не обрезаем header
+		}
+
+		// firstPart до pos (полный header + часть payload)
 		firstPart := make([]byte, pos)
 		copy(firstPart, packet[:pos])
 
-		// Убеждаемся, что первая часть имеет валидный IP заголовок
-		if len(firstPart) >= 20 {
-			// Обновляем totalLen
-			binary.BigEndian.PutUint16(firstPart[2:4], uint16(pos))
+		// Обновляем totalLen в IP
+		binary.BigEndian.PutUint16(firstPart[2:4], uint16(pos))
 
-			// Устанавливаем TTL
-			if err := setIPTTL(firstPart, ttl); err == nil {
-				// Пересчитываем IP checksum
-				recalculateIPChecksum(firstPart)
+		// Устанавливаем TTL и пересчитываем IP checksum
+		if err := setIPTTL(firstPart, ttl); err == nil {
+			// Пересчитываем IP checksum
+			recalculateIPChecksum(firstPart)
 
-				// Пересчитываем TCP checksum (длина изменилась)
-				if packet[9] == 6 { // TCP
-					if err := FixTCPChecksum(firstPart); err == nil {
-						results = append(results, firstPart)
-					}
-				} else {
-					results = append(results, firstPart)
-				}
+			// Пересчитываем TCP checksum (поскольку payload обрезан, но header полный)
+			if err := FixTCPChecksum(firstPart); err == nil {
+				results = append(results, firstPart)
 			}
 		}
 	}
 
-	// Добавляем оригинал в конец (важно для disorder)
+	// Добавляем оригинал
 	if len(results) > 0 {
-		results = append(results, packet)
+		results = append(results, make([]byte, len(packet))) // Копия, чтобы избежать гонки
+		copy(results[len(results)-1], packet)
 	}
 
 	return results, nil
