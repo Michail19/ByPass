@@ -144,11 +144,12 @@ type Strategy struct {
 	DupTTL     int `json:"dup_ttl"`     // TTL для дубликатов
 
 	// Метаданные
-	Priority      int       `json:"priority"`      // приоритет (меньше = выше)
-	SuccessCount  int       `json:"success_count"` // сколько раз успешно применилась
-	FailCount     int       `json:"fail_count"`    // сколько раз провалилась
-	LastUsed      time.Time `json:"last_used"`
-	AvgResponseMs int64     `json:"avg_response_ms"` // среднее время ответа
+	Priority           int       `json:"priority"`      // приоритет (меньше = выше)
+	SuccessCount       int       `json:"success_count"` // сколько раз успешно применилась
+	FailCount          int       `json:"fail_count"`    // сколько раз провалилась
+	LastUsed           time.Time `json:"last_used"`
+	AvgResponseMs      int64     `json:"avg_response_ms"` // среднее время ответа
+	ApplyToPacketTypes []string  `json:"apply_to_packet_types"`
 }
 
 // Clone создает копию стратегии

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -153,6 +154,26 @@ func (c *IPCache) Delete(ip string) {
 	c.mu.Unlock()
 }
 
+// InvalidateByStrategy удаляет все записи, связанные с указанной стратегией, возвращает количество удалённых записей
+func (c *IPCache) InvalidateByStrategy(strategyID int) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	count := 0
+	for ip, entry := range c.entries {
+		if entry.StrategyID == strategyID {
+			delete(c.entries, ip)
+			count++
+		}
+	}
+
+	if count > 0 {
+		log.Printf("Invalidated %d cache entries for strategy ID %d", count, strategyID)
+	}
+
+	return count
+}
+
 // UpdateLatency обновляет информацию о задержке
 func (c *IPCache) UpdateLatency(ip string, latency time.Duration, loss float64) {
 	c.mu.Lock()
@@ -164,7 +185,6 @@ func (c *IPCache) UpdateLatency(ip string, latency time.Duration, loss float64) 
 			entry.AvgLatency = latency
 			entry.PacketLoss = loss
 		} else {
-			// Используем float64 для промежуточных вычислений
 			avgLatency := float64(entry.AvgLatency)
 			newLatency := float64(latency)
 			entry.AvgLatency = time.Duration(avgLatency*0.7 + newLatency*0.3)

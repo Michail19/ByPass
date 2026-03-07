@@ -89,25 +89,17 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	defer m.mu.RUnlock()
 
 	// Сначала пробуем найти стратегию по hostname
-	if hostname != "" {
-		// Кастомные правила для известных сайтов
-		switch {
-		case strings.Contains(hostname, "google"):
-			if strat, exists := m.strategies[11]; exists { // split-100 для Google
-				return strat
-			}
-		case strings.Contains(hostname, "youtube") || strings.Contains(hostname, "googlevideo"):
-			if strat, exists := m.strategies[20]; exists {
-				return strat
-			}
-		case strings.Contains(hostname, "discord"):
-			if strat, exists := m.strategies[15]; exists { // mixed для Discord
-				return strat
-			}
-		case strings.Contains(hostname, "telegram"):
-			if strat, exists := m.strategies[12]; exists { // split-50 для Telegram
-				return strat
-			}
+	hostMap := map[string]int{
+		"youtube.com":     20,
+		"googlevideo.com": 20,
+		"discord.com":     15,
+		"telegram.org":    12,
+		// добавляй по необходимости
+	}
+	lower := strings.ToLower(hostname)
+	if id, ok := hostMap[lower]; ok {
+		if strat, exists := m.strategies[id]; exists {
+			return strat
 		}
 	}
 

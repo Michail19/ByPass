@@ -51,7 +51,8 @@ func (pm *PacketModifier) ApplyFake(packet []byte, fakePos int, fakeTTL int, fak
 	flags := fakePacket[tcpHeaderOffset+13]
 	if (flags&0x10) != 0 && dataLen == 0 {
 		//isACK = true
-		modifyTCPWindow(fakePacket, 42) // Small window to force segmentation
+		//modifyTCPWindow(fakePacket, 42)
+		modifyTCPWindow(fakePacket, 8) // Small window to force segmentation
 	}
 
 	// Low TTL

@@ -136,21 +136,22 @@ func (m *Manager) loadDefaultStrategies() {
 	// Страница 8: Для YouTube
 	// Стратегия специально для YouTube (ID 20)
 	m.AddStrategy(&Strategy{
-		ID:             20,
-		Name:           "youtube-2026",
-		Description:    "Оптимизировано под YouTube 2026: multisplit + fake + disorder OOB",
-		ApplyToTLS:     true,
-		SplitMode:      SplitCustom,    // новый режим или используйте SplitAfterSNI
-		SplitPositions: []int{1, 3, 5}, // мелкий split
-		SplitSNIOffset: true,
-		DisorderMode:   DisorderOutOfBand, // только OOB
-		DisorderPos:    []int{1},
-		DisorderTTL:    1,
-		FakeMode:       FakeMD5Sig,
-		FakePos:        0,
-		FakeTTL:        1,     // очень низкий TTL
-		TLSRecordSplit: false, // отключить
-		Priority:       5,     // самый высокий
+		ID:                 20,
+		Name:               "youtube-2026",
+		Description:        "Оптимизировано под YouTube 2026: multisplit + fake + disorder OOB",
+		ApplyToTLS:         true,
+		SplitMode:          SplitCustom,    // новый режим или используйте SplitAfterSNI
+		SplitPositions:     []int{1, 3, 5}, // мелкий split
+		SplitSNIOffset:     true,
+		DisorderMode:       DisorderOutOfBand, // только OOB
+		DisorderPos:        []int{1},
+		DisorderTTL:        1,
+		FakeMode:           FakeMD5Sig,
+		FakePos:            0,
+		FakeTTL:            1,     // очень низкий TTL
+		TLSRecordSplit:     false, // отключить
+		ApplyToPacketTypes: []string{"handshake", "ack"},
+		Priority:           5, // самый высокий
 	})
 
 	// Страница 9: Для Discord

@@ -248,6 +248,13 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		return
 	}
 
+	if protocol == 17 && dstPort == 443 { // QUIC
+		setIPTTL(pkt.Data, 1) // Low TTL
+		recalculateIPChecksum(pkt.Data)
+		p.sendPacket(pkt.Data, pkt.Addr)
+		return
+	}
+
 	// При создании потока используйте правильный протокол
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
 
@@ -306,58 +313,80 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 	// Применяем модификацию если нужно
 	if shouldBypass {
-		// Определить тип пакета
+		// Определить тип пакета (уже есть)
 		ipHeaderLen := int(pkt.Data[0]&0x0F) * 4
 		tcpOffset := ipHeaderLen
 		flags := pkt.Data[tcpOffset+13]
 		isSYN := (flags & 0x02) != 0
 		isACK := (flags & 0x10) != 0
 		isData := len(pkt.Data) > tcpOffset+int(pkt.Data[tcpOffset+12]>>4)*4
-		isClientHello := isData && pkt.Data[tcpOffset+20] == 0x16 // TLS ContentType Handshake
+		isClientHello := isData && pkt.Data[tcpOffset+20] == 0x16
 
-		// Применять strat только если matches
-		if (isClientHello && strats.ApplyToTLS) || (isSYN || isACK) {
-			result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
-			if err == nil && result != nil {
-				validPackets := 0
-				for i, modifiedPkt := range result.ModifiedPackets {
-					// Проверяем целостность модифицированного пакета
-					if len(modifiedPkt) < 20 {
-						log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping",
-							i, len(modifiedPkt))
-						continue
-					}
+		applyMods := (isClientHello && strats.ApplyToTLS) || isSYN || isACK
 
-					// Проверяем, что это похоже на IP-пакет
-					if modifiedPkt[0]>>4 != 4 {
-						log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)",
-							i, modifiedPkt[0]>>4)
-					}
+		// QUIC отдельно (даже если !applyMods)
+		if protocol == 17 && dstPort == 443 {
+			// Вариант 1: low TTL (уже есть)
+			setIPTTL(pkt.Data, 1)
+			recalculateIPChecksum(pkt.Data)
 
-					if p.sendPacket(modifiedPkt, pkt.Addr) {
-						validPackets++
-						p.updateStats(func(stats *PipelineStats) {
-							stats.PacketsModified++
-							stats.PacketsSent++
-						})
-					}
+			// Вариант 2: иногда дропать первый QUIC-пакет после handshake (DPI путается)
+			// if flow.IsFirstQUIC() { return } // нужно добавить флаг в flow
+
+			p.sendPacket(pkt.Data, pkt.Addr)
+			return
+		}
+
+		if !applyMods {
+			// Пропускаем data-пакеты без модификаций
+			p.sendPacket(pkt.Data, pkt.Addr)
+			return
+		}
+
+		// Только здесь применяем модификации
+		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
+		if err == nil && result != nil {
+			validPackets := 0
+			for i, modifiedPkt := range result.ModifiedPackets {
+				// Проверяем целостность модифицированного пакета
+				if len(modifiedPkt) < 20 {
+					log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping",
+						i, len(modifiedPkt))
+					continue
 				}
 
-				log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
-					validPackets, len(result.ModifiedPackets), dstIP.String())
+				// Проверяем, что это похоже на IP-пакет
+				if modifiedPkt[0]>>4 != 4 {
+					log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)",
+						i, modifiedPkt[0]>>4)
+				}
 
-				// Если нужно, отправляем оригинал
-				if result.SendOriginal && len(pkt.Data) >= 20 {
-					if p.sendPacket(pkt.Data, pkt.Addr) {
-						p.updateStats(func(stats *PipelineStats) {
-							stats.PacketsSent++
-						})
-					}
+				if p.sendPacket(modifiedPkt, pkt.Addr) {
+					validPackets++
+					p.updateStats(func(stats *PipelineStats) {
+						stats.PacketsModified++
+						stats.PacketsSent++
+					})
+				}
+			}
+
+			log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
+				validPackets, len(result.ModifiedPackets), dstIP.String())
+
+			// Если нужно, отправляем оригинал
+			if result.SendOriginal && len(pkt.Data) >= 20 {
+				if p.sendPacket(pkt.Data, pkt.Addr) {
+					p.updateStats(func(stats *PipelineStats) {
+						stats.PacketsSent++
+					})
 				}
 			}
 		} else {
-			p.sendPacket(pkt.Data, pkt.Addr) // Пропустить data-пакеты
+			// Если ModifyPacket вернул ошибку — отправляем оригинал
+			p.sendPacket(pkt.Data, pkt.Addr)
 		}
+	} else {
+		p.sendPacket(pkt.Data, pkt.Addr)
 	}
 
 	// Обновляем статистику обработки
@@ -410,15 +439,29 @@ func (p *Pipeline) resultProcessor() {
 		case result := <-p.resultChan:
 			// Отправляем результат в менеджер стратегий для статистики
 			if p.strategyMgr != nil {
-				// Создаем StrategyResult из ModifyResult
 				strategyResult := &strategy.StrategyResult{
-					StrategyID:   result.StrategyID, // Теперь StrategyID сохраняется!
-					Success:      true,
+					StrategyID:   result.StrategyID,
+					Success:      true, // пока true, но можно сделать умнее
 					ResponseTime: time.Duration(result.Delay) * time.Millisecond,
-					BytesSent:    len(result.ModifiedPackets) * 1500, // Примерно
+					BytesSent:    len(result.ModifiedPackets) * 1500,
 					PacketsSent:  len(result.ModifiedPackets),
 					Timestamp:    time.Now(),
 				}
+
+				if !strategyResult.Success { // или по какому-то другому условию
+					invalidated := p.ipCache.InvalidateByStrategy(strategyResult.StrategyID)
+					if invalidated > 0 {
+						log.Printf("Invalidated %d cache entries due to strategy %d failure", invalidated, strategyResult.StrategyID)
+					}
+				}
+
+				// Если Delay большой или пакетов мало — считаем fail
+				if result.Delay > 500 || len(result.ModifiedPackets) == 0 {
+					strategyResult.Success = false
+					// Invalidate cache для этой стратегии
+					p.ipCache.InvalidateByStrategy(result.StrategyID)
+				}
+
 				p.strategyMgr.ReportResult(strategyResult)
 			}
 		}
@@ -484,4 +527,42 @@ func (p *Pipeline) GetStats() PipelineStats {
 	p.statsMu.RLock()
 	defer p.statsMu.RUnlock()
 	return p.stats
+}
+
+// setIPTTL + recalculate in one (optimized)
+func setIPTTL(packet []byte, ttl int) error {
+	if len(packet) < 20 || (packet[0]>>4 != 4) {
+		return nil
+	}
+
+	packet[8] = byte(ttl)
+
+	// Пересчитываем контрольную сумму
+	recalculateIPChecksum(packet)
+
+	return nil
+}
+
+// recalculateIPChecksum пересчитывает контрольную сумму IP-заголовка
+func recalculateIPChecksum(packet []byte) {
+	if len(packet) < 20 {
+		return
+	}
+
+	// Обнуляем текущую контрольную сумму
+	packet[10] = 0
+	packet[11] = 0
+
+	// Вычисляем новую
+	var sum uint32
+	for i := 0; i < 20; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(packet[i:]))
+	}
+
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+
+	checksum := ^uint16(sum)
+	binary.BigEndian.PutUint16(packet[10:12], checksum)
 }

@@ -1,6 +1,7 @@
 package modifier
 
 import (
+	"ByPass/internal/strategy"
 	"encoding/binary"
 )
 
@@ -37,6 +38,19 @@ func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl in
 		prevPos = pos
 	}
 	segments = append(segments, packet[payloadOffset+prevPos:]) // Last segment
+
+	strat := pm.strategyManager.GetActive()
+
+	if strat != nil && strat.DisorderMode == strategy.DisorderOutOfBand {
+		oobPkt := make([]byte, len(packet))
+		copy(oobPkt, packet)
+		// Bad seq + low TTL
+		modifyTCPSeq(oobPkt, 0xFFFFFFFF)
+		setIPTTL(oobPkt, ttl)
+		recalculateIPChecksum(oobPkt)
+		FixTCPChecksum(oobPkt)
+		results = append(results, oobPkt) // OOB первый
+	}
 
 	// Reverse order for disorder (like GoodbyeDPI reverse-frag)
 	for i := len(segments) - 1; i >= 0; i-- {

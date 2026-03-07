@@ -70,7 +70,13 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	}
 
 	payloadOffset := tcpHeaderOffset + tcpHeaderLen
-	//payloadLen := len(packet) - payloadOffset
+	payloadLen := len(packet) - payloadOffset
+
+	flags := packet[tcpHeaderOffset+13]
+	isSYN := (flags & 0x02) != 0
+	isACK := (flags & 0x10) != 0
+	isData := payloadLen > 0
+	isClientHello := isData && packet[payloadOffset] == 0x16 // TLS ContentType Handshake (0x16)
 
 	dstIP := flow.GetDstIP()
 
@@ -82,7 +88,9 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		"tcp",
 	)
 
-	if strat == nil {
+	applyMods := (isClientHello && strat.ApplyToTLS) || isSYN || isACK
+
+	if !applyMods {
 		return &ModifyResult{SendOriginal: true}, nil
 	}
 
@@ -150,6 +158,10 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		}
 	}
 
+	if !((isClientHello && strat.ApplyToTLS) || isSYN || isACK) {
+		return &ModifyResult{SendOriginal: true}, nil
+	}
+
 	// 2. TCP Segmentation (SplitMode)
 	if !modified && strat.SplitMode != strategy.SplitNone {
 		fragments, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
@@ -162,6 +174,10 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		}
 	}
 
+	if !((isClientHello && strat.ApplyToTLS) || isSYN || isACK) {
+		return &ModifyResult{SendOriginal: true}, nil
+	}
+
 	// 3. Disorder
 	if !modified && strat.DisorderMode != strategy.DisorderNone {
 		disorderPkts, err := pm.ApplyDisorder(packet, strat.DisorderPos, strat.DisorderTTL)
@@ -171,6 +187,10 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 			pm.stats.DisorderCount += uint64(len(disorderPkts))
 			pm.stats.PacketsModified += uint64(len(disorderPkts))
 		}
+	}
+
+	if !((isClientHello && strat.ApplyToTLS) || isSYN || isACK) {
+		return &ModifyResult{SendOriginal: true}, nil
 	}
 
 	// 4. Fake packets (обычно отправляются вместе с оригиналом)

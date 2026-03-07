@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sort"
@@ -190,8 +191,17 @@ func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 // testConnection тестирует соединение с доменом
 func (d *Discovery) testConnection(domain string, port int) error {
 	addr := fmt.Sprintf("%s:%d", domain, port)
+	dialer := &net.Dialer{Timeout: d.config.TestTimeout}
 
-	// Пробуем TCP соединение с таймаутом
+	if port == 443 {
+		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{InsecureSkipVerify: true})
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return nil
+	}
+
 	conn, err := net.DialTimeout("tcp", addr, d.config.TestTimeout)
 	if err != nil {
 		return err

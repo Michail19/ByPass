@@ -191,5 +191,25 @@
     "http_mod_mode": 1,
     "host_case": true,
     "priority": 1
+  },
+  {
+    "id": 20,
+    "name": "youtube-2026",
+    "description": "2026 YouTube bypass: safe multisplit + fake + OOB disorder",
+    "apply_to_http": false,
+    "apply_to_tls": true,
+    "apply_to_quic": true,
+    "split_mode": 2,
+    "split_positions": [1,5,43],
+    "split_sni_offset": true,
+    "disorder_mode": 2,
+    "disorder_pos": [1],
+    "disorder_ttl": 1,
+    "fake_mode": 1,
+    "fake_pos": 0,
+    "fake_ttl": 1,
+    "tls_record_split": false,
+    "apply_to_packet_types": ["handshake", "ack"],
+    "priority": 1
   }
 ]

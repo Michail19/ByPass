@@ -17,6 +17,15 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
+	safePositions := map[int]bool{1: true, 5: true, 43: true} // типичные safe для ClientHello
+
+	for i, pos := range splitPos {
+		if !safePositions[pos] && (pos < 5 || pos%5 != 0) {
+			log.Printf("Unsafe split pos %d for TLS, skipping", pos)
+			splitPos[i] = 0 // или continue в цикле
+		}
+	}
+
 	ipHeaderLen := int(packet[0]&0x0F) * 4
 	tcpHeaderOffset := ipHeaderLen
 	tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
@@ -29,10 +38,10 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 	// Split at positions (like zapret split-pos)
 	var segments [][]byte
 	prevPos := 0
-	for _, pos := range splitPos {
+	for i, pos := range splitPos {
 		if pos < 5 || (pos > 5 && pos%5 != 0) { // safe alignments
-			log.Printf("Invalid split pos %d for TLS, skipping", pos)
-			continue
+			log.Printf("Invalid split pos %d for TLS, adjusting", pos)
+			splitPos[i] = (pos/5)*5 + 5 // Adjust to safe
 		}
 
 		if pos > prevPos && pos < payloadLen {
