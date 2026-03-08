@@ -304,8 +304,8 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		p.updateStats(func(stats *PipelineStats) {
 			stats.CacheHits++
 		})
-		log.Printf("DEBUG: Cache hit for %s: bypass=%v strategy=%d",
-			dstIP.String(), shouldBypass, strategyID)
+		log.Printf("[STRATEGY] Cache decision for %s:%d (hostname: %s): bypass=%v, strategyID=%d (from cache)",
+			dstIP.String(), dstPort, flow.Hostname, shouldBypass, strategyID)
 	} else {
 		log.Printf("Hostname before: %v", flow.Hostname)
 		// Решаем, нужно ли обходить
@@ -315,6 +315,14 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			int(dstPort),
 			"tcp",
 		)
+
+		if strat != nil {
+			log.Printf("[STRATEGY] Fresh select for %s:%d (hostname: %s) → strategy %d (%s)",
+				dstIP.String(), dstPort, flow.Hostname, strat.ID, strat.Name)
+		} else {
+			log.Printf("[STRATEGY] No fresh strategy selected for %s:%d", dstIP.String(), dstPort)
+		}
+
 		if strat != nil && strat.FailCount < 3 {
 			shouldBypass = true
 			strats = *strat
@@ -362,6 +370,9 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			return
 		}
 
+		log.Printf("[STRATEGY] Applying modifications with strategy %d (%s) for %s (type: SYN=%v ACK=%v ClientHello=%v)",
+			strategyID, strats.Name, dstIP.String(), isSYN, isACK, isClientHello)
+
 		// Только здесь применяем модификации
 		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
 		if err == nil && result != nil {
@@ -399,6 +410,11 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 						stats.PacketsSent++
 					})
 				}
+			}
+
+			if result != nil {
+				log.Printf("[STRATEGY] ModifyPacket returned %d packets (strategy %d), sent %d",
+					len(result.ModifiedPackets), strategyID, validPackets)
 			}
 		} else {
 			// Если ModifyPacket вернул ошибку — отправляем оригинал

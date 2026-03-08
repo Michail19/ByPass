@@ -86,6 +86,8 @@ func (m *Manager) GetStrategy(id int) (*Strategy, bool) {
 
 // SelectStrategy выбирает стратегию для IP/хоста
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
+	log.Printf("[SELECT] Called for IP %s:%d, hostname='%s'", ip, port, hostname)
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -156,8 +158,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	}
 
 	if best != nil {
-		log.Printf("No specific match, fallback to priority %d: strategy %d (%s)",
-			best.Priority, best.ID, best.Name)
+		log.Printf("[SELECT] Fallback to strategy %d (%s) (priority %d)", best.ID, best.Name, best.Priority)
 		return best
 	}
 

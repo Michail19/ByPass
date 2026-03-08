@@ -145,6 +145,9 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 // PutByIP добавляет запись по net.IP
 func (c *IPCache) PutByIP(ip net.IP, hostname string, shouldBypass bool, strategyID int) {
 	c.Put(ip.String(), hostname, shouldBypass, strategyID)
+
+	log.Printf("[CACHE] Stored for IP %s: hostname=%s, bypass=%v, strategy=%d",
+		ip.String(), hostname, shouldBypass, strategyID)
 }
 
 // Delete удаляет запись
