@@ -142,6 +142,7 @@ type Strategy struct {
 	TTL        int `json:"ttl"`         // изменение TTL
 	DupCount   int `json:"dup_count"`   // количество дубликатов
 	DupTTL     int `json:"dup_ttl"`     // TTL для дубликатов
+	QUICttl    int `json:"quic_ttl"`    // изменение QuiTTL
 
 	// Метаданные
 	Priority           int       `json:"priority"`      // приоритет (меньше = выше)

@@ -171,14 +171,9 @@ func (p *Pipeline) packetForwarder() {
 			})
 
 			// Сначала отправляем все из временного буфера
-			for len(tempBuffer) > 0 {
-				select {
-				case p.packetChan <- tempBuffer[0]:
-					tempBuffer = tempBuffer[1:]
-				default:
-					// Канал все еще переполнен, выходим
-					break
-				}
+			for len(tempBuffer) > 0 && len(p.packetChan) < cap(p.packetChan) {
+				p.packetChan <- tempBuffer[0]
+				tempBuffer = tempBuffer[1:]
 			}
 
 			// Пытаемся отправить новый пакет
@@ -249,31 +244,19 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	}
 
 	if protocol == 17 && dstPort == 443 { // QUIC
-		setIPTTL(pkt.Data, 1)
+		setIPTTL(pkt.Data, 8)
 		recalculateIPChecksum(pkt.Data)
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
 	}
 
+	// Проверяем кэш
+	var shouldBypass bool
+	var strategyID int
+	var strats *strategy.Strategy // ← всегда указатель, может быть nil
+
 	// Получаем или создаём поток
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
-
-	// Заполняем hostname, если пустой
-	if flow.Hostname == "" {
-		// 1. Пробуем из domainCache (если есть forward lookup)
-		if entry, ok := p.domainCache.Get(dstIP.String()); ok && entry.Domain != "" {
-			flow.SetHostname(entry.Domain)
-			log.Printf("Hostname from domainCache: %s for %s", entry.Domain, dstIP.String())
-		} else {
-			// 2. Reverse DNS (медленно, но работает)
-			names, err := net.LookupAddr(dstIP.String())
-			if err == nil && len(names) > 0 {
-				hostname := strings.TrimSuffix(names[0], ".")
-				flow.SetHostname(hostname)
-				log.Printf("Reverse DNS hostname: %s for %s", hostname, dstIP.String())
-			}
-		}
-	}
 
 	// Анализируем пакет
 	info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
@@ -292,10 +275,18 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		}
 	}
 
-	// Проверяем кэш
-	var shouldBypass bool
-	var strategyID int
-	var strats *strategy.Strategy // ← всегда указатель, может быть nil
+	// Асинхронный reverse DNS, если hostname пустой и не QUIC/handshake
+	if flow.Hostname == "" {
+		go func(ip string) {
+			names, err := net.LookupAddr(ip)
+			if err == nil && len(names) > 0 {
+				hostname := strings.TrimSuffix(names[0], ".")
+				flow.SetHostname(hostname) // добавить mu.Lock in SetHostname in conntrack.go
+				log.Printf("Async reverse DNS: %s for %s", hostname, ip)
+				p.ipCache.PutByIP(dstIP, hostname, shouldBypass, strategyID)
+			}
+		}(dstIP.String())
+	}
 
 	// 1. Проверяем кэш
 	cachedStratID := 0
@@ -357,14 +348,26 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		isSYN := (flags & 0x02) != 0
 		isACK := (flags & 0x10) != 0
 		isData := len(pkt.Data) > tcpOffset+int(pkt.Data[tcpOffset+12]>>4)*4
-		isClientHello := isData && pkt.Data[tcpOffset+20] == 0x16
+		tcpHeaderLen := int(pkt.Data[tcpOffset+12]>>4) * 4
+		payloadOffset := tcpOffset + tcpHeaderLen
+		isData = len(pkt.Data) > payloadOffset
+		isClientHello := isData && len(pkt.Data) > payloadOffset+5 && pkt.Data[payloadOffset] == 0x16 && pkt.Data[payloadOffset+5] == 0x01
+		//applyMods := isClientHello && strats.ApplyToTLS // только для ClientHello
 
-		applyMods := (isClientHello && strats.ApplyToTLS) || isSYN || isACK
+		//applyMods := (isClientHello && strats.ApplyToTLS) || isSYN || isACK
+
+		applyMods := isClientHello && strats.ApplyToTLS && !flow.IsHandshakeModified
+
+		if applyMods {
+			flow.Mu.Lock()
+			flow.IsHandshakeModified = true
+			flow.Mu.Unlock()
+		}
 
 		// QUIC отдельно (даже если !applyMods)
-		if protocol == 17 && dstPort == 443 {
+		if protocol == 17 && dstPort == 443 && strats.QUICttl > 0 {
 			// Вариант 1: low TTL (уже есть)
-			setIPTTL(pkt.Data, 1)
+			setIPTTL(pkt.Data, strats.QUICttl)
 			recalculateIPChecksum(pkt.Data)
 
 			// Вариант 2: иногда дропать первый QUIC-пакет после handshake (DPI путается)
@@ -459,7 +462,8 @@ func (p *Pipeline) sendPacket(data []byte, addr []byte) bool {
 	// Для WinDivert sender используем SendWithAddr
 	if rs, ok := p.sender.(*sender.RawSender); ok {
 		// Проверяем, что адрес не nil
-		if addr == nil || len(addr) < 64 {
+		//if addr == nil || len(addr) < 64 {
+		if addr == nil || len(addr) == 0 {
 			log.Printf("WARNING: Invalid addr for WinDivert, skipping send")
 			return false
 		}

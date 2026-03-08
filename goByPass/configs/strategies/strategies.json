@@ -112,10 +112,11 @@
     "fake_pos": 0,
     "fake_ttl": 1,
     "tls_record_split": false,
-    "window_size": 8,
+    "window_size": 262144,
     "apply_to_packet_types": ["handshake", "ack"],
     "priority": 1,
     "success_count": 0,
+    "quic_ttl": 8,
     "fail_count": 0
   },
   {

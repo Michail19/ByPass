@@ -116,7 +116,9 @@ type Flow struct {
 	IsTLS    bool
 	IsHTTP   bool
 
-	mu sync.RWMutex
+	StrategyID          int
+	IsHandshakeModified bool
+	Mu                  sync.RWMutex // for SetHostname etc.
 }
 
 // NewFlow создает новый поток
@@ -138,8 +140,8 @@ const maxReassemblyPackets = 10
 
 // Update обновляет состояние потока на основе пакета
 func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
 
 	f.UpdatedAt = time.Now()
 	f.LastPacket = time.Now()
@@ -187,30 +189,30 @@ func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
 }
 
 // SetHostname устанавливает имя хоста для потока
-func (f *Flow) SetHostname(hostname string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.Hostname = hostname
+func (f *Flow) SetHostname(h string) {
+	f.Mu.Lock()
+	f.Hostname = h
+	f.Mu.Unlock()
 }
 
 // SetTLS отмечает поток как TLS
 func (f *Flow) SetTLS() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
 	f.IsTLS = true
 }
 
 // SetHTTP отмечает поток как HTTP
 func (f *Flow) SetHTTP() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
 	f.IsHTTP = true
 }
 
 // GetInfo возвращает копию информации о потоке
 func (f *Flow) GetInfo() map[string]interface{} {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.Mu.RLock()
+	defer f.Mu.RUnlock()
 
 	return map[string]interface{}{
 		"key":         f.Key.String(),
@@ -230,8 +232,8 @@ func (f *Flow) GetInfo() map[string]interface{} {
 
 // GetDstIP возвращает IP назначения как строку
 func (f *Flow) GetDstIP() string {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.Mu.RLock()
+	defer f.Mu.RUnlock()
 
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, f.Key.DstIP)
@@ -240,8 +242,8 @@ func (f *Flow) GetDstIP() string {
 
 // GetSrcIP возвращает IP источника как строку
 func (f *Flow) GetSrcIP() string {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.Mu.RLock()
+	defer f.Mu.RUnlock()
 
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, f.Key.SrcIP)
@@ -250,14 +252,14 @@ func (f *Flow) GetSrcIP() string {
 
 // GetDstPort возвращает порт назначения
 func (f *Flow) GetDstPort() uint16 {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.Mu.RLock()
+	defer f.Mu.RUnlock()
 	return f.Key.DstPort
 }
 
 // GetSrcPort возвращает порт источника
 func (f *Flow) GetSrcPort() uint16 {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.Mu.RLock()
+	defer f.Mu.RUnlock()
 	return f.Key.SrcPort
 }

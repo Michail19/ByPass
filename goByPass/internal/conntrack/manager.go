@@ -152,8 +152,8 @@ func (m *Manager) cleanupLoop() {
 
 // IsExpired проверяет, истек ли поток
 func (f *Flow) IsExpired(timeout time.Duration, now time.Time) bool {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.Mu.RLock()
+	defer f.Mu.RUnlock()
 	return now.Sub(f.UpdatedAt) > timeout
 }
 

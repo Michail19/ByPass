@@ -125,27 +125,28 @@ func extractSNI(data []byte) string {
 	if len(data) < 43 {
 		return ""
 	}
-
-	pos := 5 // skip TLS record header
-
-	// Handshake type == 1 (ClientHello)
-	if data[pos] != 0x01 {
+	pos := 5                                   // skip TLS record header
+	if pos >= len(data) || data[pos] != 0x01 { // ClientHello
 		return ""
 	}
 	pos += 4 // handshake header
-
-	// Skip version (2) + random (32)
-	pos += 34
-
-	// Session ID
+	if pos+34 > len(data) {
+		return ""
+	}
+	pos += 34 // version + random
+	if pos >= len(data) {
+		return ""
+	}
 	sessionLen := int(data[pos])
 	pos += 1 + sessionLen
-
-	// Cipher suites
+	if pos+2 > len(data) {
+		return ""
+	}
 	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
 	pos += 2 + cipherLen
-
-	// Compression methods
+	if pos >= len(data) {
+		return ""
+	}
 	compLen := int(data[pos])
 	pos += 1 + compLen
 
@@ -156,28 +157,30 @@ func extractSNI(data []byte) string {
 	extLen := int(binary.BigEndian.Uint16(data[pos:]))
 	pos += 2
 	end := pos + extLen
-
-	for pos+4 <= end && pos < len(data) {
+	if end > len(data) {
+		return ""
+	}
+	for pos+4 <= end {
 		extType := binary.BigEndian.Uint16(data[pos : pos+2])
 		extDataLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
 		pos += 4
-
+		if pos+extDataLen > end {
+			return ""
+		}
 		if extType == 0x0000 { // server_name
-			if pos+2 > len(data) {
+			if pos+2 > end {
 				return ""
 			}
-			//listLen := int(binary.BigEndian.Uint16(data[pos:]))
-			pos += 2
-
-			if pos+3 > len(data) {
+			pos += 2 // listLen
+			if pos+3 > end {
 				return ""
 			}
 			nameType := data[pos]
 			pos += 1
-			if nameType == 0 { // host_name
+			if nameType == 0 {
 				nameLen := int(binary.BigEndian.Uint16(data[pos:]))
 				pos += 2
-				if pos+nameLen <= len(data) {
+				if pos+nameLen <= end {
 					return string(data[pos : pos+nameLen])
 				}
 			}

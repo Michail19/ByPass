@@ -280,6 +280,8 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		},
 	)
 
+	ipCache.Clear()
+
 	return &Components{
 		ipCache:     ipCache,
 		domainCache: domainCache,
