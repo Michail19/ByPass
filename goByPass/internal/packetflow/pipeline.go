@@ -241,7 +241,6 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		return
 	}
 
-	// В processPacket, замените вызов extractPorts:
 	srcPort, dstPort, protocol, err := p.extractPorts(pkt.Data)
 	if err != nil {
 		log.Printf("WARNING: Failed to extract ports: %v", err)
@@ -250,16 +249,16 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	}
 
 	if protocol == 17 && dstPort == 443 { // QUIC
-		setIPTTL(pkt.Data, 1) // Low TTL
+		setIPTTL(pkt.Data, 1)
 		recalculateIPChecksum(pkt.Data)
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
 	}
 
-	// При создании потока используйте правильный протокол
+	// Получаем или создаём поток
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
 
-	// Если hostname пустой — пробуем заполнить из кэша или reverse DNS
+	// Заполняем hostname, если пустой
 	if flow.Hostname == "" {
 		// 1. Пробуем из domainCache (если есть forward lookup)
 		if entry, ok := p.domainCache.Get(dstIP.String()); ok && entry.Domain != "" {
@@ -296,49 +295,60 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// Проверяем кэш
 	var shouldBypass bool
 	var strategyID int
-	var strats strategy.Strategy
+	var strats *strategy.Strategy // ← всегда указатель, может быть nil
 
+	// 1. Проверяем кэш
+	cachedStratID := 0
 	if cached, exists := p.ipCache.GetByIP(dstIP); exists {
+		cachedStratID = cached.StrategyID
 		shouldBypass = cached.ShouldBypass
 		strategyID = cached.StrategyID
-		p.updateStats(func(stats *PipelineStats) {
-			stats.CacheHits++
-		})
-		log.Printf("[STRATEGY] Cache decision for %s:%d (hostname: %s): bypass=%v, strategyID=%d (from cache)",
-			dstIP.String(), dstPort, flow.Hostname, shouldBypass, strategyID)
-	} else {
-		log.Printf("Hostname before: %v", flow.Hostname)
-		// Решаем, нужно ли обходить
-		strat := p.strategyMgr.SelectStrategy(
-			dstIP.String(),
-			flow.Hostname,
-			int(dstPort),
-			"tcp",
-		)
-
-		if strat != nil {
-			log.Printf("[STRATEGY] Fresh select for %s:%d (hostname: %s) → strategy %d (%s)",
-				dstIP.String(), dstPort, flow.Hostname, strat.ID, strat.Name)
-		} else {
-			log.Printf("[STRATEGY] No fresh strategy selected for %s:%d", dstIP.String(), dstPort)
-		}
-
-		if strat != nil && strat.FailCount < 3 {
-			shouldBypass = true
-			strats = *strat
-			strategyID = strat.ID
-			log.Printf("DEBUG: Selected strategy %d (%s) for %s (hostname: %s)",
-				strategyID, strat.Name, dstIP.String(), flow.Hostname)
-		} else {
-			log.Printf("DEBUG: No strategy for %s", dstIP.String())
-		}
-		p.ipCache.PutByIP(dstIP, flow.Hostname, shouldBypass, strategyID)
-		p.updateStats(func(stats *PipelineStats) {
-			stats.CacheMisses++
-		})
+		p.updateStats(func(stats *PipelineStats) { stats.CacheHits++ })
+		log.Printf("[STRATEGY] Cache hit for %s:%d: bypass=%v, cached strategy=%d (hostname in cache: %s)",
+			dstIP.String(), dstPort, shouldBypass, strategyID, cached.Hostname)
 	}
 
-	// Применяем модификацию если нужно
+	// 2. Всегда получаем свежий выбор (если hostname заполнен — приоритет ему)
+	strat := p.strategyMgr.SelectStrategy(
+		dstIP.String(),
+		flow.Hostname,
+		int(dstPort),
+		"tcp",
+	)
+
+	if strat != nil {
+		log.Printf("[STRATEGY] Fresh select → strategy %d (%s) (hostname: %s)",
+			strat.ID, strat.Name, flow.Hostname)
+
+		// Если свежая стратегия отличается или кэш был passthrough (1) — обновляем
+		if strat.ID != cachedStratID || (flow.Hostname != "" && cachedStratID == 1) {
+			log.Printf("[STRATEGY] Updating to fresh strategy %d (was %d)", strat.ID, cachedStratID)
+			shouldBypass = true
+			strats = strat
+			strategyID = strat.ID
+			// Немедленно обновляем кэш
+			p.ipCache.PutByIP(dstIP, flow.Hostname, true, strategyID)
+		} else if cachedStratID != 0 {
+			// Кэш актуален — берём полную структуру из менеджера
+			strats, _ = p.strategyMgr.GetStrategy(cachedStratID)
+		}
+	}
+
+	// 3. Финальный fallback, если ничего не выбрано
+	if strats == nil {
+		strategyID = 1
+		strats, _ = p.strategyMgr.GetStrategy(1)
+		if strats == nil {
+			log.Printf("[STRATEGY] CRITICAL: No passthrough strategy (id=1) found!")
+			p.sendPacket(pkt.Data, pkt.Addr)
+			return
+		}
+		shouldBypass = false // passthrough = без модификаций
+	}
+
+	log.Printf("[STRATEGY] Final decision for %s:%d (hostname: %s): strategy %d (%s), bypass=%v",
+		dstIP.String(), dstPort, flow.Hostname, strategyID, strats.Name, shouldBypass)
+
 	if shouldBypass {
 		// Определить тип пакета (уже есть)
 		ipHeaderLen := int(pkt.Data[0]&0x0F) * 4
@@ -370,66 +380,72 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			return
 		}
 
-		log.Printf("[STRATEGY] Applying modifications with strategy %d (%s) for %s (type: SYN=%v ACK=%v ClientHello=%v)",
+		log.Printf("[STRATEGY] Applying modifications with strategy %d (%s) for %s (SYN=%v ACK=%v ClientHello=%v)",
 			strategyID, strats.Name, dstIP.String(), isSYN, isACK, isClientHello)
 
 		// Только здесь применяем модификации
 		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
-		if err == nil && result != nil {
-			validPackets := 0
-			for i, modifiedPkt := range result.ModifiedPackets {
-				// Проверяем целостность модифицированного пакета
-				if len(modifiedPkt) < 20 {
-					log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping",
-						i, len(modifiedPkt))
-					continue
-				}
-
-				// Проверяем, что это похоже на IP-пакет
-				if modifiedPkt[0]>>4 != 4 {
-					log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)",
-						i, modifiedPkt[0]>>4)
-				}
-
-				if p.sendPacket(modifiedPkt, pkt.Addr) {
-					validPackets++
-					p.updateStats(func(stats *PipelineStats) {
-						stats.PacketsModified++
-						stats.PacketsSent++
-					})
-				}
-			}
-
-			log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
-				validPackets, len(result.ModifiedPackets), dstIP.String())
-
-			// Если нужно, отправляем оригинал
-			if result.SendOriginal && len(pkt.Data) >= 20 {
-				if p.sendPacket(pkt.Data, pkt.Addr) {
-					p.updateStats(func(stats *PipelineStats) {
-						stats.PacketsSent++
-					})
-				}
-			}
-
-			if result != nil {
-				log.Printf("[STRATEGY] ModifyPacket returned %d packets (strategy %d), sent %d",
-					len(result.ModifiedPackets), strategyID, validPackets)
-			}
-		} else {
-			// Если ModifyPacket вернул ошибку — отправляем оригинал
+		if err != nil {
+			log.Printf("[STRATEGY] ModifyPacket error: %v, sending original", err)
 			p.sendPacket(pkt.Data, pkt.Addr)
+			return
 		}
+
+		if result == nil {
+			log.Printf("[STRATEGY] ModifyPacket returned nil result for strategy %d", strategyID)
+			p.sendPacket(pkt.Data, pkt.Addr)
+			return
+		}
+
+		validPackets := 0
+		for i, modifiedPkt := range result.ModifiedPackets {
+			// Проверяем целостность модифицированного пакета
+			if len(modifiedPkt) < 20 {
+				log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping", i, len(modifiedPkt))
+				continue
+			}
+
+			// Проверяем, что это похоже на IP-пакет
+			if modifiedPkt[0]>>4 != 4 {
+				log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)", i, modifiedPkt[0]>>4)
+				continue
+			}
+
+			if p.sendPacket(modifiedPkt, pkt.Addr) {
+				validPackets++
+				p.updateStats(func(stats *PipelineStats) {
+					stats.PacketsModified++
+					stats.PacketsSent++
+				})
+			}
+		}
+
+		log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
+			validPackets, len(result.ModifiedPackets), dstIP.String())
+
+		// Если нужно, отправляем оригинал
+		if result.SendOriginal && len(pkt.Data) >= 20 {
+			if p.sendPacket(pkt.Data, pkt.Addr) {
+				p.updateStats(func(stats *PipelineStats) {
+					stats.PacketsSent++
+				})
+			}
+		}
+
+		log.Printf("[STRATEGY] ModifyPacket returned %d packets (strategy %d), sent %d",
+			len(result.ModifiedPackets), strategyID, validPackets)
 	} else {
 		p.sendPacket(pkt.Data, pkt.Addr)
 	}
 
-	// Обновляем статистику обработки
+	// Статистика
 	processTime := time.Since(startTime)
 	p.updateStats(func(stats *PipelineStats) {
 		stats.PacketsProcessed++
 		stats.TotalProcessTime += processTime
-		stats.AvgProcessTime = stats.TotalProcessTime / time.Duration(stats.PacketsProcessed)
+		if stats.PacketsProcessed > 0 {
+			stats.AvgProcessTime = stats.TotalProcessTime / time.Duration(stats.PacketsProcessed)
+		}
 	})
 }
 
