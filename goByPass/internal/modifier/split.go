@@ -17,7 +17,7 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
-	safePositions := map[int]bool{1: true, 5: true, 43: true} // типичные safe для ClientHello
+	safePositions := map[int]bool{1: true, 2: true, 3: true, 5: true, 7: true, 19: true, 43: true} // типичные safe для ClientHello
 
 	for i, pos := range splitPos {
 		if !safePositions[pos] && (pos < 5 || pos%5 != 0) {

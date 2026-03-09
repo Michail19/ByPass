@@ -189,6 +189,29 @@ func (m *Manager) loadDefaultStrategies() {
 		Priority:       3,
 	})
 
+	m.AddStrategy(&Strategy{
+		ID:              25,
+		Name:            "yt-discord-2026",
+		Description:     "2026 TSPU bypass from zapret/ByeDPI",
+		ApplyToTLS:      true,
+		ApplyToQUIC:     true,
+		SplitMode:       SplitAfterSNI,
+		SplitPositions:  []int{1, 3, 7, 43},
+		SplitSNIOffset:  true,
+		DisorderMode:    DisorderReverseFrag,
+		DisorderPos:     []int{1, 3},
+		DisorderTTL:     4,
+		DisorderRepeats: 2,
+		FakeMode:        FakeBadSum,
+		FakePos:         0,
+		FakeTTL:         4,
+		FakeRepeats:     1,
+		TLSRecordSplit:  true,
+		TLSRecordSize:   80,
+		Priority:        1,
+		QUICttl:         4,
+	})
+
 	// Устанавливаем стратегию по умолчанию
 	//m.defaultID = 2 // moderate
 }

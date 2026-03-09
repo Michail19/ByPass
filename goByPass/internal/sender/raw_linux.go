@@ -50,15 +50,10 @@ func newLinuxSender(cfg Config) (Sender, error) {
 
 	// Привязываемся к интерфейсу, если указан
 	if cfg.Interface != "" {
-		iface, err := net.InterfaceByName(cfg.Interface)
+		err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, cfg.Interface)
 		if err != nil {
 			unix.Close(fd)
-			return nil, fmt.Errorf("failed to get interface: %v", err)
-		}
-
-		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, iface.Index); err != nil {
-			unix.Close(fd)
-			return nil, fmt.Errorf("failed to bind to interface: %v", err)
+			return nil, fmt.Errorf("failed to bind to interface %s: %v", cfg.Interface, err)
 		}
 	}
 

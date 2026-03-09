@@ -7,7 +7,7 @@ import (
 	"ByPass/internal/strategy"
 	"encoding/binary"
 	"fmt"
-	"log"
+	"sort"
 )
 
 // PacketModifier реализует модификацию пакетов
@@ -46,168 +46,166 @@ func NewPacketModifier(sm *strategy.Manager, ic *cache.IPCache) *PacketModifier 
 
 // ModifyPacket главная функция модификации пакета
 func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*ModifyResult, error) {
-	if packet == nil || len(packet) < 40 { // Минимум: IPv4 + TCP
+	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
 		return &ModifyResult{SendOriginal: true}, nil
 	}
 
 	pm.stats.PacketsProcessed++
 
-	// Быстрый early exit, если пакет не IPv4 или не TCP
-	if packet[0]>>4 != 4 || packet[9] != 6 {
-		return &ModifyResult{SendOriginal: true}, nil
-	}
-
-	// Парсим заголовки один раз
-	ipHeaderLen := int(packet[0]&0x0F) * 4
-	if len(packet) < ipHeaderLen+20 {
-		return &ModifyResult{SendOriginal: true}, nil
-	}
-
-	tcpHeaderOffset := ipHeaderLen
-	tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
-	if tcpHeaderLen < 20 || len(packet) < tcpHeaderOffset+tcpHeaderLen {
-		return &ModifyResult{SendOriginal: true}, nil
-	}
-
-	payloadOffset := tcpHeaderOffset + tcpHeaderLen
+	ipHdrLen := int(packet[0]&0x0F) * 4
+	tcpHdrOffset := ipHdrLen
+	tcpHdrLen := int(packet[tcpHdrOffset+12]>>4) * 4
+	payloadOffset := tcpHdrOffset + tcpHdrLen
 	payloadLen := len(packet) - payloadOffset
 
-	flags := packet[tcpHeaderOffset+13]
-	isSYN := (flags & 0x02) != 0
-	isACK := (flags & 0x10) != 0
-	isData := payloadLen > 0
-	isClientHello := isData && packet[payloadOffset] == 0x16 // TLS ContentType Handshake (0x16)
-
-	dstIP := flow.GetDstIP()
-
-	// Выбор стратегии
-	strat := pm.strategyManager.SelectStrategy(
-		dstIP,
-		flow.Hostname,
-		int(flow.GetDstPort()),
-		"tcp",
-	)
-
-	applyMods := (isClientHello && strat.ApplyToTLS) || isSYN || isACK
-
-	if !applyMods {
+	if payloadLen <= 0 {
 		return &ModifyResult{SendOriginal: true}, nil
 	}
 
-	result := &ModifyResult{
-		StrategyID:   strat.ID,
-		SendOriginal: true,
+	dstIP := flow.GetDstIP()
+	strat := pm.strategyManager.SelectStrategy(dstIP, flow.Hostname, int(flow.GetDstPort()), "tcp")
+	if strat == nil || strat.ID == 1 { // passthrough
+		return &ModifyResult{SendOriginal: true}, nil
 	}
 
-	// Флаг, что мы уже что-то модифицировали и оригинал отправлять не нужно
-	var modified bool
+	var packets [][]byte
 
-	// 1. TLS Record Split (приоритетный, если включён)
-	if strat.TLSRecordSplit && protocol.IsTLS(packet) {
-		config := &TLSSplitConfig{
-			Enabled:        true,
-			RecordSize:     strat.TLSRecordSize,
-			SplitHandshake: true,
-			SplitAlert:     true,
+	isClientHello := payloadLen > 5 &&
+		packet[payloadOffset] == 0x16 &&
+		packet[payloadOffset+1] == 0x03 &&
+		packet[payloadOffset+5] == 0x01 // Handshake + ClientHello
+
+	if strat.SplitMode != strategy.SplitNone && isClientHello {
+		splitPkts, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
+
+		for i := range packets {
+			recalculateIPChecksum(packets[i])
+			FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
 		}
 
-		tlsFragments, err := pm.ApplyTLSSplit(packet, config)
-		if err == nil && len(tlsFragments) > 0 {
-			var wrapped [][]byte
-			currentSeq := binary.BigEndian.Uint32(packet[tcpHeaderOffset+4:])
+		if err == nil {
+			packets = append(packets, splitPkts...)
+			pm.stats.SplitCount += uint64(len(splitPkts))
+		}
+	}
 
-			for _, frag := range tlsFragments {
+	// 1. Fake + repeats (zapret fake + --dpi-desync-repeats)
+	if strat.FakeMode != strategy.FakeNone {
+		for rep := 0; rep < strat.Repeats; rep++ {
+			fakePkts, err := pm.ApplyFake(packet, strat.FakePos, strat.FakeTTL, strat.FakeMode, strat.Fooling)
+
+			for i := range packets {
+				recalculateIPChecksum(packets[i])
+				FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
+			}
+
+			if err == nil && len(fakePkts) > 0 {
+				packets = append(packets, fakePkts...)
+				pm.stats.FakeCount += uint64(len(fakePkts))
+			}
+		}
+	}
+
+	// 2. Disorder / fakeddisorder
+	if strat.DisorderMode != strategy.DisorderNone {
+		disorderPkts, err := pm.ApplyDisorder(packet, strat.DisorderPos, strat.DisorderTTL, strat.DisorderMode)
+
+		for i := range packets {
+			recalculateIPChecksum(packets[i])
+			FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
+		}
+
+		if err == nil {
+			packets = append(packets, disorderPkts...)
+			pm.stats.DisorderCount += uint64(len(disorderPkts))
+		}
+	}
+
+	// 3. Split / multisplit
+	if strat.SplitMode != strategy.SplitNone {
+		splitPkts, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
+
+		for i := range packets {
+			recalculateIPChecksum(packets[i])
+			FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
+		}
+
+		if err == nil {
+			packets = append(packets, splitPkts...)
+			pm.stats.SplitCount += uint64(len(splitPkts))
+		}
+	}
+
+	// 4. TLS record split
+	if strat.TLSRecordSplit && protocol.IsTLS(packet) {
+		// Находим начало TLS payload
+		ipHdrLen := int(packet[0]&0x0F) * 4
+		tcpHdrLen := int(packet[ipHdrLen+12]>>4) * 4
+		tlsPayload := packet[ipHdrLen+tcpHdrLen:]
+
+		tlsPkts, err := pm.ApplyTLSSplit(tlsPayload, strat.TLSRecordSize)
+
+		for i := range packets {
+			recalculateIPChecksum(packets[i])
+			FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
+		}
+
+		if err == nil && len(tlsPkts) > 0 {
+			// Оборачиваем каждый фрагмент обратно в IP+TCP
+			wrapped := make([][]byte, 0, len(tlsPkts))
+			currentSeq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
+
+			for _, frag := range tlsPkts {
 				fragLen := len(frag)
 				if fragLen == 0 {
 					continue
 				}
 
-				newPkt := make([]byte, payloadOffset+fragLen)
-				copy(newPkt, packet[:payloadOffset]) // IP + TCP header
+				newPkt := make([]byte, ipHdrLen+tcpHdrLen+fragLen)
+				copy(newPkt, packet[:ipHdrLen+tcpHdrLen]) // IP + TCP header
 
-				// Обновляем длину IP
+				// Обновляем IP total length
 				binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
 
-				// Обновляем sequence number
-				binary.BigEndian.PutUint32(newPkt[tcpHeaderOffset+4:], currentSeq)
+				// Sequence number
+				binary.BigEndian.PutUint32(newPkt[ipHdrLen+4:], currentSeq)
 
-				// Копируем фрагмент TLS
-				copy(newPkt[payloadOffset:], frag)
+				copy(newPkt[ipHdrLen+tcpHdrLen:], frag)
 
-				// Сбрасываем DF-бит (если был)
+				// DF bit off
 				newPkt[6] &= ^byte(0x40)
 
-				// Один раз пересчитываем checksum'ы
 				recalculateIPChecksum(newPkt)
-				if err := FixTCPChecksum(newPkt); err != nil {
-					log.Printf("TLS-split checksum error: %v", err)
-					continue
-				}
+				FixTCPChecksum(newPkt)
 
 				wrapped = append(wrapped, newPkt)
 				currentSeq += uint32(fragLen)
 			}
 
-			if len(wrapped) > 0 {
-				result.ModifiedPackets = append(result.ModifiedPackets, wrapped...)
-				modified = true
-				result.SendOriginal = false
-				pm.stats.SplitCount += uint64(len(wrapped))
-				pm.stats.PacketsModified += uint64(len(wrapped))
-			}
+			packets = append(packets, wrapped...)
+			pm.stats.SplitCount += uint64(len(wrapped))
+			pm.stats.PacketsModified += uint64(len(wrapped))
 		}
 	}
 
-	if !((isClientHello && strat.ApplyToTLS) || isSYN || isACK) {
-		return &ModifyResult{SendOriginal: true}, nil
+	result := &ModifyResult{
+		StrategyID:      strat.ID,
+		SendOriginal:    true,
+		ModifiedPackets: packets,
 	}
 
-	// 2. TCP Segmentation (SplitMode)
-	if !modified && strat.SplitMode != strategy.SplitNone {
-		fragments, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
-		if err == nil && len(fragments) > 0 {
-			result.ModifiedPackets = append(result.ModifiedPackets, fragments...)
-			modified = true
-			result.SendOriginal = false
-			pm.stats.SplitCount += uint64(len(fragments))
-			pm.stats.PacketsModified += uint64(len(fragments))
+	// Сортировка по sequence number
+	sort.Slice(packets, func(i, j int) bool {
+		if len(packets[i]) < tcpHdrOffset+8 || len(packets[j]) < tcpHdrOffset+8 {
+			return false
 		}
-	}
+		seqI := binary.BigEndian.Uint32(packets[i][tcpHdrOffset+4:])
+		seqJ := binary.BigEndian.Uint32(packets[j][tcpHdrOffset+4:])
+		return seqI < seqJ
+	})
 
-	if !((isClientHello && strat.ApplyToTLS) || isSYN || isACK) {
-		return &ModifyResult{SendOriginal: true}, nil
-	}
-
-	// 3. Disorder
-	if !modified && strat.DisorderMode != strategy.DisorderNone {
-		disorderPkts, err := pm.ApplyDisorder(packet, strat.DisorderPos, strat.DisorderTTL)
-		if err == nil && len(disorderPkts) > 0 {
-			result.ModifiedPackets = append(result.ModifiedPackets, disorderPkts...)
-			modified = true
-			pm.stats.DisorderCount += uint64(len(disorderPkts))
-			pm.stats.PacketsModified += uint64(len(disorderPkts))
-		}
-	}
-
-	if !((isClientHello && strat.ApplyToTLS) || isSYN || isACK) {
-		return &ModifyResult{SendOriginal: true}, nil
-	}
-
-	// 4. Fake packets (обычно отправляются вместе с оригиналом)
-	if strat.FakeMode != strategy.FakeNone {
-		fakePkts, err := pm.ApplyFake(packet, strat.FakePos, strat.FakeTTL, strat.FakeMode)
-		if err == nil && len(fakePkts) > 0 {
-			result.ModifiedPackets = append(result.ModifiedPackets, fakePkts...)
-			pm.stats.FakeCount += uint64(len(fakePkts))
-			pm.stats.PacketsModified += uint64(len(fakePkts))
-			// Fake-пакеты обычно идут ДО оригинала → SendOriginal остаётся true
-		}
-	}
-
-	// Если ничего не применили — отправляем оригинал
-	if len(result.ModifiedPackets) == 0 {
-		result.SendOriginal = true
-	}
+	result.ModifiedPackets = packets
+	pm.stats.PacketsModified += uint64(len(packets))
 
 	return result, nil
 }

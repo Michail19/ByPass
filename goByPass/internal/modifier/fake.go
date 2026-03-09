@@ -4,66 +4,39 @@ import (
 	"ByPass/internal/strategy"
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 )
 
 // ApplyFake создает поддельный пакет
-func (pm *PacketModifier) ApplyFake(packet []byte, fakePos int, fakeTTL int, fakeMode strategy.FakeMode) ([][]byte, error) {
-	if fakePos < 0 || fakePos >= len(packet) || fakeTTL <= 0 {
-		return nil, nil
-	}
+func (pm *PacketModifier) ApplyFake(packet []byte, pos int, ttl int, mode strategy.FakeMode, fooling uint32) ([][]byte, error) {
+	fake := append([]byte{}, packet...)
 
-	// Проверяем TCP/IPv4
-	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
-		return nil, nil
-	}
+	ipHdrLen := int(fake[0]&0x0F) * 4
+	tcpOffset := ipHdrLen
 
-	fakePacket := append([]byte{}, packet...) // Copy only once
-
-	// Changes first
-	switch fakeMode {
-	case strategy.FakeMD5Sig:
-		newFake, err := addTCPOptionMD5(fakePacket)
-		if err != nil {
-			return nil, err
-		}
-		fakePacket = newFake
+	switch mode {
+	case strategy.FakeBadSum:
+		FixTCPChecksum(fake)       // сначала правильный
+		fake[tcpOffset+16] ^= 0xFF // corrupt 1 байт checksum
+		fake[tcpOffset+17] ^= 0xFF
 
 	case strategy.FakeBadSeq:
-		modifyTCPSeq(fakePacket, 12345) // Wrong seq
+		delta := uint32(rand.Int31n(1000000) + 1)
+		modifyTCPSeq(fake, delta)
 
 	case strategy.FakeDataNoAck:
-		// Устанавливаем флаг ACK в 0
-		clearTCPACK(fakePacket)
+		clearTCPACK(fake) // убрать ACK флаг
 
-	default:
-		// По умолчанию просто забиваем нулями часть пакета
-		for i := fakePos; i < len(fakePacket); i++ {
-			fakePacket[i] = 0
-		}
+	case strategy.FakeMD5Sig:
+		// уже есть в твоём коде
+		fake, _ = addTCPOptionMD5(fake)
 	}
 
-	// ACK-specific (специфическая модификация)
-	//isACK := false
-	ipHeaderLen := int(fakePacket[0]&0x0F) * 4
-	tcpHeaderOffset := ipHeaderLen
-	tcpHeaderLen := int(fakePacket[tcpHeaderOffset+12]>>4) * 4
-	dataLen := len(fakePacket) - tcpHeaderOffset - tcpHeaderLen
-	flags := fakePacket[tcpHeaderOffset+13]
-	if (flags&0x10) != 0 && dataLen == 0 {
-		//isACK = true
-		//modifyTCPWindow(fakePacket, 42)
-		modifyTCPWindow(fakePacket, 8) // Small window to force segmentation
-	}
+	setIPTTL(fake, ttl)
+	recalculateIPChecksum(fake)
+	FixTCPChecksum(fake) // на всякий случай
 
-	// Low TTL
-	setIPTTL(fakePacket, fakeTTL)
-
-	// Single checksum at end
-	recalculateIPChecksum(fakePacket)
-	FixTCPChecksum(fakePacket)
-
-	origCopy := append([]byte{}, packet...) // Copy original
-	return [][]byte{fakePacket, origCopy}, nil
+	return [][]byte{fake}, nil
 }
 
 // modifyTCPWindow изменяет window size (для ACK)

@@ -2,10 +2,12 @@ package packetflow
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -244,7 +246,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	}
 
 	if protocol == 17 && dstPort == 443 { // QUIC
-		setIPTTL(pkt.Data, 8)
+		setIPTTL(pkt.Data, 4)
 		recalculateIPChecksum(pkt.Data)
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
@@ -276,16 +278,22 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	}
 
 	// Асинхронный reverse DNS, если hostname пустой и не QUIC/handshake
-	if flow.Hostname == "" {
-		go func(ip string) {
+	if flow.Hostname == "" && !flow.IsReverseDNSPending() { // добавь флаг в conntrack.Flow
+		flow.SetReverseDNSPending(true)
+		go func(ip string, flow *conntrack.Flow) {
+			defer flow.SetReverseDNSPending(false)
+
+			// Debounce: sleep 100ms перед запросом (если много пакетов — только один запрос)
+			time.Sleep(100 * time.Millisecond)
+
 			names, err := net.LookupAddr(ip)
 			if err == nil && len(names) > 0 {
 				hostname := strings.TrimSuffix(names[0], ".")
-				flow.SetHostname(hostname) // добавить mu.Lock in SetHostname in conntrack.go
+				flow.SetHostname(hostname)
 				log.Printf("Async reverse DNS: %s for %s", hostname, ip)
 				p.ipCache.PutByIP(dstIP, hostname, shouldBypass, strategyID)
 			}
-		}(dstIP.String())
+		}(dstIP.String(), flow)
 	}
 
 	// 1. Проверяем кэш
@@ -351,9 +359,13 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		tcpHeaderLen := int(pkt.Data[tcpOffset+12]>>4) * 4
 		payloadOffset := tcpOffset + tcpHeaderLen
 		isData = len(pkt.Data) > payloadOffset
-		isClientHello := isData && len(pkt.Data) > payloadOffset+5 && pkt.Data[payloadOffset] == 0x16 && pkt.Data[payloadOffset+5] == 0x01
-		//applyMods := isClientHello && strats.ApplyToTLS // только для ClientHello
+		isClientHello := isData &&
+			len(pkt.Data) > payloadOffset+6 && // +6 для version check
+			pkt.Data[payloadOffset] == 0x16 && // ContentType Handshake
+			pkt.Data[payloadOffset+1] == 0x03 && // Major version 3
+			pkt.Data[payloadOffset+5] == 0x01 // HandshakeType ClientHello
 
+		//applyMods := isClientHello && strats.ApplyToTLS // только для ClientHello
 		//applyMods := (isClientHello && strats.ApplyToTLS) || isSYN || isACK
 
 		applyMods := isClientHello && strats.ApplyToTLS && !flow.IsHandshakeModified
@@ -370,8 +382,14 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			setIPTTL(pkt.Data, strats.QUICttl)
 			recalculateIPChecksum(pkt.Data)
 
-			// Вариант 2: иногда дропать первый QUIC-пакет после handshake (DPI путается)
-			// if flow.IsFirstQUIC() { return } // нужно добавить флаг в flow
+			// Добавить fake QUIC Initial перед оригиналом (если strat.FakeQUIC)
+			if strats != nil && strats.FakeQUIC {
+				fakeQUIC := makeFakeQUICInitial(pkt.Data) // реализуй ниже
+				if len(fakeQUIC) > 0 {
+					p.sendPacket(fakeQUIC, pkt.Addr)
+					time.Sleep(1 * time.Millisecond) // delay перед оригиналом
+				}
+			}
 
 			p.sendPacket(pkt.Data, pkt.Addr)
 			return
@@ -400,43 +418,39 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			return
 		}
 
-		validPackets := 0
-		for i, modifiedPkt := range result.ModifiedPackets {
-			// Проверяем целостность модифицированного пакета
-			if len(modifiedPkt) < 20 {
-				log.Printf("WARNING: Modified packet %d too short (%d bytes), skipping", i, len(modifiedPkt))
-				continue
-			}
+		// Отправляем модифицированные (с sort + delay)
+		if len(result.ModifiedPackets) > 0 {
+			// Сортировка по seq (если нужно)
+			sort.Slice(result.ModifiedPackets, func(i, j int) bool {
+				seqI := getTCPSeq(result.ModifiedPackets[i])
+				seqJ := getTCPSeq(result.ModifiedPackets[j])
+				return seqI < seqJ
+			})
 
-			// Проверяем, что это похоже на IP-пакет
-			if modifiedPkt[0]>>4 != 4 {
-				log.Printf("WARNING: Modified packet %d not IPv4 (version=%d)", i, modifiedPkt[0]>>4)
-				continue
-			}
-
-			if p.sendPacket(modifiedPkt, pkt.Addr) {
-				validPackets++
-				p.updateStats(func(stats *PipelineStats) {
-					stats.PacketsModified++
-					stats.PacketsSent++
-				})
-			}
-		}
-
-		log.Printf("DEBUG: Sent %d/%d modified packets for flow to %s",
-			validPackets, len(result.ModifiedPackets), dstIP.String())
-
-		// Если нужно, отправляем оригинал
-		if result.SendOriginal && len(pkt.Data) >= 20 {
-			if p.sendPacket(pkt.Data, pkt.Addr) {
-				p.updateStats(func(stats *PipelineStats) {
-					stats.PacketsSent++
-				})
+			// Отправляем с delay
+			for i, modPkt := range result.ModifiedPackets {
+				if len(modPkt) >= 20 && (modPkt[0]>>4 == 4) { // базовая валидация
+					p.sendPacket(modPkt, pkt.Addr)
+					if i < len(result.ModifiedPackets)-1 {
+						time.Sleep(1 * time.Millisecond)
+					}
+					p.updateStats(func(stats *PipelineStats) {
+						stats.PacketsModified++
+						stats.PacketsSent++
+					})
+				} else {
+					log.Printf("WARNING: Invalid modified packet %d, skipping", i)
+				}
 			}
 		}
 
-		log.Printf("[STRATEGY] ModifyPacket returned %d packets (strategy %d), sent %d",
-			len(result.ModifiedPackets), strategyID, validPackets)
+		// Отправляем оригинал (если нужно)
+		if result.SendOriginal {
+			p.sendPacket(pkt.Data, pkt.Addr)
+			p.updateStats(func(stats *PipelineStats) {
+				stats.PacketsSent++
+			})
+		}
 	} else {
 		p.sendPacket(pkt.Data, pkt.Addr)
 	}
@@ -450,6 +464,34 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			stats.AvgProcessTime = stats.TotalProcessTime / time.Duration(stats.PacketsProcessed)
 		}
 	})
+}
+
+func makeFakeQUICInitial(original []byte) []byte {
+	// Базовый fake QUIC Initial (из byedpi quic.c, упрощённо)
+	fake := make([]byte, 1200) // типичный размер
+	fake[0] = 0xc0             // long header + Initial
+	// DCID/SCID random
+	rand.Read(fake[1:9])                              // version
+	binary.BigEndian.PutUint32(fake[1:5], 0x00000001) // QUIC v1
+	// SCID/DCID lengths
+	fake[5] = 8 // DCID len
+	rand.Read(fake[6:14])
+	fake[14] = 0 // SCID len 0 for Initial
+	// Token len=0
+	fake[15] = 0
+	// Payload len varint (упрощённо)
+	fake[16] = 0x40 | byte(1182&0x3f) // 2-byte varint
+	fake[17] = byte(1182 >> 6)
+	// Fake payload (CHLO-like)
+	copy(fake[18:], []byte("\x06\x00\x40\xf1\x01")) // frame type + etc
+	rand.Read(fake[23:])                            // random fill
+	return fake
+}
+
+// Вспомогательная функция
+func getTCPSeq(pkt []byte) uint32 {
+	ipLen := int(pkt[0]&0x0F) * 4
+	return binary.BigEndian.Uint32(pkt[ipLen+4:])
 }
 
 // sendPacket отправляет пакет с учетом типа sender

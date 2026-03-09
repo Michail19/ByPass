@@ -1,15 +1,29 @@
 package strategy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
+	"net"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+type ipRange struct {
+	Prefix string `json:"ipv4Prefix"`
+}
+
+type googleIPList struct {
+	SyncToken    string    `json:"syncToken"`
+	CreationTime time.Time `json:"creationTime"`
+	Prefixes     []ipRange `json:"prefixes"`
+}
 
 // Manager управляет стратегиями
 type Manager struct {
@@ -21,6 +35,12 @@ type Manager struct {
 	mu         sync.RWMutex
 	updateChan chan *StrategyResult
 	closeChan  chan struct{}
+
+	// Новые поля для Google IP ranges
+	googleRanges   []*net.IPNet
+	rangesMu       sync.RWMutex
+	lastUpdateTime time.Time
+	updateErr      error
 }
 
 // ManagerStats статистика менеджера
@@ -35,10 +55,11 @@ type ManagerStats struct {
 // NewManager создает новый менеджер стратегий
 func NewManager() *Manager {
 	m := &Manager{
-		strategies: make(map[int]*Strategy),
-		filters:    make(map[string]*StrategyFilter),
-		updateChan: make(chan *StrategyResult, 1000),
-		closeChan:  make(chan struct{}),
+		strategies:   make(map[int]*Strategy),
+		filters:      make(map[string]*StrategyFilter),
+		updateChan:   make(chan *StrategyResult, 1000),
+		closeChan:    make(chan struct{}),
+		googleRanges: make([]*net.IPNet, 0),
 	}
 
 	// Загружаем стратегии по умолчанию
@@ -47,7 +68,260 @@ func NewManager() *Manager {
 	// Запускаем обработчик результатов
 	go m.processResults()
 
+	// Запускаем авто-обновление Google IP ranges
+	go m.startGoogleIPUpdater()
+
+	// Первичная загрузка при старте
+	m.updateGoogleIPRanges()
+
 	return m
+}
+
+// startGoogleIPUpdater запускает периодическое обновление диапазонов Google
+func (m *Manager) startGoogleIPUpdater() {
+	ticker := time.NewTicker(12 * time.Hour) // каждые 12 часов — достаточно
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.closeChan:
+			return
+		case <-ticker.C:
+			m.updateGoogleIPRanges()
+		}
+	}
+}
+
+// В структуре Manager добавь:
+var fallbackRanges = []string{
+	// Минимальный набор для YouTube (актуально на 2026)
+	"8.8.4.0/24",
+	"8.8.8.0/24",
+	"8.34.208.0/20",
+	"8.35.192.0/20",
+	"8.228.0.0/14",
+	"8.232.0.0/14",
+	"8.236.0.0/15",
+	"23.236.48.0/20",
+	"23.251.128.0/19",
+	"34.0.0.0/15",
+	"34.2.0.0/16",
+	"34.3.0.0/23",
+	"34.3.3.0/24",
+	"34.3.4.0/24",
+	"34.3.8.0/21",
+	"34.3.16.0/20",
+	"34.3.32.0/19",
+	"34.3.64.0/18",
+	"34.4.0.0/14",
+	"34.8.0.0/13",
+	"34.16.0.0/12",
+	"34.32.0.0/11",
+	"34.64.0.0/10",
+	"34.128.0.0/10",
+	"35.184.0.0/13",
+	"35.192.0.0/14",
+	"35.196.0.0/15",
+	"35.198.0.0/16",
+	"35.199.0.0/17",
+	"35.199.128.0/18",
+	"35.200.0.0/13",
+	"35.208.0.0/12",
+	"35.224.0.0/12",
+	"35.240.0.0/13",
+	"35.252.0.0/14",
+	"64.15.112.0/20",
+	"64.233.112.0/20",
+	"70.32.112.0/20",
+	"74.114.24.0/21",
+	"104.154.0.0/15",
+	"104.196.0.0/14",
+	"104.237.160.0/19",
+	"107.167.160.0/19",
+	"107.178.192.0/18",
+	"108.59.80.0/20",
+	"108.170.192.0/18",
+	"74.125.0.0/16",
+	"142.250.0.0/15",
+	"172.217.0.0/16",
+	"172.253.0.0/16",
+	"173.194.0.0/16",
+	"209.85.128.0/17",
+	"216.58.192.0/19",
+	"216.239.32.0/19",
+	"64.233.160.0/19",
+	"66.102.0.0/20",
+	"66.249.64.0/19",
+	"72.14.192.0/18",
+	"108.177.0.0/17",
+	"130.211.0.0/16",
+	"136.22.2.0/23",
+	"136.22.4.0/23",
+	"136.22.8.0/22",
+	"136.22.160.0/20",
+	"136.22.176.0/21",
+	"136.22.184.0/23",
+	"136.22.186.0/24",
+	"136.23.48.0/20",
+	"136.23.64.0/18",
+	"136.64.0.0/11",
+	"136.107.0.0/16",
+	"136.108.0.0/14",
+	"136.112.0.0/13",
+	"136.120.0.0/22",
+	"136.124.0.0/15",
+	"142.250.0.0/15",
+	"146.148.0.0/17",
+	"162.120.128.0/17",
+	"162.216.148.0/22",
+	"162.222.176.0/21",
+	"172.110.32.0/21",
+	"172.217.0.0/16",
+	"172.253.0.0/16",
+	"173.194.0.0/16",
+	"173.255.112.0/20",
+	"192.104.160.0/23",
+	"192.158.28.0/22",
+	"192.178.0.0/15",
+	"193.186.4.0/24",
+	"199.36.154.0/23",
+	"199.36.156.0/24",
+	"199.192.112.0/22",
+	"199.223.232.0/21",
+	"207.175.0.0/16",
+	"207.223.160.0/20",
+	"208.65.152.0/22",
+	"208.68.108.0/22",
+	"208.81.188.0/22",
+	"208.117.224.0/19",
+	"209.85.128.0/17",
+	"216.58.192.0/19",
+	"216.73.80.0/20",
+	"216.239.32.0/19",
+	"216.252.220.0/22",
+}
+
+// В updateGoogleIPRanges — полный rewrite с диагностикой и retry
+func (m *Manager) updateGoogleIPRanges() {
+	urls := []string{
+		"https://www.gstatic.com/ipranges/goog.json",
+		"https://www.gstatic.com/ipranges/cloud.json",
+	}
+
+	var allPrefixes []string
+
+	for _, url := range urls {
+		log.Printf("[GoogleIP] Attempting to download: %s", url)
+
+		for attempt := 1; attempt <= 3; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+			if err != nil {
+				log.Printf("[GoogleIP] Failed to create request (attempt %d): %v", attempt, err)
+				time.Sleep(time.Second * time.Duration(attempt))
+				continue
+			}
+
+			req.Header.Set("User-Agent", "ByPass/1.0 (Google IP Updater)")
+
+			client := &http.Client{Timeout: 15 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Printf("[GoogleIP] Download failed (attempt %d, url=%s): %v", attempt, url, err)
+				time.Sleep(time.Second * time.Duration(attempt))
+				continue
+			}
+			defer resp.Body.Close()
+
+			log.Printf("[GoogleIP] Response status: %s", resp.Status)
+
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("[GoogleIP] Bad status %d from %s", resp.StatusCode, url)
+				continue
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("[GoogleIP] Failed to read body from %s: %v", url, err)
+				continue
+			}
+
+			log.Printf("[GoogleIP] Downloaded %d bytes from %s", len(body), url)
+
+			var list struct {
+				SyncToken string `json:"syncToken"`
+				Prefixes  []struct {
+					IPv4Prefix string `json:"ipv4Prefix"`
+				} `json:"prefixes"`
+			}
+
+			if err := json.Unmarshal(body, &list); err != nil {
+				log.Printf("[GoogleIP] JSON parse error from %s: %v", url, err)
+				continue
+			}
+
+			for _, p := range list.Prefixes {
+				if p.IPv4Prefix != "" {
+					allPrefixes = append(allPrefixes, p.IPv4Prefix)
+				}
+			}
+
+			log.Printf("[GoogleIP] Parsed %d IPv4 prefixes from %s", len(list.Prefixes), url)
+			break // успех — выходим из retry
+		}
+	}
+
+	// Если ничего не скачали — fallback
+	if len(allPrefixes) == 0 {
+		log.Printf("[GoogleIP] No prefixes loaded from online sources — using fallback list")
+		allPrefixes = fallbackRanges
+	}
+
+	newRanges := make([]*net.IPNet, 0, len(allPrefixes))
+	for _, cidr := range allPrefixes {
+		_, netw, err := net.ParseCIDR(cidr)
+		if err != nil {
+			log.Printf("[GoogleIP] Invalid CIDR %q: %v", cidr, err)
+			continue
+		}
+		newRanges = append(newRanges, netw)
+	}
+
+	m.rangesMu.Lock()
+	m.googleRanges = newRanges
+	m.lastUpdateTime = time.Now()
+	m.updateErr = nil
+	m.rangesMu.Unlock()
+
+	log.Printf("[GoogleIP] Loaded %d IPv4 ranges (fallback=%t)", len(newRanges), len(allPrefixes) == len(fallbackRanges))
+}
+
+// isGoogleIP проверяет, входит ли IP в диапазоны Google/YouTube
+func (m *Manager) isGoogleIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	//if ip == nil || !ip.To4().IsValid() {
+	if ip == nil {
+		return false
+	}
+
+	m.rangesMu.RLock()
+	defer m.rangesMu.RUnlock()
+
+	if len(m.googleRanges) == 0 {
+		// Если список пуст (ошибка загрузки) — fallback на старое поведение
+		log.Printf("[GoogleIP] No ranges loaded, using hostname fallback")
+		return false
+	}
+
+	for _, cidr := range m.googleRanges {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Stop останавливает менеджер
@@ -84,40 +358,32 @@ func (m *Manager) GetStrategy(id int) (*Strategy, bool) {
 	return strat, exists
 }
 
-// SelectStrategy выбирает стратегию для IP/хоста
+// SelectStrategy — обновлённая версия с приоритетом IP-проверки
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
 	log.Printf("[SELECT] Called for IP %s:%d, hostname='%s'", ip, port, hostname)
+
+	// Сначала проверяем по IP (самый надёжный способ для YouTube/CDN)
+	if m.isGoogleIP(ip) {
+		if strat, exists := m.strategies[25]; exists {
+			log.Printf("Google/YouTube IP match: %s → strategy 25", ip)
+			return strat
+		}
+	}
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	lower := strings.ToLower(hostname)
-
 	log.Printf("Hostname after: %v", lower)
 
-	// Точные и поддоменные совпадения
+	// Точные и поддоменные совпадения для остальных сервисов
 	if lower != "" {
 		hostRules := map[string]int{
-			"youtube.com":           20,
-			"www.youtube.com":       20,
-			"m.youtube.com":         20,
-			"youtu.be":              20,
-			"googlevideo.com":       20,
-			"ytimg.com":             20,
-			"ggpht.com":             20,
 			"discord.com":           21,
 			"discord.gg":            21,
+			"discordapp.com":        25,
 			"telegram.org":          12,
 			"kws2.web.telegram.org": 12,
-		}
-
-		// Проверяем поддомены через contains
-		if strings.Contains(lower, "youtube") || strings.Contains(lower, "googlevideo") ||
-			strings.Contains(lower, "ytimg") || strings.Contains(lower, "ggpht") {
-			if strat, exists := m.strategies[20]; exists {
-				log.Printf("YouTube subdomain match: %s → strategy 20", hostname)
-				return strat
-			}
 		}
 
 		if strings.Contains(lower, "discord") {
@@ -134,7 +400,6 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 			}
 		}
 
-		// Проверяем точное совпадение
 		if id, ok := hostRules[lower]; ok {
 			if strat, exists := m.strategies[id]; exists {
 				log.Printf("Exact hostname match: %s → strategy %d", hostname, id)
@@ -143,7 +408,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// Fallback на приоритет (как в уровне 1)
+	// Fallback на стратегию с наивысшим приоритетом
 	var best *Strategy
 	bestPriority := 999999
 

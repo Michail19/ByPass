@@ -42,6 +42,8 @@ const (
 	DisorderTTLZero
 	DisorderOutOfBand
 	DisorderBadSeq
+	DisorderReverseFrag   // reverse + badseq
+	DisorderFakedDisorder // fakeddisorder
 )
 
 func (d DisorderMode) String() string {
@@ -66,8 +68,10 @@ const (
 	FakeNone FakeMode = iota
 	FakeMD5Sig
 	FakeBadSeq
-	FakeDataNoAck
+	FakeDataNoAck // datanoack fooling
 	FakeWindowUpdate
+	FakeBadSum // corrupt checksum после recalc
+	FakeSeqOvl // sequence overlap (seqovl)
 )
 
 func (f FakeMode) String() string {
@@ -151,6 +155,17 @@ type Strategy struct {
 	LastUsed           time.Time `json:"last_used"`
 	AvgResponseMs      int64     `json:"avg_response_ms"` // среднее время ответа
 	ApplyToPacketTypes []string  `json:"apply_to_packet_types"`
+
+	// Новые
+	SeqOvlPos        int    `json:"seqovl_pos"`          // seq overlap position (absolute or marker)
+	FakeDsPattern    []byte `json:"fake_ds_pattern"`     // pattern для fakedsplit/fakeddisorder
+	FakeDsMod        int    `json:"fake_ds_mod"`         // fakedsplit mod (altorder 0-3 + 0/8/16)
+	HostFakeSplitMid int    `json:"host_fake_split_mid"` // mid-host split pos
+	HostFakeSplitMod int    `json:"host_fake_split_mod"` // hostfakesplit mod
+	UdplenIncrement  int    `json:"udplen_increment"`    // +N/-N байт для UDP
+	Repeats          int    `json:"repeats"`             // сколько раз отправлять каждый fake/disorder
+	Fooling          uint32 `json:"fooling"`             // битовая маска: MD5SIG|TS|BADSUM|BADSEQ|DATANOACK
+	FakeQUIC         bool   `json:"fake_quic"`
 }
 
 // Clone создает копию стратегии

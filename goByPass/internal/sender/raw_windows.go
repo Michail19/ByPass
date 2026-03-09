@@ -25,11 +25,12 @@ type WinDivertHandle uintptr
 
 // RawSender отправляет пакеты через WinDivert (Windows)
 type RawSender struct {
-	handle   WinDivertHandle
-	cfg      Config
-	stats    SenderStats
-	dll      *syscall.DLL  // Сохраняем DLL
-	sendProc *syscall.Proc // Сохраняем процедуру
+	handle     WinDivertHandle
+	cfg        Config
+	stats      SenderStats
+	dll        *syscall.DLL  // Сохраняем DLL
+	sendProc   *syscall.Proc // Сохраняем процедуру
+	sendExProc *syscall.Proc
 }
 
 // RawSocketSender для raw socket в Windows
@@ -123,7 +124,7 @@ func openWinDivert() (WinDivertHandle, error) {
 // newRawSocketSender создает raw socket отправитель
 func newRawSocketSender(cfg Config) (Sender, error) {
 	// Для raw socket используем IPPROTO_RAW
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, 0x1)
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, IPPROTO_RAW) // 255
 	if err != nil {
 		return nil, fmt.Errorf("failed to create raw socket: %v", err)
 	}
@@ -215,7 +216,6 @@ func (s *RawSocketSender) GetStats() SenderStats {
 func (s *RawSender) Send(packet []byte) error {
 	if len(packet) < 20 {
 		s.stats.PacketsFailed++
-		log.Printf("ERROR: Packet too short: %d bytes", len(packet))
 		return fmt.Errorf("packet too short: %d bytes", len(packet))
 	}
 
@@ -241,21 +241,14 @@ func (s *RawSender) Send(packet []byte) error {
 	}
 	defer dll.Release()
 
-	sendProc, err := dll.FindProc("WinDivertSend")
-	if err != nil {
-		s.stats.PacketsFailed++
-		return fmt.Errorf("failed to find WinDivertSend: %v", err)
+	if s.sendProc == nil { // fallback если не WinDivert
+		return fmt.Errorf("sendProc not initialized")
 	}
 
 	var sendLen uint
-	var addr [64]byte
+	var addr [64]byte // zeroed
 
-	// Очищаем последнюю ошибку перед вызовом
-	//syscall.SetLastError(0)
-
-	log.Printf("DEBUG: Calling WinDivertSend with handle=%v, packetLen=%d", s.handle, len(packet))
-
-	ret, _, callErr := sendProc.Call(
+	ret, _, callErr := s.sendProc.Call(
 		uintptr(s.handle),
 		uintptr(unsafe.Pointer(&packet[0])),
 		uintptr(len(packet)),
@@ -349,8 +342,34 @@ func (s *RawSender) SendWithDelay(packet []byte, delay time.Duration) error {
 
 // SendBatch отправляет несколько пакетов
 func (s *RawSender) SendBatch(packets [][]byte) error {
-	for _, packet := range packets {
-		if err := s.Send(packet); err != nil {
+	if s.sendExProc != nil {
+		// Native batch (если есть)
+		// Подготовь массив pointers/lens
+		ptrs := make([]uintptr, len(packets))
+		lens := make([]uint, len(packets))
+		for i, pkt := range packets {
+			ptrs[i] = uintptr(unsafe.Pointer(&pkt[0]))
+			lens[i] = uint(len(pkt))
+		}
+
+		ret, _, err := s.sendExProc.Call(
+			uintptr(s.handle),
+			uintptr(unsafe.Pointer(&ptrs[0])),
+			uintptr(unsafe.Pointer(&lens[0])),
+			uintptr(len(packets)),
+		)
+		if ret == 0 {
+			return fmt.Errorf("WinDivertSendEx failed: %v", err)
+		}
+		s.stats.PacketsSent += uint64(len(packets))
+		s.stats.BatchesSent++
+		return nil
+	}
+
+	// Fallback loop
+	log.Printf("WARNING: WinDivertSendEx not available, using loop")
+	for _, pkt := range packets {
+		if err := s.Send(pkt); err != nil {
 			return err
 		}
 	}
@@ -360,18 +379,18 @@ func (s *RawSender) SendBatch(packets [][]byte) error {
 
 // Close закрывает WinDivert и освобождает ресурсы
 func (s *RawSender) Close() error {
-	var lastErr error
+	var _ error
 
 	if s.handle != 0 {
 		closeProc, err := s.dll.FindProc("WinDivertClose")
 		if err == nil {
 			ret, _, _ := closeProc.Call(uintptr(s.handle))
 			if ret == 0 {
-				lastErr = fmt.Errorf("failed to close WinDivert handle")
+				_ = fmt.Errorf("failed to close WinDivert handle")
 			}
 			s.handle = 0
 		} else {
-			lastErr = fmt.Errorf("failed to find WinDivertClose: %v", err)
+			_ = fmt.Errorf("failed to find WinDivertClose: %v", err)
 		}
 	}
 
@@ -381,7 +400,7 @@ func (s *RawSender) Close() error {
 	}
 
 	s.sendProc = nil
-	return lastErr
+	return nil
 }
 
 // GetStats возвращает статистику

@@ -6,7 +6,7 @@ import (
 )
 
 // ApplyDisorder применяет нарушение порядка (reverse order segments + optional low TTL fake prefix)
-func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl int) ([][]byte, error) {
+func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl int, mode strategy.DisorderMode) ([][]byte, error) {
 	if len(disorderPos) == 0 || ttl <= 0 {
 		return nil, nil
 	}
@@ -90,7 +90,14 @@ func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl in
 		results = append(results, newPkt)
 	}
 
-	// No original if full disorder
+	if mode == strategy.DisorderFakedDisorder {
+		// fakeddisorder: fake first + disorder segments
+		fakePkts, _ := pm.ApplyFake(packet, 0, ttl, strategy.FakeBadSeq, 0)
+		if len(fakePkts) > 0 {
+			results = append(results, fakePkts[0])
+		}
+	}
+
 	return results, nil
 }
 
