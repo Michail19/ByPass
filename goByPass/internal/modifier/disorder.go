@@ -53,6 +53,8 @@ func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl in
 	}
 
 	// Reverse order for disorder (like GoodbyeDPI reverse-frag)
+	originalSeq := binary.BigEndian.Uint32(packet[tcpHeaderOffset+4:])
+	seqOffset := uint32(0)
 	for i := len(segments) - 1; i >= 0; i-- {
 		seg := segments[i]
 		segLen := len(seg)
@@ -64,23 +66,22 @@ func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl in
 		// Update totalLen in IP
 		binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
 
-		// Update seq (increment by previous segments total len)
-		seq := binary.BigEndian.Uint32(newPkt[tcpHeaderOffset+4:])
-		seq += uint32(payloadOffset + (payloadLen - segLen - prevPos)) // Adjust for position
+		// Правильный seq для сегмента (cumulative от начала, независимо от order)
+		seq := originalSeq + seqOffset
 		binary.BigEndian.PutUint32(newPkt[tcpHeaderOffset+4:], seq)
 
 		// Copy segment data
 		copy(newPkt[payloadOffset:], seg)
 
-		// Optional low TTL for first "fake" segment
-		if i == len(segments)-1 { // First in reverse = last original
+		// Optional low TTL for first sent (last original segment)
+		if i == len(segments)-1 {
 			err := setIPTTL(newPkt, ttl)
 			if err != nil {
 				return nil, err
-			} // Low TTL for disorder fake
+			}
 		}
 
-		// Recalculate checksums only once
+		// Recalculate checksums
 		recalculateIPChecksum(newPkt)
 		err := FixTCPChecksum(newPkt)
 		if err != nil {
@@ -88,6 +89,9 @@ func (pm *PacketModifier) ApplyDisorder(packet []byte, disorderPos []int, ttl in
 		}
 
 		results = append(results, newPkt)
+
+		// Инкремент seqOffset для следующего (в original order)
+		seqOffset += uint32(segLen)
 	}
 
 	if mode == strategy.DisorderFakedDisorder {

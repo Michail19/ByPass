@@ -51,15 +51,14 @@ type TLSExtension struct {
 	Data   []byte
 }
 
-// parseTLS разбирает TLS пакет и заполняет ConnectionInfo
+// parseTLS разбирает TLS
 func (a *Analyzer) parseTLS(data []byte, info *ConnectionInfo) error {
 	if len(data) < 5 {
-		return fmt.Errorf("TLS packet too short: %d bytes", len(data))
+		return fmt.Errorf("TLS packet too short")
 	}
 
 	info.IsTLS = true
 
-	// Проверяем, является ли это TLS Handshake (0x16)
 	if data[0] == 0x16 {
 		info.IsHandshake = true
 		return a.parseTLSHandshake(data, info)
@@ -68,102 +67,67 @@ func (a *Analyzer) parseTLS(data []byte, info *ConnectionInfo) error {
 	return nil
 }
 
-// parseTLSHandshake разбирает TLS Handshake сообщение
+// parseTLSHandshake
 func (a *Analyzer) parseTLSHandshake(data []byte, info *ConnectionInfo) error {
-	if len(data) < 5 {
-		return fmt.Errorf("TLS handshake too short")
-	}
-
-	pos := 5 // пропускаем record header (type, version, length)
-
-	// Проверяем, достаточно ли данных для handshake header
+	pos := 5
 	if pos+4 > len(data) {
 		return fmt.Errorf("TLS handshake header too short")
 	}
 
 	handshakeType := data[pos]
-	handshakeLen := int(binary.BigEndian.Uint32([]byte{0, data[pos+1], data[pos+2], data[pos+3]}))
-	pos += 4
 
-	// Проверяем, что это ClientHello (0x01)
 	if handshakeType != 0x01 {
-		return nil // не ClientHello, не ищем SNI
+		return nil
 	}
-
-	// Проверяем, достаточно ли данных для всего handshake
-	if pos+handshakeLen > len(data) {
-		return fmt.Errorf("TLS handshake incomplete")
-	}
-
-	// Парсим ClientHello для извлечения SNI
-	return a.parseClientHello(data[pos:pos+handshakeLen], info)
+	pos += 4
+	return a.parseClientHello(data[pos:], info) // Унифицировано
 }
 
-// parseClientHello разбирает ClientHello и извлекает SNI
+// parseClientHello (унифицировано с extractSNI)
 func (a *Analyzer) parseClientHello(data []byte, info *ConnectionInfo) error {
 	if len(data) < 38 {
 		return fmt.Errorf("ClientHello too short")
 	}
 
 	pos := 0
-
-	// Пропускаем protocol version (2 байта)
-	pos += 2
-
-	// Пропускаем random (32 байта)
-	pos += 32
-
-	// Пропускаем session ID
-	if pos >= len(data) {
-		return fmt.Errorf("ClientHello truncated at session ID length")
-	}
-	sessionIDLen := int(data[pos])
-	pos += 1 + sessionIDLen
-
-	// Пропускаем cipher suites
-	if pos+1 > len(data) {
-		return fmt.Errorf("ClientHello truncated at cipher suites length")
-	}
-	cipherSuitesLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
-	pos += 2 + cipherSuitesLen
-
-	// Пропускаем compression methods
-	if pos >= len(data) {
-		return fmt.Errorf("ClientHello truncated at compression methods length")
-	}
-	compMethodsLen := int(data[pos])
-	pos += 1 + compMethodsLen
-
-	// Проверяем, есть ли расширения
+	pos += 2  // version
+	pos += 32 // random
+	sessionLen := int(data[pos])
+	pos += 1 + sessionLen
+	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2 + cipherLen
+	compLen := int(data[pos])
+	pos += 1 + compLen
 	if pos+2 > len(data) {
-		return nil // нет расширений
+		return nil
 	}
-
+	extLen := int(binary.BigEndian.Uint16(data[pos:]))
 	pos += 2
-
-	// Парсим расширения
-	for pos < len(data) && pos+4 <= len(data) {
-		extType := binary.BigEndian.Uint16(data[pos : pos+2])
-		extLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
-		pos += 4
-
-		if pos+extLen > len(data) {
+	end := pos + extLen
+	if end > len(data) {
+		return fmt.Errorf("extensions truncated")
+	}
+	for pos < end {
+		if pos+4 > end {
 			break
 		}
-
-		// Ищем расширение Server Name Indication (type 0)
-		if extType == 0x0000 {
-			a.parseSNI(data[pos:pos+extLen], info)
+		extType := binary.BigEndian.Uint16(data[pos : pos+2])
+		extDataLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
+		pos += 4
+		if pos+extDataLen > end {
+			break
 		}
-
-		// Ищем расширение Application Layer Protocol Negotiation (type 16)
-		if extType == 0x0010 {
-			a.parseALPN(data[pos:pos+extLen], info)
+		if extType == 0x0000 { // SNI
+			a.parseSNI(data[pos:pos+extDataLen], info)
 		}
-
-		pos += extLen
+		if extType == 0x0010 { // ALPN
+			a.parseALPN(data[pos:pos+extDataLen], info)
+		}
+		if extType == 0xfe0d { // ECH
+			info.IsECH = true
+		}
+		pos += extDataLen
 	}
-
 	return nil
 }
 
@@ -285,7 +249,11 @@ func FindSNI(data []byte) (int, error) {
 }
 
 // CalculateJA3 вычисляет JA3 отпечаток из ClientHello
-func CalculateJA3(data []byte) (string, string) {
+func CalculateJA3(data []byte, compute bool) (string, string) {
+	if !compute {
+		return "", ""
+	}
+	
 	if len(data) < 5 || data[0] != 0x16 {
 		return "", ""
 	}

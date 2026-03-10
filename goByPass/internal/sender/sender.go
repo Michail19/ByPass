@@ -7,9 +7,9 @@ import (
 
 // Sender определяет интерфейс для отправки пакетов
 type Sender interface {
-	Send(packet []byte) error
-	SendWithDelay(packet []byte, delay time.Duration) error
-	SendBatch(packets [][]byte) error
+	Send(packet []byte, addr []byte) error // Теперь всегда с addr
+	SendWithDelay(packet []byte, addr []byte, delay time.Duration) error
+	SendBatch(packets [][]byte, addr []byte) error // addr для всего батча
 	Close() error
 }
 
@@ -44,14 +44,12 @@ var (
 )
 
 // NewSender — это заглушка. Реальная реализация в platform-specific файлах.
-// Она будет переопределена через build tags.
 var NewSender = func(cfg Config) (Sender, error) {
 	// Эта функция будет переопределена в платформозависимых файлах
 	return nil, ErrNotSupported
 }
 
 // NewSenderWithHandle создает отправитель с существующим handle (для WinDivert)
-// Это отдельная функция, НЕ метод интерфейса!
 var NewSenderWithHandle = func(handle uintptr, cfg Config) (Sender, error) {
 	return nil, ErrNotSupported
 }

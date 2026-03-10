@@ -121,6 +121,12 @@ type Flow struct {
 	reverseDNSPending   bool
 	mu                  sync.Mutex
 	Mu                  sync.RWMutex // for SetHostname etc.
+
+	// Новые поля из analyzer.go
+	IsECH               bool
+	ALPN                []string
+	IsAnalyzed          bool // для кэширования анализа
+	DataPacketsModified int  // сколько data-пакетов уже модифицировали
 }
 
 // NewFlow создает новый поток

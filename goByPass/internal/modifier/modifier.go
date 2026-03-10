@@ -7,7 +7,6 @@ import (
 	"ByPass/internal/strategy"
 	"encoding/binary"
 	"fmt"
-	"sort"
 )
 
 // PacketModifier реализует модификацию пакетов
@@ -75,29 +74,10 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		packet[payloadOffset+1] == 0x03 &&
 		packet[payloadOffset+5] == 0x01 // Handshake + ClientHello
 
-	if strat.SplitMode != strategy.SplitNone && isClientHello {
-		splitPkts, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
-
-		for i := range packets {
-			recalculateIPChecksum(packets[i])
-			FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
-		}
-
-		if err == nil {
-			packets = append(packets, splitPkts...)
-			pm.stats.SplitCount += uint64(len(splitPkts))
-		}
-	}
-
 	// 1. Fake + repeats (zapret fake + --dpi-desync-repeats)
 	if strat.FakeMode != strategy.FakeNone {
 		for rep := 0; rep < strat.Repeats; rep++ {
 			fakePkts, err := pm.ApplyFake(packet, strat.FakePos, strat.FakeTTL, strat.FakeMode, strat.Fooling)
-
-			for i := range packets {
-				recalculateIPChecksum(packets[i])
-				FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
-			}
 
 			if err == nil && len(fakePkts) > 0 {
 				packets = append(packets, fakePkts...)
@@ -110,11 +90,6 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	if strat.DisorderMode != strategy.DisorderNone {
 		disorderPkts, err := pm.ApplyDisorder(packet, strat.DisorderPos, strat.DisorderTTL, strat.DisorderMode)
 
-		for i := range packets {
-			recalculateIPChecksum(packets[i])
-			FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
-		}
-
 		if err == nil {
 			packets = append(packets, disorderPkts...)
 			pm.stats.DisorderCount += uint64(len(disorderPkts))
@@ -122,13 +97,8 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	}
 
 	// 3. Split / multisplit
-	if strat.SplitMode != strategy.SplitNone {
+	if strat.SplitMode != strategy.SplitNone && isClientHello {
 		splitPkts, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
-
-		for i := range packets {
-			recalculateIPChecksum(packets[i])
-			FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
-		}
 
 		if err == nil {
 			packets = append(packets, splitPkts...)
@@ -144,11 +114,6 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		tlsPayload := packet[ipHdrLen+tcpHdrLen:]
 
 		tlsPkts, err := pm.ApplyTLSSplit(tlsPayload, strat.TLSRecordSize)
-
-		for i := range packets {
-			recalculateIPChecksum(packets[i])
-			FixTCPChecksum(packets[i]) // твоя fixTCPChecksum
-		}
 
 		if err == nil && len(tlsPkts) > 0 {
 			// Оборачиваем каждый фрагмент обратно в IP+TCP
@@ -175,9 +140,6 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 				// DF bit off
 				newPkt[6] &= ^byte(0x40)
 
-				recalculateIPChecksum(newPkt)
-				FixTCPChecksum(newPkt)
-
 				wrapped = append(wrapped, newPkt)
 				currentSeq += uint32(fragLen)
 			}
@@ -194,17 +156,22 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		ModifiedPackets: packets,
 	}
 
-	// Сортировка по sequence number
-	sort.Slice(packets, func(i, j int) bool {
-		if len(packets[i]) < tcpHdrOffset+8 || len(packets[j]) < tcpHdrOffset+8 {
-			return false
-		}
-		seqI := binary.BigEndian.Uint32(packets[i][tcpHdrOffset+4:])
-		seqJ := binary.BigEndian.Uint32(packets[j][tcpHdrOffset+4:])
-		return seqI < seqJ
-	})
+	// Пересчитываем checksum для всех пакетов в конце
+	for _, pkt := range packets {
+		recalculateIPChecksum(pkt)
+		FixTCPChecksum(pkt)
+	}
 
-	result.ModifiedPackets = packets
+	// Сортировка по sequence number (после всех мод, не ломает disorder, т.к. seq рассчитаны increasing)
+	//sort.Slice(packets, func(i, j int) bool {
+	//	if len(packets[i]) < tcpHdrOffset+8 || len(packets[j]) < tcpHdrOffset+8 {
+	//		return false
+	//	}
+	//	seqI := binary.BigEndian.Uint32(packets[i][tcpHdrOffset+4:])
+	//	seqJ := binary.BigEndian.Uint32(packets[j][tcpHdrOffset+4:])
+	//	return seqI < seqJ
+	//})
+
 	pm.stats.PacketsModified += uint64(len(packets))
 
 	return result, nil

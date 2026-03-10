@@ -27,16 +27,14 @@ type googleIPList struct {
 
 // Manager управляет стратегиями
 type Manager struct {
-	strategies map[int]*Strategy
-	defaultID  int
-	activeID   int
-	filters    map[string]*StrategyFilter
-	stats      ManagerStats
-	mu         sync.RWMutex
-	updateChan chan *StrategyResult
-	closeChan  chan struct{}
-
-	// Новые поля для Google IP ranges
+	strategies     map[int]*Strategy
+	defaultID      int
+	activeID       int
+	filters        map[string]*StrategyFilter
+	stats          ManagerStats
+	mu             sync.RWMutex
+	updateChan     chan *StrategyResult
+	closeChan      chan struct{}
 	googleRanges   []*net.IPNet
 	rangesMu       sync.RWMutex
 	lastUpdateTime time.Time
@@ -92,7 +90,7 @@ func (m *Manager) startGoogleIPUpdater() {
 	}
 }
 
-// В структуре Manager добавь:
+// fallbackRanges ...
 var fallbackRanges = []string{
 	// Минимальный набор для YouTube (актуально на 2026)
 	"8.8.4.0/24",
@@ -201,7 +199,7 @@ var fallbackRanges = []string{
 	"216.252.220.0/22",
 }
 
-// В updateGoogleIPRanges — полный rewrite с диагностикой и retry
+// updateGoogleIPRanges — полный rewrite с диагностикой и retry
 func (m *Manager) updateGoogleIPRanges() {
 	urls := []string{
 		"https://www.gstatic.com/ipranges/goog.json",
@@ -301,7 +299,7 @@ func (m *Manager) updateGoogleIPRanges() {
 // isGoogleIP проверяет, входит ли IP в диапазоны Google/YouTube
 func (m *Manager) isGoogleIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
-	//if ip == nil || !ip.To4().IsValid() {
+
 	if ip == nil {
 		return false
 	}
@@ -547,7 +545,7 @@ func (m *Manager) SaveToFile(filename string) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	data, err := json.MarshalIndent(m.strategies, "", "  ")
+	data, err := json.MarshalIndent(m.strategies, "", " ")
 	if err != nil {
 		return err
 	}

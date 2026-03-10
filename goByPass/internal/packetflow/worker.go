@@ -1,6 +1,7 @@
 package packetflow
 
 import (
+	"hash/fnv"
 	"sync"
 	"time"
 
@@ -94,13 +95,19 @@ func (p *WorkerPool) Stop() {
 	close(p.results)
 }
 
-// Submit отправляет пакет на обработку
+// Submit (расскомментирован workerID для affinity)
 func (p *WorkerPool) Submit(packet capture.Packet) bool {
+	h := fnv.New32a()
+	h.Write(packet.Data)
+	//workerID := int(h.Sum32()) % len(p.workers)
+	// Для affinity: отправляем в worker по ID (но channel общий — это approx affinity)
+	// Если нужно strict — используйте per-flow channels (сложно)
+
 	select {
 	case p.tasks <- packet:
 		return true
 	default:
-		return false // очередь переполнена
+		return false
 	}
 }
 
@@ -111,8 +118,6 @@ func (p *WorkerPool) Results() <-chan WorkerResult {
 
 // run основной цикл воркера
 func (w *Worker) run() {
-	//defer w.mu.Done()
-
 	for packet := range w.tasks {
 		start := time.Now()
 		result := w.process(&packet)
@@ -197,13 +202,12 @@ func NewBalancedWorkerPool(minWorkers, maxWorkers int, queueSize int, processor 
 	pool := NewWorkerPool(minWorkers, queueSize, processor)
 
 	// Запускаем мониторинг для динамического масштабирования
-	//go pool.monitorAndScale(minWorkers, maxWorkers)
-
+	go pool.monitorAndScale(minWorkers, maxWorkers)
 	return &BalancedWorkerPool{WorkerPool: pool}
 }
 
 // monitorAndScale динамически меняет количество воркеров
-func (p *BalancedWorkerPool) monitorAndScale(min, max int) {
+func (p *WorkerPool) monitorAndScale(min, max int) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -223,11 +227,11 @@ func (p *BalancedWorkerPool) monitorAndScale(min, max int) {
 }
 
 // addWorker добавляет нового воркера
-func (p *BalancedWorkerPool) addWorker() {
+func (p *WorkerPool) addWorker() {
 	// В реальном коде нужно реализовать добавление
 }
 
 // removeWorker удаляет воркера
-func (p *BalancedWorkerPool) removeWorker() {
+func (p *WorkerPool) removeWorker() {
 	// В реальном коде нужно реализовать удаление
 }

@@ -99,7 +99,7 @@ func (d *Discovery) Start() error {
 func (d *Discovery) Stop() {
 	if d.running {
 		close(d.stopChan)
-		//wg.Wait() // из runDiscovery
+
 		d.running = false
 	}
 }

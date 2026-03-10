@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -31,16 +29,14 @@ type Pipeline struct {
 	ipCache     *cache.IPCache
 	domainCache *cache.DomainCache
 	strategyMgr *strategy.Manager
-
-	workers    int
-	packetChan chan capture.Packet
-	resultChan chan modifier.ModifyResult
-	wg         sync.WaitGroup
-	ctx        context.Context
-	cancel     context.CancelFunc
-
-	stats   PipelineStats
-	statsMu sync.RWMutex
+	workers     int
+	packetChan  chan capture.Packet
+	resultChan  chan modifier.ModifyResult
+	wg          sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
+	stats       PipelineStats
+	statsMu     sync.RWMutex
 }
 
 // PipelineStats статистика конвейера
@@ -79,7 +75,6 @@ func NewPipeline(
 	strategyMgr *strategy.Manager,
 	cfg Config,
 ) *Pipeline {
-
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
 	}
@@ -219,7 +214,7 @@ func (p *Pipeline) worker(id int) {
 	}
 }
 
-// processPacket обрабатывает один пакет (полная версия)
+// processPacket обрабатывает один пакет
 func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	startTime := time.Now()
 
@@ -245,58 +240,30 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		return
 	}
 
-	if protocol == 17 && dstPort == 443 { // QUIC
-		setIPTTL(pkt.Data, 4)
-		recalculateIPChecksum(pkt.Data)
-		p.sendPacket(pkt.Data, pkt.Addr)
-		return
+	// Получаем или создаём поток
+	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
+	if !flow.IsAnalyzed {
+		info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
+		if err == nil && info != nil {
+			if info.SNI != "" {
+				flow.SetHostname(info.SNI)
+			} else if info.Host != "" {
+				flow.SetHostname(info.Host)
+			}
+			if info.IsTLS {
+				flow.SetTLS()
+			}
+			if info.IsHTTP {
+				flow.SetHTTP()
+			}
+			flow.IsAnalyzed = true
+		}
 	}
 
 	// Проверяем кэш
 	var shouldBypass bool
 	var strategyID int
 	var strats *strategy.Strategy // ← всегда указатель, может быть nil
-
-	// Получаем или создаём поток
-	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
-
-	// Анализируем пакет
-	info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
-	if err == nil && info != nil {
-		// Сохраняем информацию в поток
-		if info.SNI != "" {
-			flow.SetHostname(info.SNI)
-		} else if info.Host != "" {
-			flow.SetHostname(info.Host)
-		}
-		if info.IsTLS {
-			flow.SetTLS()
-		}
-		if info.IsHTTP {
-			flow.SetHTTP()
-		}
-	}
-
-	// Асинхронный reverse DNS, если hostname пустой и не QUIC/handshake
-	if flow.Hostname == "" && !flow.IsReverseDNSPending() { // добавь флаг в conntrack.Flow
-		flow.SetReverseDNSPending(true)
-		go func(ip string, flow *conntrack.Flow) {
-			defer flow.SetReverseDNSPending(false)
-
-			// Debounce: sleep 100ms перед запросом (если много пакетов — только один запрос)
-			time.Sleep(100 * time.Millisecond)
-
-			names, err := net.LookupAddr(ip)
-			if err == nil && len(names) > 0 {
-				hostname := strings.TrimSuffix(names[0], ".")
-				flow.SetHostname(hostname)
-				log.Printf("Async reverse DNS: %s for %s", hostname, ip)
-				p.ipCache.PutByIP(dstIP, hostname, shouldBypass, strategyID)
-			}
-		}(dstIP.String(), flow)
-	}
-
-	// 1. Проверяем кэш
 	cachedStratID := 0
 	if cached, exists := p.ipCache.GetByIP(dstIP); exists {
 		cachedStratID = cached.StrategyID
@@ -307,7 +274,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			dstIP.String(), dstPort, shouldBypass, strategyID, cached.Hostname)
 	}
 
-	// 2. Всегда получаем свежий выбор (если hostname заполнен — приоритет ему)
+	// Всегда получаем свежий выбор (если hostname заполнен — приоритет ему)
 	strat := p.strategyMgr.SelectStrategy(
 		dstIP.String(),
 		flow.Hostname,
@@ -355,43 +322,41 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		flags := pkt.Data[tcpOffset+13]
 		isSYN := (flags & 0x02) != 0
 		isACK := (flags & 0x10) != 0
-		isData := len(pkt.Data) > tcpOffset+int(pkt.Data[tcpOffset+12]>>4)*4
 		tcpHeaderLen := int(pkt.Data[tcpOffset+12]>>4) * 4
 		payloadOffset := tcpOffset + tcpHeaderLen
-		isData = len(pkt.Data) > payloadOffset
+		isData := len(pkt.Data) > payloadOffset
 		isClientHello := isData &&
 			len(pkt.Data) > payloadOffset+6 && // +6 для version check
 			pkt.Data[payloadOffset] == 0x16 && // ContentType Handshake
 			pkt.Data[payloadOffset+1] == 0x03 && // Major version 3
 			pkt.Data[payloadOffset+5] == 0x01 // HandshakeType ClientHello
 
-		//applyMods := isClientHello && strats.ApplyToTLS // только для ClientHello
-		//applyMods := (isClientHello && strats.ApplyToTLS) || isSYN || isACK
-
-		applyMods := isClientHello && strats.ApplyToTLS && !flow.IsHandshakeModified
-
+		applyMods := (isClientHello && strats.ApplyToTLS && !flow.IsHandshakeModified) ||
+			(isData && !isClientHello && flow.DataPacketsModified < strats.ModifyFirstDataPackets)
 		if applyMods {
 			flow.Mu.Lock()
-			flow.IsHandshakeModified = true
+			if isClientHello {
+				flow.IsHandshakeModified = true
+			}
+			// Increment перенесён ниже, после успеха
 			flow.Mu.Unlock()
 		}
 
-		// QUIC отдельно (даже если !applyMods)
-		if protocol == 17 && dstPort == 443 && strats.QUICttl > 0 {
-			// Вариант 1: low TTL (уже есть)
-			setIPTTL(pkt.Data, strats.QUICttl)
-			recalculateIPChecksum(pkt.Data)
-
-			// Добавить fake QUIC Initial перед оригиналом (если strat.FakeQUIC)
+		// QUIC отдельно, но без TTL для всех — только если стратегия требует
+		if protocol == 17 && dstPort == 443 {
+			if strats.QUICttl > 0 {
+				setIPTTL(pkt.Data, strats.QUICttl)
+				recalculateIPChecksum(pkt.Data)
+			}
 			if strats != nil && strats.FakeQUIC {
-				fakeQUIC := makeFakeQUICInitial(pkt.Data) // реализуй ниже
+				fakeQUIC := makeFakeQUICInitial(pkt.Data)
 				if len(fakeQUIC) > 0 {
 					p.sendPacket(fakeQUIC, pkt.Addr)
-					time.Sleep(1 * time.Millisecond) // delay перед оригиналом
 				}
 			}
 
 			p.sendPacket(pkt.Data, pkt.Addr)
+
 			return
 		}
 
@@ -401,8 +366,8 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			return
 		}
 
-		log.Printf("[STRATEGY] Applying modifications with strategy %d (%s) for %s (SYN=%v ACK=%v ClientHello=%v)",
-			strategyID, strats.Name, dstIP.String(), isSYN, isACK, isClientHello)
+		log.Printf("[STRATEGY] Applying modifications with strategy %d (%s) for %s (SYN=%v ACK=%v ClientHello=%v Data=%v)",
+			strategyID, strats.Name, dstIP.String(), isSYN, isACK, isClientHello, isData)
 
 		// Только здесь применяем модификации
 		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
@@ -418,22 +383,14 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			return
 		}
 
-		// Отправляем модифицированные (с sort + delay)
+		// Отправляем модифицированные
 		if len(result.ModifiedPackets) > 0 {
-			// Сортировка по seq (если нужно)
-			sort.Slice(result.ModifiedPackets, func(i, j int) bool {
-				seqI := getTCPSeq(result.ModifiedPackets[i])
-				seqJ := getTCPSeq(result.ModifiedPackets[j])
-				return seqI < seqJ
-			})
-
-			// Отправляем с delay
 			for i, modPkt := range result.ModifiedPackets {
-				if len(modPkt) >= 20 && (modPkt[0]>>4 == 4) { // базовая валидация
+				if len(modPkt) >= 20 && (modPkt[0]>>4 == 4) {
+					// Добавлен recalc checksum после модификации
+					fixTCPChecksum(modPkt)
+					recalculateIPChecksum(modPkt)
 					p.sendPacket(modPkt, pkt.Addr)
-					if i < len(result.ModifiedPackets)-1 {
-						time.Sleep(1 * time.Millisecond)
-					}
 					p.updateStats(func(stats *PipelineStats) {
 						stats.PacketsModified++
 						stats.PacketsSent++
@@ -442,6 +399,12 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 					log.Printf("WARNING: Invalid modified packet %d, skipping", i)
 				}
 			}
+			// Increment только после успешной модификации
+			flow.Mu.Lock()
+			if !isClientHello {
+				flow.DataPacketsModified++
+			}
+			flow.Mu.Unlock()
 		}
 
 		// Отправляем оригинал (если нужно)
@@ -466,22 +429,75 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	})
 }
 
+// fixTCPChecksum пересчитывает TCP контрольную сумму
+func fixTCPChecksum(packet []byte) {
+	if len(packet) < 40 {
+		return
+	}
+
+	ipHeaderLen := (packet[0] & 0x0F) * 4
+	tcpOffset := int(ipHeaderLen)
+
+	if len(packet) < tcpOffset+20 {
+		return
+	}
+
+	packet[tcpOffset+16] = 0
+	packet[tcpOffset+17] = 0
+
+	pseudo := make([]byte, 12)
+	copy(pseudo[0:4], packet[12:16]) // Source IP
+	copy(pseudo[4:8], packet[16:20]) // Dest IP
+
+	pseudo[9] = 6 // Protocol TCP
+	binary.BigEndian.PutUint16(pseudo[10:12], uint16(len(packet)-tcpOffset))
+
+	tcpData := packet[tcpOffset:]
+	fullData := append(pseudo, tcpData...)
+
+	checksum := calculateChecksum(fullData)
+	packet[tcpOffset+16] = byte(checksum >> 8)
+	packet[tcpOffset+17] = byte(checksum & 0xFF)
+}
+
+// calculateChecksum вычисляет контрольную сумму для TCP/UDP
+func calculateChecksum(data []byte) uint16 {
+	var sum uint32
+	for i := 0; i < len(data)-1; i += 2 {
+		sum += uint32(data[i])<<8 | uint32(data[i+1])
+	}
+	if len(data)%2 == 1 {
+		sum += uint32(data[len(data)-1]) << 8
+	}
+	for sum>>16 > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
+
 func makeFakeQUICInitial(original []byte) []byte {
 	// Базовый fake QUIC Initial (из byedpi quic.c, упрощённо)
 	fake := make([]byte, 1200) // типичный размер
 	fake[0] = 0xc0             // long header + Initial
+
 	// DCID/SCID random
 	rand.Read(fake[1:9])                              // version
 	binary.BigEndian.PutUint32(fake[1:5], 0x00000001) // QUIC v1
+
 	// SCID/DCID lengths
 	fake[5] = 8 // DCID len
+
 	rand.Read(fake[6:14])
+
 	fake[14] = 0 // SCID len 0 for Initial
+
 	// Token len=0
 	fake[15] = 0
+
 	// Payload len varint (упрощённо)
 	fake[16] = 0x40 | byte(1182&0x3f) // 2-byte varint
 	fake[17] = byte(1182 >> 6)
+
 	// Fake payload (CHLO-like)
 	copy(fake[18:], []byte("\x06\x00\x40\xf1\x01")) // frame type + etc
 	rand.Read(fake[23:])                            // random fill
@@ -494,31 +510,22 @@ func getTCPSeq(pkt []byte) uint32 {
 	return binary.BigEndian.Uint32(pkt[ipLen+4:])
 }
 
-// sendPacket отправляет пакет с учетом типа sender
+// sendPacket (фикс: удалён дубликат Send)
 func (p *Pipeline) sendPacket(data []byte, addr []byte) bool {
 	if len(data) < 20 {
 		log.Printf("WARNING: Attempted to send packet too short (%d bytes)", len(data))
 		return false
 	}
 
-	// Для WinDivert sender используем SendWithAddr
-	if rs, ok := p.sender.(*sender.RawSender); ok {
-		// Проверяем, что адрес не nil
-		//if addr == nil || len(addr) < 64 {
-		if addr == nil || len(addr) == 0 {
-			log.Printf("WARNING: Invalid addr for WinDivert, skipping send")
+	if addr == nil || len(addr) == 0 {
+		if _, ok := p.sender.(*sender.RawSender); ok {
+			log.Printf("ERROR: WinDivert requires valid addr, skipping send")
 			return false
 		}
-
-		if err := rs.SendWithAddr(data, addr); err != nil {
-			log.Printf("ERROR: Failed to send packet via WinDivert: %v", err)
-			return false
-		}
-		return true
+		log.Printf("WARNING: addr is empty, sending without address")
 	}
 
-	// Для обычного sender
-	if err := p.sender.Send(data); err != nil {
+	if err := p.sender.Send(data, addr); err != nil {
 		log.Printf("ERROR: Failed to send packet: %v", err)
 		return false
 	}

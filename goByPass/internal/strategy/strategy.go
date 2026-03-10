@@ -107,7 +107,7 @@ type Strategy struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
-
+	
 	// Применять к каким протоколам
 	ApplyToHTTP bool `json:"apply_to_http"`
 	ApplyToTLS  bool `json:"apply_to_tls"`
@@ -166,6 +166,8 @@ type Strategy struct {
 	Repeats          int    `json:"repeats"`             // сколько раз отправлять каждый fake/disorder
 	Fooling          uint32 `json:"fooling"`             // битовая маска: MD5SIG|TS|BADSUM|BADSEQ|DATANOACK
 	FakeQUIC         bool   `json:"fake_quic"`
+	// Добавлено для расширения модификации
+	ModifyFirstDataPackets int `json:"modify_first_data_packets"` // Сколько первых data-пакетов модифицировать после handshake
 }
 
 // Clone создает копию стратегии
