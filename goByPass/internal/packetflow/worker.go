@@ -9,11 +9,12 @@ import (
 
 // WorkerPool пул воркеров для обработки пакетов
 type WorkerPool struct {
-	workers []*Worker
-	tasks   chan capture.Packet
-	results chan WorkerResult
-	wg      sync.WaitGroup
-	stats   WorkerPoolStats
+	workers     []*Worker
+	tasks       chan capture.Packet   // общий канал (для случаев без affinity)
+	workerChans []chan capture.Packet // per-worker каналы для flow affinity
+	results     chan WorkerResult
+	wg          sync.WaitGroup
+	stats       WorkerPoolStats
 }
 
 // Worker отдельный воркер
@@ -56,17 +57,23 @@ type WorkerPoolStats struct {
 
 // NewWorkerPool создает новый пул воркеров
 func NewWorkerPool(numWorkers int, queueSize int, processor func(*capture.Packet) WorkerResult) *WorkerPool {
-	pool := &WorkerPool{
-		workers: make([]*Worker, numWorkers),
-		tasks:   make(chan capture.Packet, queueSize),
-		results: make(chan WorkerResult, queueSize),
+	perWorkerSize := queueSize / numWorkers
+	if perWorkerSize < 64 {
+		perWorkerSize = 64
 	}
 
-	// Создаем воркеров
+	pool := &WorkerPool{
+		workers:     make([]*Worker, numWorkers),
+		tasks:       make(chan capture.Packet, queueSize),    // общий канал (fallback)
+		workerChans: make([]chan capture.Packet, numWorkers), // per-worker для affinity
+		results:     make(chan WorkerResult, queueSize),
+	}
+
 	for i := 0; i < numWorkers; i++ {
+		pool.workerChans[i] = make(chan capture.Packet, perWorkerSize)
 		worker := &Worker{
 			ID:      i,
-			tasks:   pool.tasks,
+			tasks:   pool.workerChans[i], // каждый воркер читает из своего канала
 			results: pool.results,
 			process: processor,
 		}
@@ -94,11 +101,27 @@ func (p *WorkerPool) Stop() {
 	close(p.results)
 }
 
-// Submit отправляет пакет в очередь воркеров
-// TODO: implement per-flow channel affinity for strict ordering within a TCP flow
+// Submit отправляет пакет в общую очередь (без affinity, для обратной совместимости).
 func (p *WorkerPool) Submit(packet capture.Packet) bool {
 	select {
 	case p.tasks <- packet:
+		return true
+	default:
+		return false
+	}
+}
+
+// SubmitAffinity отправляет пакет в канал конкретного воркера.
+// workerID вычисляется вызывающим кодом через hash(flow) % NumWorkers.
+// Это гарантирует, что один TCP-поток всегда обрабатывается одним воркером:
+//   - состояние flow (IsHandshakeModified, DataPacketsModified) не требует lock на hot path
+//   - порядок отправки пакетов внутри потока сохраняется → нет duplicate ACK
+func (p *WorkerPool) SubmitAffinity(workerID int, packet capture.Packet) bool {
+	if workerID < 0 || workerID >= len(p.workerChans) {
+		return p.Submit(packet) // fallback
+	}
+	select {
+	case p.workerChans[workerID] <- packet:
 		return true
 	default:
 		return false

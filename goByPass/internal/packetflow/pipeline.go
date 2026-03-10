@@ -2,7 +2,6 @@ package packetflow
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -30,7 +29,14 @@ type Pipeline struct {
 	domainCache *cache.DomainCache
 	strategyMgr *strategy.Manager
 	workers     int
-	packetChan  chan capture.Packet
+	// workerChans — один канал на воркер (flow affinity).
+	// Пакеты одного TCP-потока всегда попадают в один и тот же канал по
+	// hash(srcIP, dstIP, srcPort, dstPort) % workers.
+	// Это гарантирует:
+	//   1) состояние flow (IsHandshakeModified, DataPacketsModified) меняется
+	//      только из одной goroutine → не нужна блокировка на hot path;
+	//   2) порядок отправки внутри потока сохраняется → нет duplicate ACK / retransmission.
+	workerChans []chan capture.Packet
 	resultChan  chan modifier.ModifyResult
 	wg          sync.WaitGroup
 	ctx         context.Context
@@ -85,6 +91,17 @@ func NewPipeline(
 		cfg.ResultQueueSize = 1000
 	}
 
+	// Создаём отдельный канал на каждый воркер.
+	// Размер каждого канала = PacketQueueSize / workers, минимум 256.
+	perWorkerQueue := cfg.PacketQueueSize / cfg.Workers
+	if perWorkerQueue < 256 {
+		perWorkerQueue = 256
+	}
+	workerChans := make([]chan capture.Packet, cfg.Workers)
+	for i := range workerChans {
+		workerChans[i] = make(chan capture.Packet, perWorkerQueue)
+	}
+
 	return &Pipeline{
 		capturer:    capturer,
 		conntrack:   conntrack,
@@ -95,7 +112,7 @@ func NewPipeline(
 		domainCache: domainCache,
 		strategyMgr: strategyMgr,
 		workers:     cfg.Workers,
-		packetChan:  make(chan capture.Packet, cfg.PacketQueueSize),
+		workerChans: workerChans,
 		resultChan:  make(chan modifier.ModifyResult, cfg.ResultQueueSize),
 		stats: PipelineStats{
 			StartTime: time.Now(),
@@ -142,22 +159,19 @@ func (p *Pipeline) Stop() {
 		log.Printf("Error closing sender: %v", err)
 	}
 
-	close(p.packetChan)
+	for _, ch := range p.workerChans {
+		close(ch)
+	}
 	close(p.resultChan)
 }
 
-// packetForwarder с буферизацией и контролем переполнения
+// packetForwarder читает пакеты из capturer и направляет их в нужный воркер-канал.
+// Маршрутизация по hash(flow) % workers обеспечивает flow affinity:
+// один TCP-поток → один воркер → строгий порядок отправки.
 func (p *Pipeline) packetForwarder() {
-	// Создаем временный буфер для пакетов, которые не влезли в канал
-	tempBuffer := make([]capture.Packet, 0, 100)
-
 	for {
 		select {
 		case <-p.ctx.Done():
-			// Отправляем все из временного буфера перед выходом
-			for _, packet := range tempBuffer {
-				p.processPacket(&packet)
-			}
 			return
 
 		case packet := <-p.capturer.Packets():
@@ -166,45 +180,60 @@ func (p *Pipeline) packetForwarder() {
 				stats.LastPacketTime = time.Now()
 			})
 
-			// Сначала отправляем все из временного буфера
-			for len(tempBuffer) > 0 && len(p.packetChan) < cap(p.packetChan) {
-				p.packetChan <- tempBuffer[0]
-				tempBuffer = tempBuffer[1:]
-			}
+			// Быстро вычисляем индекс воркера из IP-заголовка (без аллокаций)
+			workerIdx := p.hashPacketToWorker(packet.Data)
+			ch := p.workerChans[workerIdx]
 
-			// Пытаемся отправить новый пакет
 			select {
-			case p.packetChan <- packet:
-				// Успешно
+			case ch <- packet:
+				// Успешно поставлен в очередь нужного воркера
 			default:
-				// Канал переполнен, сохраняем во временный буфер
-				if len(tempBuffer) < cap(tempBuffer) {
-					tempBuffer = append(tempBuffer, packet)
-					log.Printf("WARNING: Packet channel full, buffering (%d/%d)",
-						len(tempBuffer), cap(tempBuffer))
-				} else {
-					// Буфер тоже переполнен - дропаем
-					p.updateStats(func(stats *PipelineStats) {
-						stats.PacketsDropped++
-					})
-					log.Printf("ERROR: Buffer full, dropping packet")
-				}
+				// Канал воркера переполнен — дропаем пакет.
+				// tempBuffer (старое решение) был опасен: 100 пакетов накапливались
+				// и потом выстреливали burst'ом, ломая TCP pacing.
+				// Дроп честнее: TCP retransmit восстановит потерянное.
+				p.updateStats(func(stats *PipelineStats) {
+					stats.PacketsDropped++
+				})
+				log.Printf("WARNING: Worker %d queue full, dropping packet", workerIdx)
 			}
 		}
 	}
 }
 
-// worker обрабатывает пакеты
+// hashPacketToWorker вычисляет индекс воркера для пакета на основе 5-tuple.
+// Использует XOR-хэш — без аллокаций, O(1), достаточно равномерный.
+func (p *Pipeline) hashPacketToWorker(data []byte) int {
+	if p.workers <= 1 || len(data) < 20 {
+		return 0
+	}
+	// Берём srcIP (12:16), dstIP (16:20), srcPort (transport+0), dstPort (transport+2)
+	var h uint32
+	h = uint32(data[12])<<24 | uint32(data[13])<<16 | uint32(data[14])<<8 | uint32(data[15])  // srcIP
+	h ^= uint32(data[16])<<24 | uint32(data[17])<<16 | uint32(data[18])<<8 | uint32(data[19]) // dstIP
+
+	ihl := int(data[0]&0x0F) * 4
+	if len(data) >= ihl+4 {
+		h ^= uint32(data[ihl])<<8 | uint32(data[ihl+1])   // srcPort
+		h ^= uint32(data[ihl+2])<<8 | uint32(data[ihl+3]) // dstPort
+	}
+	return int(h % uint32(p.workers))
+}
+
+// worker обрабатывает пакеты из своего канала.
+// Каждый воркер читает только из workerChans[id] — это гарантирует,
+// что один TCP-поток обрабатывается строго одним воркером (flow affinity).
 func (p *Pipeline) worker(id int) {
 	defer p.wg.Done()
 
 	log.Printf("Worker %d started", id)
+	ch := p.workerChans[id]
 
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
-		case packet, ok := <-p.packetChan:
+		case packet, ok := <-ch:
 			if !ok {
 				return // channel closed
 			}
@@ -241,15 +270,35 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 	// Получаем или создаём поток
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
+
+	// UDP passthrough: QUIC (и любой другой UDP) не трогаем.
+	// QUIC — зашифрованный, packet-number based протокол.
+	// setIPTTL на UDP инвалидирует UDP checksum (не пересчитываем).
+	// makeFakeQUICInitial не включает IP/UDP заголовки — WinDivert дропнет пакет.
+	// zapret тоже не трогает UDP. Просто реинжектируем как есть.
+	if protocol == 17 {
+		p.sendPacket(pkt.Data, pkt.Addr)
+		return
+	}
+
 	if !flow.IsAnalyzed {
 		info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
 		if err == nil && info != nil {
 			if info.SNI != "" {
 				flow.SetHostname(info.SNI)
-				flow.IsAnalyzed = true // hostname found — lock it in
+				flow.IsAnalyzed = true
+				// ВАЖНО: обнуляем счётчик — он использовался как analysis-attempt counter,
+				// а теперь будет использоваться для подсчёта модифицированных data-пакетов.
+				// Без сброса стратегия решит, что уже N пакетов модифицировано.
+				flow.Mu.Lock()
+				flow.DataPacketsModified = 0
+				flow.Mu.Unlock()
 			} else if info.Host != "" {
 				flow.SetHostname(info.Host)
 				flow.IsAnalyzed = true
+				flow.Mu.Lock()
+				flow.DataPacketsModified = 0
+				flow.Mu.Unlock()
 			}
 			if info.IsTLS {
 				flow.SetTLS()
@@ -258,16 +307,18 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 				flow.SetHTTP()
 			}
 		}
-		// Give up analyzing after 4 packets with no result to avoid wasting CPU
-		// on data packets that will never contain a ClientHello
-		flow.Mu.Lock()
-		flow.DataPacketsModified++ // reuse as analysis-attempt counter temporarily
-		giveUp := flow.DataPacketsModified >= 4
-		if giveUp {
-			flow.IsAnalyzed = true
-			flow.DataPacketsModified = 0 // reset for actual use below
+		// Отказываемся от анализа после 4 пакетов без результата.
+		// Используем отдельный lock-секции чтобы не смешивать счётчики.
+		if !flow.IsAnalyzed {
+			flow.Mu.Lock()
+			flow.DataPacketsModified++ // временно: счётчик попыток анализа
+			giveUp := flow.DataPacketsModified >= 4
+			if giveUp {
+				flow.IsAnalyzed = true
+				flow.DataPacketsModified = 0 // сброс для реального использования ниже
+			}
+			flow.Mu.Unlock()
 		}
-		flow.Mu.Unlock()
 	}
 
 	// Проверяем кэш
@@ -354,24 +405,6 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			}
 			// Increment перенесён ниже, после успеха
 			flow.Mu.Unlock()
-		}
-
-		// QUIC отдельно, но без TTL для всех — только если стратегия требует
-		if protocol == 17 && dstPort == 443 {
-			if strats.QUICttl > 0 {
-				setIPTTL(pkt.Data, strats.QUICttl)
-				recalculateIPChecksum(pkt.Data)
-			}
-			if strats != nil && strats.FakeQUIC {
-				fakeQUIC := makeFakeQUICInitial(pkt.Data)
-				if len(fakeQUIC) > 0 {
-					p.sendPacket(fakeQUIC, pkt.Addr)
-				}
-			}
-
-			p.sendPacket(pkt.Data, pkt.Addr)
-
-			return
 		}
 
 		if !applyMods {
@@ -489,34 +522,11 @@ func calculateChecksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func makeFakeQUICInitial(original []byte) []byte {
-	// Базовый fake QUIC Initial (из byedpi quic.c, упрощённо)
-	fake := make([]byte, 1200) // типичный размер
-	fake[0] = 0xc0             // long header + Initial
-
-	// DCID/SCID random
-	rand.Read(fake[1:9])                              // version
-	binary.BigEndian.PutUint32(fake[1:5], 0x00000001) // QUIC v1
-
-	// SCID/DCID lengths
-	fake[5] = 8 // DCID len
-
-	rand.Read(fake[6:14])
-
-	fake[14] = 0 // SCID len 0 for Initial
-
-	// Token len=0
-	fake[15] = 0
-
-	// Payload len varint (упрощённо)
-	fake[16] = 0x40 | byte(1182&0x3f) // 2-byte varint
-	fake[17] = byte(1182 >> 6)
-
-	// Fake payload (CHLO-like)
-	copy(fake[18:], []byte("\x06\x00\x40\xf1\x01")) // frame type + etc
-	rand.Read(fake[23:])                            // random fill
-	return fake
-}
+// makeFakeQUICInitial удалена: UDP/QUIC пакеты теперь реинжектируются без изменений.
+// Причины:
+//   1) WinDivert ожидает полный пакет (IP + UDP + payload), fake создавал только payload;
+//   2) UDP checksum не пересчитывался после изменений → silent drop на сервере;
+//   3) QUIC encrypted + packet-number based → любая модификация = QUIC_NETWORK_IDLE_TIMEOUT.
 
 // Вспомогательная функция
 func getTCPSeq(pkt []byte) uint32 {
@@ -661,26 +671,28 @@ func setIPTTL(packet []byte, ttl int) error {
 	return nil
 }
 
-// recalculateIPChecksum пересчитывает контрольную сумму IP-заголовка
+// recalculateIPChecksum пересчитывает контрольную сумму IP-заголовка.
+// ВАЖНО: использует IHL (IP Header Length) из байта 0, а не захардкоженные 20.
+// IP-опции (IHL > 20) встречаются редко, но игнорирование их приводит к
+// неверной checksum и дропу пакета маршрутизатором.
 func recalculateIPChecksum(packet []byte) {
 	if len(packet) < 20 {
 		return
 	}
+	ihl := int(packet[0]&0x0F) * 4
+	if ihl < 20 || len(packet) < ihl {
+		return // некорректный заголовок
+	}
 
-	// Обнуляем текущую контрольную сумму
 	packet[10] = 0
 	packet[11] = 0
 
-	// Вычисляем новую
 	var sum uint32
-	for i := 0; i < 20; i += 2 {
+	for i := 0; i < ihl; i += 2 {
 		sum += uint32(binary.BigEndian.Uint16(packet[i:]))
 	}
-
-	for (sum >> 16) > 0 {
+	for sum>>16 > 0 {
 		sum = (sum & 0xFFFF) + (sum >> 16)
 	}
-
-	checksum := ^uint16(sum)
-	binary.BigEndian.PutUint16(packet[10:12], checksum)
+	binary.BigEndian.PutUint16(packet[10:12], ^uint16(sum))
 }

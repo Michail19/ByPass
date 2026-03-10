@@ -7,7 +7,13 @@ import (
 	"math/rand"
 )
 
-// ApplyFake создает поддельный пакет
+// ApplyFake создает поддельный пакет.
+//
+// TTL должен подбираться как "расстояние до DPI":
+//   - слишком малый → fake не достигает DPI, обход не работает
+//   - слишком большой → fake достигает сервера, который получает bad seq/checksum
+//     и сбрасывает соединение RST
+//     Рекомендуемые значения: 4–8 (настраивается в стратегии как FakeTTL).
 func (pm *PacketModifier) ApplyFake(packet []byte, pos int, ttl int, mode strategy.FakeMode, fooling uint32) ([][]byte, error) {
 	fake := append([]byte{}, packet...)
 
@@ -16,25 +22,37 @@ func (pm *PacketModifier) ApplyFake(packet []byte, pos int, ttl int, mode strate
 
 	switch mode {
 	case strategy.FakeBadSum:
-		FixTCPChecksum(fake)       // сначала правильный
-		fake[tcpOffset+16] ^= 0xFF // corrupt 1 байт checksum
+		// ВАЖНО: сначала считаем правильный checksum, потом портим — и больше НЕ пересчитываем.
+		// Старый код вызывал FixTCPChecksum в конце, что восстанавливало валидный checksum
+		// и делало FakeBadSum бесполезным: DPI принимал пакет как настоящий.
+		FixTCPChecksum(fake)
+		fake[tcpOffset+16] ^= 0xFF
 		fake[tcpOffset+17] ^= 0xFF
+		// Только IP checksum (TTL изменится ниже, IP checksum нужно обновить)
+		setIPTTL(fake, ttl)
+		recalculateIPChecksum(fake)
+		// TCP checksum НЕ пересчитываем — он намеренно испорчен
+		return [][]byte{fake}, nil
 
 	case strategy.FakeBadSeq:
 		delta := uint32(rand.Int31n(1000000) + 1)
 		modifyTCPSeq(fake, delta)
 
 	case strategy.FakeDataNoAck:
-		clearTCPACK(fake) // убрать ACK флаг
+		clearTCPACK(fake)
 
 	case strategy.FakeMD5Sig:
-		// уже есть в твоём коде
-		fake, _ = addTCPOptionMD5(fake)
+		var err error
+		fake, err = addTCPOptionMD5(fake)
+		if err != nil {
+			return nil, err
+		}
 	}
 
+	// Для всех режимов кроме FakeBadSum: устанавливаем TTL и пересчитываем checksums
 	setIPTTL(fake, ttl)
 	recalculateIPChecksum(fake)
-	FixTCPChecksum(fake) // на всякий случай
+	FixTCPChecksum(fake)
 
 	return [][]byte{fake}, nil
 }

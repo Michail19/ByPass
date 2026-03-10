@@ -25,7 +25,9 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
-	// Collect valid positions only — trust the strategy config, no second-guessing
+	// Collect valid positions, deduplicate, и СОРТИРУЕМ по возрастанию.
+	// Без сортировки стратегия с [120, 50] даст сегменты неправильного порядка:
+	// первый сегмент = байты 0..120, второй = 0..50 — перекрытие и corrupt stream.
 	seen := map[int]bool{}
 	var validPos []int
 	for _, pos := range splitPos {
@@ -36,6 +38,12 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 	}
 	if len(validPos) == 0 {
 		return [][]byte{packet}, nil
+	}
+	// Inline insertion sort — без импорта "sort", O(n²) нормален для малых срезов (обычно 2–5 позиций)
+	for i := 1; i < len(validPos); i++ {
+		for j := i; j > 0 && validPos[j] < validPos[j-1]; j-- {
+			validPos[j], validPos[j-1] = validPos[j-1], validPos[j]
+		}
 	}
 
 	// Build segments

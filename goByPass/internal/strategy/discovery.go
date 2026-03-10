@@ -130,7 +130,7 @@ func (d *Discovery) runDiscovery() {
 					defer func() { <-semaphore }()
 
 					d.testStrategy(strat, domain, port)
-					d.progress.CompletedTests++
+					// НЕ инкрементируем здесь — это уже делает testStrategy через atomic.AddInt64
 				}(strategy, domain, port)
 			}
 		}

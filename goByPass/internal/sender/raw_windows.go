@@ -89,8 +89,10 @@ func openWinDivertWithDLL(dll *syscall.DLL) (WinDivertHandle, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to find WinDivertOpen: %v", err)
 	}
-	// Фикс: outbound and !loopback + UDP для QUIC
-	filter := "outbound and !loopback and (tcp.DstPort == 443 or tcp.DstPort == 80 or udp.DstPort == 443)"
+	// Только TCP: QUIC (UDP 443) не трогаем — он encrypted и packet-number based,
+	// любая модификация приводит к QUIC_NETWORK_IDLE_TIMEOUT.
+	// zapret тоже не перехватывает QUIC.
+	filter := "outbound and !loopback and (tcp.DstPort == 443 or tcp.DstPort == 80)"
 	log.Printf("DEBUG: Opening WinDivert with filter: %s", filter)
 
 	filterPtr, err := syscall.BytePtrFromString(filter)
@@ -120,12 +122,13 @@ func (s *RawSender) Send(packet []byte, addr []byte) error {
 		return fmt.Errorf("%w: packet too short: %d bytes", ErrInvalidPacket, len(packet))
 	}
 
-	// Подготавливаем addr
-	if len(addr) < 64 {
-		log.Printf("WARNING: Address too short (%d), padding to 64", len(addr))
-		newAddr := make([]byte, 64)
-		copy(newAddr, addr)
-		addr = newAddr
+	// ВАЖНО: addr — это структура WINDIVERT_ADDRESS, передаваемая из WinDivertRecv.
+	// Её НЕЛЬЗЯ модифицировать или паддить — это сбросит Direction, InterfaceIndex,
+	// ChecksumOffload флаги и другие поля, что приведёт к неправильному реинжекту.
+	// Если addr пустой — это ошибка вызывающего кода.
+	if len(addr) == 0 {
+		s.stats.PacketsFailed++
+		return fmt.Errorf("addr is empty: WinDivertSend requires original WINDIVERT_ADDRESS from WinDivertRecv")
 	}
 
 	var sendLen uint
@@ -292,7 +295,36 @@ func calculateChecksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-// fixTCPChecksum пересчитывает TCP контрольную сумму
+// fixUDPChecksum пересчитывает UDP контрольную сумму.
+// Необходимо вызывать после любого изменения IP TTL или UDP payload для UDP пакетов,
+// иначе QUIC-сервер дропнет пакет с invalid checksum.
+func fixUDPChecksum(packet []byte) {
+	if len(packet) < 28 {
+		return
+	}
+	ipHeaderLen := int((packet[0] & 0x0F) * 4)
+	if len(packet) < ipHeaderLen+8 {
+		return
+	}
+	udpOffset := ipHeaderLen
+
+	// Обнуляем checksum
+	packet[udpOffset+6] = 0
+	packet[udpOffset+7] = 0
+
+	udpLen := len(packet) - udpOffset
+	pseudo := make([]byte, 12)
+	copy(pseudo[0:4], packet[12:16]) // Source IP
+	copy(pseudo[4:8], packet[16:20]) // Dest IP
+	pseudo[9] = 17                   // Protocol UDP
+	binary.BigEndian.PutUint16(pseudo[10:12], uint16(udpLen))
+
+	udpData := packet[udpOffset:]
+	fullData := append(pseudo, udpData...)
+	checksum := calculateChecksum(fullData)
+	packet[udpOffset+6] = byte(checksum >> 8)
+	packet[udpOffset+7] = byte(checksum & 0xFF)
+}
 func fixTCPChecksum(packet []byte) {
 	if len(packet) < 40 {
 		return

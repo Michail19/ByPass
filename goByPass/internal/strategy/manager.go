@@ -27,15 +27,18 @@ type googleIPList struct {
 
 // Manager управляет стратегиями
 type Manager struct {
-	strategies     map[int]*Strategy
-	defaultID      int
-	activeID       int
-	filters        map[string]*StrategyFilter
-	stats          ManagerStats
-	mu             sync.RWMutex
-	updateChan     chan *StrategyResult
-	closeChan      chan struct{}
-	googleRanges   []*net.IPNet
+	strategies   map[int]*Strategy
+	defaultID    int
+	activeID     int
+	filters      map[string]*StrategyFilter
+	stats        ManagerStats
+	mu           sync.RWMutex
+	updateChan   chan *StrategyResult
+	closeChan    chan struct{}
+	googleRanges []*net.IPNet
+	// cidrIndex — индекс по первому октету для быстрого отсева.
+	// Большинство проверок отклоняется на первом октете без перебора всего списка.
+	cidrIndex      map[byte][]*net.IPNet
 	rangesMu       sync.RWMutex
 	lastUpdateTime time.Time
 	updateErr      error
@@ -58,6 +61,7 @@ func NewManager() *Manager {
 		updateChan:   make(chan *StrategyResult, 1000),
 		closeChan:    make(chan struct{}),
 		googleRanges: make([]*net.IPNet, 0),
+		cidrIndex:    make(map[byte][]*net.IPNet),
 	}
 
 	// Загружаем стратегии по умолчанию
@@ -282,6 +286,7 @@ func (m *Manager) updateGoogleIPRanges() {
 	}
 
 	newRanges := make([]*net.IPNet, 0, len(allPrefixes))
+	newIndex := make(map[byte][]*net.IPNet)
 	for _, cidr := range allPrefixes {
 		_, netw, err := net.ParseCIDR(cidr)
 		if err != nil {
@@ -289,10 +294,16 @@ func (m *Manager) updateGoogleIPRanges() {
 			continue
 		}
 		newRanges = append(newRanges, netw)
+		// Индексируем по первому октету (IPv4 хранится в последних 4 байтах IP в Go)
+		if ip4 := netw.IP.To4(); ip4 != nil {
+			octet := ip4[0]
+			newIndex[octet] = append(newIndex[octet], netw)
+		}
 	}
 
 	m.rangesMu.Lock()
 	m.googleRanges = newRanges
+	m.cidrIndex = newIndex
 	m.lastUpdateTime = time.Now()
 	m.updateErr = nil
 	m.rangesMu.Unlock()
@@ -300,29 +311,38 @@ func (m *Manager) updateGoogleIPRanges() {
 	log.Printf("[GoogleIP] Loaded %d IPv4 ranges (fallback=%t)", len(newRanges), len(allPrefixes) == len(fallbackRanges))
 }
 
-// isGoogleIP проверяет, входит ли IP в диапазоны Google/YouTube
+// isGoogleIP проверяет, входит ли IP в диапазоны Google/YouTube.
+// Использует cidrIndex для отсева по первому октету — вместо O(n) по всему списку
+// делает O(k) где k — количество сетей с данным первым октетом (обычно 1-5).
 func (m *Manager) isGoogleIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
-
 	if ip == nil {
 		return false
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false // IPv6 не поддерживаем
 	}
 
 	m.rangesMu.RLock()
 	defer m.rangesMu.RUnlock()
 
-	if len(m.googleRanges) == 0 {
-		// Если список пуст (ошибка загрузки) — fallback на старое поведение
+	if len(m.cidrIndex) == 0 {
 		log.Printf("[GoogleIP] No ranges loaded, using hostname fallback")
 		return false
 	}
 
-	for _, cidr := range m.googleRanges {
+	// Быстрая проверка по первому октету
+	candidates, ok := m.cidrIndex[ip4[0]]
+	if !ok {
+		return false // нет ни одной сети с таким первым октетом
+	}
+
+	for _, cidr := range candidates {
 		if cidr.Contains(ip) {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -415,8 +435,11 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	bestPriority := 999999
 
 	for _, strat := range m.strategies {
+		// TCP: порт не проверяем — WinDivert фильтр уже ограничивает 80/443
+		// UDP: обязательно проверяем порт 443 — иначе dns (udp:53) и другие
+		// udp-потоки попадут под QUIC-стратегию
 		if (protocol == "tcp" && (strat.ApplyToTLS || strat.ApplyToHTTP)) ||
-			(protocol == "udp" && strat.ApplyToQUIC) {
+			(protocol == "udp" && port == 443 && strat.ApplyToQUIC) {
 			if strat.Priority < bestPriority {
 				best = strat
 				bestPriority = strat.Priority

@@ -72,25 +72,32 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 	var fragments []*IPFragment
 	offset := 0
 
-	// Проверка на TLS перед фрагментацией
+	// Проверка на TLS перед фрагментацией.
+	// IP-фрагментация TLS-пакетов опасна: ClientHello может попасть в два фрагмента,
+	// и большинство серверов (особенно Cloudflare, Google) тихо дропают такие пакеты.
+	// zapret использует TCP segmentation, а не IP fragmentation.
+	// Если пакет содержит TLS — возвращаем как есть без фрагментации.
 	ipHeaderLen := int(packet[0]&0x0F) * 4
-	tcpHeaderOffset := ipHeaderLen
-	tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
-	payloadOffset := ipHeaderLen + tcpHeaderLen
-	isTLS := len(packet) > payloadOffset+5 && packet[payloadOffset] == 0x16 && packet[payloadOffset+1] == 0x03 && packet[payloadOffset+2] <= 0x03
+	if len(packet) > ipHeaderLen+5 {
+		tcpHeaderOffset := ipHeaderLen
+		// Безопасная проверка: TCP-пакет с TLS payload (0x16 0x03 xx)
+		if packet[9] == 6 { // TCP
+			tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
+			payloadOffset := ipHeaderLen + tcpHeaderLen
+			if len(packet) > payloadOffset+2 &&
+				packet[payloadOffset] == 0x16 &&
+				packet[payloadOffset+1] == 0x03 {
+				log.Printf("WARNING: Skipping IP fragmentation for TLS packet — use TCP split instead")
+				return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
+			}
+		}
+	}
 
 	for offset < dataLen {
 		// Размер данных для этого фрагмента
 		thisDataSize := maxDataSize
 		if offset+thisDataSize > dataLen {
 			thisDataSize = dataLen - offset
-		}
-
-		// Для TLS пакетов проверяем, не разбили ли мы запись
-		if isTLS && offset > 0 {
-			// Проверяем, что не разбили TLS record посередине
-			// Это сложно, лучше использовать TLS record splitting вместо IP фрагментации
-			log.Printf("WARNING: IP fragmentation may break TLS records")
 		}
 
 		// Создаем заголовок фрагмента

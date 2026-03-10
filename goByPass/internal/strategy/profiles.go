@@ -71,11 +71,13 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	m.AddStrategy(&Strategy{
-		ID:              25,
-		Name:            "yt-discord-2026",
-		Description:     "2026 TSPU bypass from zapret/ByeDPI",
-		ApplyToTLS:      true,
-		ApplyToQUIC:     true,
+		ID:          25,
+		Name:        "yt-discord-2026",
+		Description: "2026 TSPU bypass from zapret/ByeDPI (TCP only — QUIC не перехватываем)",
+		ApplyToTLS:  true,
+		// ApplyToQUIC убрано: UDP 443 не перехватывается WinDivert-фильтром.
+		// QUIC encrypted + packet-number based — любая модификация ломает соединение.
+		// QUICttl убран по той же причине: setIPTTL для UDP инвалидирует UDP checksum.
 		SplitMode:       SplitAfterSNI,
 		SplitPositions:  []int{1, 3, 7, 43},
 		SplitSNIOffset:  true,
@@ -87,10 +89,10 @@ func (m *Manager) loadDefaultStrategies() {
 		FakePos:         0,
 		FakeTTL:         4,
 		FakeRepeats:     1,
-		TLSRecordSplit:  true,
-		TLSRecordSize:   80,
-		Priority:        1,
-		QUICttl:         4,
+		// TLSRecordSplit: оставляем false — Cloudflare и ряд серверов плохо реагируют
+		// на split TLS record, вызывая handshake retry и slow TLS.
+		TLSRecordSplit: false,
+		Priority:       1,
 	})
 
 	// Устанавливаем стратегию по умолчанию

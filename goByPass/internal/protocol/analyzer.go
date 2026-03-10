@@ -102,11 +102,20 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 		}
 		payload = packet[ipHeaderLen+tcpHeaderLen:]
 	} else {
+		// UDP: поле длины (bytes 4-5 UDP-заголовка) = UDP-header(8) + payload.
+		// Используем его как верхнюю границу payload, а не len(packet):
+		// если udpLen < len(packet) — хвост это padding/trailer, а не payload.
+		// Если udpLen > len(packet) — пакет обрезан, ошибка.
 		udpLen := int(binary.BigEndian.Uint16(packet[ipHeaderLen+4:]))
-		if len(packet) < ipHeaderLen+8+udpLen {
-			return info, nil
+		payloadLen := udpLen - 8 // вычитаем UDP-заголовок
+		if payloadLen < 0 {
+			return info, nil // некорректный udpLen
 		}
-		payload = packet[ipHeaderLen+8:]
+		end := ipHeaderLen + 8 + payloadLen
+		if end > len(packet) {
+			return info, nil // пакет обрезан
+		}
+		payload = packet[ipHeaderLen+8 : end]
 	}
 	if len(payload) == 0 {
 		// SYN/ACK без данных — hostname не заполнится
@@ -148,9 +157,20 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 			info.Host = host
 			log.Printf("[Analyzer] Extracted HTTP Host: %s", host)
 		}
-	} else if len(payload) > 0 && (payload[0]&0xF0) == 0xC0 {
-		info.IsQUIC = true
-		info.Protocol = ProtocolQUIC
+	} else if len(payload) >= 5 && (payload[0]&0xF0) == 0xC0 && dstPort == 443 {
+		// QUIC Long Header: top 2 bits = 11 (0xC0–0xFF).
+		// Дополнительная проверка версии снижает false positives с DTLS и random UDP:
+		//   QUIC v1       = 0x00000001
+		//   QUIC v2 draft = 0x6b3343cf
+		//   QUIC grease   = 0x?a?a?a?a (нижний nibble каждого байта = 0xA)
+		version := binary.BigEndian.Uint32(payload[1:5])
+		isKnownQUIC := version == 0x00000001 ||
+			version == 0x6b3343cf ||
+			(version&0x0F0F0F0F == 0x0A0A0A0A) // grease pattern
+		if isKnownQUIC {
+			info.IsQUIC = true
+			info.Protocol = ProtocolQUIC
+		}
 	}
 
 	return info, nil
