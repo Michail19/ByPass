@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -213,10 +213,10 @@ func (m *Manager) updateGoogleIPRanges() {
 
 		for attempt := 1; attempt <= 3; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
 
 			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 			if err != nil {
+				cancel()
 				log.Printf("[GoogleIP] Failed to create request (attempt %d): %v", attempt, err)
 				time.Sleep(time.Second * time.Duration(attempt))
 				continue
@@ -227,20 +227,24 @@ func (m *Manager) updateGoogleIPRanges() {
 			client := &http.Client{Timeout: 15 * time.Second}
 			resp, err := client.Do(req)
 			if err != nil {
+				cancel()
 				log.Printf("[GoogleIP] Download failed (attempt %d, url=%s): %v", attempt, url, err)
 				time.Sleep(time.Second * time.Duration(attempt))
 				continue
 			}
-			defer resp.Body.Close()
 
 			log.Printf("[GoogleIP] Response status: %s", resp.Status)
 
 			if resp.StatusCode != http.StatusOK {
+				resp.Body.Close()
+				cancel()
 				log.Printf("[GoogleIP] Bad status %d from %s", resp.StatusCode, url)
 				continue
 			}
 
 			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			cancel()
 			if err != nil {
 				log.Printf("[GoogleIP] Failed to read body from %s: %v", url, err)
 				continue
@@ -550,12 +554,12 @@ func (m *Manager) SaveToFile(filename string) error {
 		return err
 	}
 
-	return ioutil.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0644)
 }
 
 // LoadFromFile загружает стратегии из файла
 func (m *Manager) LoadFromFile(filename string) error {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return err
 	}
@@ -608,7 +612,4 @@ func (m *Manager) GetStats() ManagerStats {
 	return stats
 }
 
-// loadDefaultStrategies загружает стратегии по умолчанию
-var loadDefaultStrategies = func(m *Manager) {
-	// Будет заполнено из profiles.go
-}
+// loadDefaultStrategies is implemented as a method in profiles.go

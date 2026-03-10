@@ -107,10 +107,9 @@ func NewPipeline(
 func (p *Pipeline) Start() error {
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 
-	// Запускаем захват пакетов
-	if err := p.capturer.Start(p.ctx); err != nil {
-		return fmt.Errorf("failed to start capturer: %v", err)
-	}
+	// NOTE: capturer is already started by the caller (initializeComponents)
+	// to obtain the WinDivert handle before building the sender.
+	// Do NOT call p.capturer.Start() here to avoid opening a second handle.
 
 	// Запускаем воркеров
 	for i := 0; i < p.workers; i++ {
@@ -247,8 +246,10 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		if err == nil && info != nil {
 			if info.SNI != "" {
 				flow.SetHostname(info.SNI)
+				flow.IsAnalyzed = true // hostname found — lock it in
 			} else if info.Host != "" {
 				flow.SetHostname(info.Host)
+				flow.IsAnalyzed = true
 			}
 			if info.IsTLS {
 				flow.SetTLS()
@@ -256,8 +257,17 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			if info.IsHTTP {
 				flow.SetHTTP()
 			}
-			flow.IsAnalyzed = true
 		}
+		// Give up analyzing after 4 packets with no result to avoid wasting CPU
+		// on data packets that will never contain a ClientHello
+		flow.Mu.Lock()
+		flow.DataPacketsModified++ // reuse as analysis-attempt counter temporarily
+		giveUp := flow.DataPacketsModified >= 4
+		if giveUp {
+			flow.IsAnalyzed = true
+			flow.DataPacketsModified = 0 // reset for actual use below
+		}
+		flow.Mu.Unlock()
 	}
 
 	// Проверяем кэш
@@ -265,7 +275,9 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	var strategyID int
 	var strats *strategy.Strategy // ← всегда указатель, может быть nil
 	cachedStratID := 0
-	if cached, exists := p.ipCache.GetByIP(dstIP); exists {
+	var cached *cache.IPCacheEntry // keep in scope for fallback below
+	if c, exists := p.ipCache.GetByIP(dstIP); exists {
+		cached = c
 		cachedStratID = cached.StrategyID
 		shouldBypass = cached.ShouldBypass
 		strategyID = cached.StrategyID
@@ -274,7 +286,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			dstIP.String(), dstPort, shouldBypass, strategyID, cached.Hostname)
 	}
 
-	// Всегда получаем свежий выбор (если hostname заполнен — приоритет ему)
+	// Always trust the fresh strategy selection — hostname-based routing takes priority over cache
 	strat := p.strategyMgr.SelectStrategy(
 		dstIP.String(),
 		flow.Hostname,
@@ -286,18 +298,20 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		log.Printf("[STRATEGY] Fresh select → strategy %d (%s) (hostname: %s)",
 			strat.ID, strat.Name, flow.Hostname)
 
-		// Если свежая стратегия отличается или кэш был passthrough (1) — обновляем
-		if strat.ID != cachedStratID || (flow.Hostname != "" && cachedStratID == 1) {
+		strats = strat
+		strategyID = strat.ID
+		// Only bypass if strategy is not the passthrough (id=1)
+		shouldBypass = strat.ID != 1
+
+		// Update cache if strategy changed or wasn't set
+		if strat.ID != cachedStratID {
 			log.Printf("[STRATEGY] Updating to fresh strategy %d (was %d)", strat.ID, cachedStratID)
-			shouldBypass = true
-			strats = strat
-			strategyID = strat.ID
-			// Немедленно обновляем кэш
-			p.ipCache.PutByIP(dstIP, flow.Hostname, true, strategyID)
-		} else if cachedStratID != 0 {
-			// Кэш актуален — берём полную структуру из менеджера
-			strats, _ = p.strategyMgr.GetStrategy(cachedStratID)
+			p.ipCache.PutByIP(dstIP, flow.Hostname, shouldBypass, strategyID)
 		}
+	} else if cachedStratID != 0 && cachedStratID != 1 && cached != nil {
+		// No fresh selection but we have a valid cached non-passthrough strategy
+		strats, _ = p.strategyMgr.GetStrategy(cachedStratID)
+		shouldBypass = cached.ShouldBypass
 	}
 
 	// 3. Финальный fallback, если ничего не выбрано
@@ -326,10 +340,10 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		payloadOffset := tcpOffset + tcpHeaderLen
 		isData := len(pkt.Data) > payloadOffset
 		isClientHello := isData &&
-			len(pkt.Data) > payloadOffset+6 && // +6 для version check
-			pkt.Data[payloadOffset] == 0x16 && // ContentType Handshake
-			pkt.Data[payloadOffset+1] == 0x03 && // Major version 3
-			pkt.Data[payloadOffset+5] == 0x01 // HandshakeType ClientHello
+			len(pkt.Data) >= payloadOffset+6 && // need indices [+0..+5]
+			pkt.Data[payloadOffset] == 0x16 && // ContentType: Handshake
+			pkt.Data[payloadOffset+1] == 0x03 && // TLS major version
+			pkt.Data[payloadOffset+5] == 0x01 // HandshakeType: ClientHello
 
 		applyMods := (isClientHello && strats.ApplyToTLS && !flow.IsHandshakeModified) ||
 			(isData && !isClientHello && flow.DataPacketsModified < strats.ModifyFirstDataPackets)
@@ -543,27 +557,23 @@ func (p *Pipeline) resultProcessor() {
 		case result := <-p.resultChan:
 			// Отправляем результат в менеджер стратегий для статистики
 			if p.strategyMgr != nil {
+				// Determine success before building the result struct
+				success := !(result.Delay > 500 || len(result.ModifiedPackets) == 0)
+
 				strategyResult := &strategy.StrategyResult{
 					StrategyID:   result.StrategyID,
-					Success:      true, // пока true, но можно сделать умнее
+					Success:      success,
 					ResponseTime: time.Duration(result.Delay) * time.Millisecond,
 					BytesSent:    len(result.ModifiedPackets) * 1500,
 					PacketsSent:  len(result.ModifiedPackets),
 					Timestamp:    time.Now(),
 				}
 
-				if !strategyResult.Success { // или по какому-то другому условию
-					invalidated := p.ipCache.InvalidateByStrategy(strategyResult.StrategyID)
+				if !success {
+					invalidated := p.ipCache.InvalidateByStrategy(result.StrategyID)
 					if invalidated > 0 {
-						log.Printf("Invalidated %d cache entries due to strategy %d failure", invalidated, strategyResult.StrategyID)
+						log.Printf("Invalidated %d cache entries due to strategy %d failure", invalidated, result.StrategyID)
 					}
-				}
-
-				// Если Delay большой или пакетов мало — считаем fail
-				if result.Delay > 500 || len(result.ModifiedPackets) == 0 {
-					strategyResult.Success = false
-					// Invalidate cache для этой стратегии
-					p.ipCache.InvalidateByStrategy(result.StrategyID)
 				}
 
 				p.strategyMgr.ReportResult(strategyResult)
@@ -572,7 +582,7 @@ func (p *Pipeline) resultProcessor() {
 	}
 }
 
-// extractIPs извлекает IP-адреса из пакета
+// extractIPs извлекает IP-адреса из пакета (копирует, не алиасирует)
 func (p *Pipeline) extractIPs(packet []byte) (srcIP, dstIP net.IP, err error) {
 	if len(packet) < 20 {
 		return nil, nil, fmt.Errorf("packet too short")
@@ -580,7 +590,11 @@ func (p *Pipeline) extractIPs(packet []byte) (srcIP, dstIP net.IP, err error) {
 
 	version := packet[0] >> 4
 	if version == 4 {
-		return net.IP(packet[12:16]), net.IP(packet[16:20]), nil
+		src := make(net.IP, 4)
+		dst := make(net.IP, 4)
+		copy(src, packet[12:16])
+		copy(dst, packet[16:20])
+		return src, dst, nil
 	}
 
 	return nil, nil, fmt.Errorf("unsupported IP version")

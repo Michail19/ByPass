@@ -161,10 +161,11 @@ func extractSNI(data []byte) string {
 	if len(data) < 43 {
 		return ""
 	}
-	pos := 5                 // skip TLS record header + handshake type + length
-	if data[pos-4] != 0x01 { // не ClientHello
+	pos := 5               // TLS record header = type(1)+version(2)+length(2)
+	if data[pos] != 0x01 { // data[5] = HandshakeType: 0x01 = ClientHello
 		return ""
 	}
+	pos += 4 // skip handshake header: type(1)+length(3)
 
 	pos += 34                    // version(2) + random(32)
 	sessionLen := int(data[pos]) // legacy session id
@@ -207,23 +208,64 @@ func extractSNI(data []byte) string {
 
 // hasECH — проверка наличия Encrypted Client Hello extension
 func hasECH(data []byte) bool {
-	if len(data) < 100 {
+	// Minimum: TLS record header(5) + HandshakeType(1) + length(3) + version(2) + random(32) = 43
+	if len(data) < 43 {
 		return false
 	}
-	pos := 5 + 34 + 1                                   // после random + session
-	pos += int(data[pos])                               // session
-	pos += 2 + int(binary.BigEndian.Uint16(data[pos:])) // ciphers
-	pos += 1 + int(data[pos])                           // compression
-	pos += 2                                            // extensions length
 
-	end := pos + int(binary.BigEndian.Uint16(data[pos-2:]))
+	// Skip TLS record header (5) and handshake header (4)
+	pos := 9
+
+	// Skip version (2) + random (32)
+	pos += 34
+
+	// Session ID
+	if pos >= len(data) {
+		return false
+	}
+	sessionLen := int(data[pos])
+	pos += 1 + sessionLen
+
+	// Cipher suites
+	if pos+2 > len(data) {
+		return false
+	}
+	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2 + cipherLen
+
+	// Compression methods
+	if pos >= len(data) {
+		return false
+	}
+	compLen := int(data[pos])
+	pos += 1 + compLen
+
+	// Extensions length
+	if pos+2 > len(data) {
+		return false
+	}
+	extTotalLen := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2
+
+	end := pos + extTotalLen
+	if end > len(data) {
+		end = len(data) // clamp — truncated packet, but still walk what we have
+	}
+
 	for pos+4 <= end {
 		extType := binary.BigEndian.Uint16(data[pos : pos+2])
+		extLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
+		pos += 4
+
 		if extType == 0xfe0d { // ECH extension type
 			return true
 		}
-		extLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
-		pos += 4 + extLen
+
+		// Bounds-check before advancing by extLen
+		if pos+extLen > end {
+			break
+		}
+		pos += extLen
 	}
 	return false
 }

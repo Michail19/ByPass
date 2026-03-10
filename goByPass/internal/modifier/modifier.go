@@ -76,7 +76,11 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 
 	// 1. Fake + repeats (zapret fake + --dpi-desync-repeats)
 	if strat.FakeMode != strategy.FakeNone {
-		for rep := 0; rep < strat.Repeats; rep++ {
+		fakeRepeats := strat.Repeats
+		if fakeRepeats <= 0 {
+			fakeRepeats = 1 // always send at least one fake if FakeMode is set
+		}
+		for rep := 0; rep < fakeRepeats; rep++ {
 			fakePkts, err := pm.ApplyFake(packet, strat.FakePos, strat.FakeTTL, strat.FakeMode, strat.Fooling)
 
 			if err == nil && len(fakePkts) > 0 {

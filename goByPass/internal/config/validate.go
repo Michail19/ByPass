@@ -58,6 +58,8 @@ func (f *FirewallConfig) Validate() error {
 	validBackends := map[string]bool{
 		"iptables": true,
 		"nftables": true,
+		"windows":  true,
+		"winfw":    true,
 		"auto":     true,
 	}
 

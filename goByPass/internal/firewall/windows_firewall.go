@@ -51,19 +51,19 @@ func (m *WindowsFirewallManager) ListRules() ([]string, error) {
 // IsSupported проверяет поддержку
 func (m *WindowsFirewallManager) IsSupported() bool {
 	// Проверяем, запущены ли мы с правами администратора
-	return isAdmin()
+	return platformIsAdmin()
 }
 
 // checkAdminRights проверяет права администратора
 func (m *WindowsFirewallManager) checkAdminRights() error {
-	if !isAdmin() {
+	if !platformIsAdmin() {
 		return ErrPermissionDenied
 	}
 	return nil
 }
 
 // isAdmin проверяет, запущен ли процесс с правами администратора
-func isAdmin() bool {
+func platformIsAdmin() bool {
 	cmd := exec.Command("net", "session")
 	err := cmd.Run()
 	return err == nil

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -23,6 +24,7 @@ type WinDivert struct {
 	config   Config
 	dll      *syscall.DLL
 	recvProc *syscall.Proc
+	wg       sync.WaitGroup
 }
 
 // NewWinDivert создает новый захватчик для Windows
@@ -97,6 +99,7 @@ func (w *WinDivert) Start(ctx context.Context) error {
 				}
 			}
 
+			w.wg.Add(1)
 			go w.processPackets(ctx)
 			log.Printf("WinDivert started on Windows with flag=%d", flag)
 			return nil
@@ -123,10 +126,19 @@ func (w *WinDivert) GetHandle() uintptr {
 func (w *WinDivert) Stop() error {
 	close(w.stopChan)
 
+	// Close the WinDivert handle first — this unblocks WinDivertRecv
 	if w.handle != 0 && w.dll != nil {
 		closeProc, _ := w.dll.FindProc("WinDivertClose")
 		closeProc.Call(uintptr(w.handle))
+		w.handle = 0
+	}
+
+	// Wait for processPackets to exit before closing the channel
+	w.wg.Wait()
+
+	if w.dll != nil {
 		w.dll.Release()
+		w.dll = nil
 	}
 
 	close(w.packets)
@@ -140,6 +152,7 @@ func (w *WinDivert) Packets() <-chan Packet {
 
 // processPackets обрабатывает входящие пакеты
 func (w *WinDivert) processPackets(ctx context.Context) {
+	defer w.wg.Done()
 	recvProc, err := w.dll.FindProc("WinDivertRecv")
 	if err != nil {
 		log.Printf("Failed to find WinDivertRecv: %v", err)

@@ -11,19 +11,9 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
-	// Проверяем, что пакет достаточно большой
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
 		log.Printf("DEBUG: Packet too small for split (%d bytes), returning original", len(packet))
 		return [][]byte{packet}, nil
-	}
-
-	safePositions := map[int]bool{1: true, 2: true, 3: true, 5: true, 7: true, 19: true, 43: true} // типичные safe для ClientHello
-
-	for i, pos := range splitPos {
-		if !safePositions[pos] && (pos < 5 || pos%5 != 0) {
-			log.Printf("Unsafe split pos %d for TLS, skipping", pos)
-			splitPos[i] = 0 // или continue в цикле
-		}
 	}
 
 	ipHeaderLen := int(packet[0]&0x0F) * 4
@@ -35,19 +25,25 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
-	// Split at positions (like zapret split-pos)
+	// Collect valid positions only — trust the strategy config, no second-guessing
+	seen := map[int]bool{}
+	var validPos []int
+	for _, pos := range splitPos {
+		if pos > 0 && pos < payloadLen && !seen[pos] {
+			validPos = append(validPos, pos)
+			seen[pos] = true
+		}
+	}
+	if len(validPos) == 0 {
+		return [][]byte{packet}, nil
+	}
+
+	// Build segments
 	var segments [][]byte
 	prevPos := 0
-	for i, pos := range splitPos {
-		if pos < 5 || (pos > 5 && pos%5 != 0) { // safe alignments
-			log.Printf("Invalid split pos %d for TLS, adjusting", pos)
-			splitPos[i] = (pos/5)*5 + 5 // Adjust to safe
-		}
-
-		if pos > prevPos && pos < payloadLen {
-			segments = append(segments, packet[payloadOffset+prevPos:payloadOffset+pos])
-			prevPos = pos
-		}
+	for _, pos := range validPos {
+		segments = append(segments, packet[payloadOffset+prevPos:payloadOffset+pos])
+		prevPos = pos
 	}
 	segments = append(segments, packet[payloadOffset+prevPos:])
 

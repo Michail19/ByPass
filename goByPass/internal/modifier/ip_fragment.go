@@ -134,7 +134,7 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 		fragments = append(fragments, &IPFragment{
 			Data:          fragPacket,
 			Offset:        offset,
-			MoreFragments: moreFragsBit == 1,
+			MoreFragments: moreFragsBit != 0, // MF bit is 1<<13 (0x2000), not 1
 		})
 
 		offset += thisDataSize

@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +20,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	// Читаем файл
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, fmt.Errorf("config file not found: %s", path)
@@ -70,5 +69,5 @@ func (c *Config) Save(path string) error {
 		return err
 	}
 
-	return ioutil.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0644)
 }

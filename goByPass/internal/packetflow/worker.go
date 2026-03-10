@@ -1,7 +1,6 @@
 package packetflow
 
 import (
-	"hash/fnv"
 	"sync"
 	"time"
 
@@ -95,14 +94,9 @@ func (p *WorkerPool) Stop() {
 	close(p.results)
 }
 
-// Submit (расскомментирован workerID для affinity)
+// Submit отправляет пакет в очередь воркеров
+// TODO: implement per-flow channel affinity for strict ordering within a TCP flow
 func (p *WorkerPool) Submit(packet capture.Packet) bool {
-	h := fnv.New32a()
-	h.Write(packet.Data)
-	//workerID := int(h.Sum32()) % len(p.workers)
-	// Для affinity: отправляем в worker по ID (но channel общий — это approx affinity)
-	// Если нужно strict — используйте per-flow channels (сложно)
-
 	select {
 	case p.tasks <- packet:
 		return true

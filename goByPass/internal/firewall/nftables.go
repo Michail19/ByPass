@@ -1,11 +1,9 @@
 package firewall
 
 import (
-	"bytes"
 	"fmt"
 	"os/exec"
 	"strings"
-	"text/template"
 )
 
 // NFTablesManager управляет правилами nftables
@@ -88,24 +86,11 @@ func (m *NFTablesManager) createPortSet(ports []int) error {
 
 // addQueueRule добавляет правило для NFQUEUE
 func (m *NFTablesManager) addQueueRule(queueNum int, direction string) error {
-	tmpl := template.Must(template.New("rule").Parse(`
-		nft add rule inet {{.Table}} {{.Chain}} 
-		tcp dport @{{.SetName}} 
-		counter queue num {{.QueueNum}} bypass
-	`))
-
-	var buf bytes.Buffer
-	err := tmpl.Execute(&buf, map[string]interface{}{
-		"Table":    m.table,
-		"Chain":    m.chain,
-		"SetName":  m.setName,
-		"QueueNum": queueNum,
-	})
-	if err != nil {
-		return err
-	}
-
-	return runCommand("bash", "-c", buf.String())
+	cmd := fmt.Sprintf(
+		"nft add rule inet %s %s tcp dport @%s counter queue num %d bypass",
+		m.table, m.chain, m.setName, queueNum,
+	)
+	return runCommand("bash", "-c", cmd)
 }
 
 // RemoveRule удаляет правило nftables

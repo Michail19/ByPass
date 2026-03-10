@@ -68,7 +68,7 @@ func DefaultConfig() *Config {
 
 		Strategy: StrategyConfig{
 			DefaultStrategy: "moderate",
-			StrategyFile:    "configs\\strategies\\strategies.json",
+			StrategyFile:    "configs/strategies/strategies.json",
 			AutoDiscovery: struct {
 				Enabled        bool     `yaml:"enabled" json:"enabled"`
 				TestDomains    []string `yaml:"test_domains" json:"test_domains"`

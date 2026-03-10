@@ -27,6 +27,7 @@ type DomainCache struct {
 	ttl     time.Duration
 	maxSize int
 	stats   DomainCacheStats
+	stopCh  chan struct{}
 }
 
 // DomainCacheStats статистика кэша доменов
@@ -44,6 +45,7 @@ func NewDomainCache(ttl time.Duration, maxSize int) *DomainCache {
 		entries: make(map[string]*DomainCacheEntry),
 		ttl:     ttl,
 		maxSize: maxSize,
+		stopCh:  make(chan struct{}),
 	}
 
 	go c.cleanupLoop()
@@ -58,18 +60,25 @@ func (c *DomainCache) Get(domain string) (*DomainCacheEntry, bool) {
 	c.mu.RUnlock()
 
 	if !exists {
+		c.mu.Lock()
 		c.stats.Misses++
+		c.mu.Unlock()
 		return nil, false
 	}
 
 	if time.Now().After(entry.ExpireAt) {
 		c.Delete(domain)
+		c.mu.Lock()
 		c.stats.Misses++
+		c.mu.Unlock()
 		return nil, false
 	}
 
+	// Update LastSeen and stats under write lock to avoid races
+	c.mu.Lock()
 	entry.LastSeen = time.Now()
 	c.stats.Hits++
+	c.mu.Unlock()
 
 	return entry, true
 }
@@ -159,13 +168,23 @@ func (c *DomainCache) Delete(domain string) {
 	c.mu.Unlock()
 }
 
+// Stop останавливает фоновую очистку кэша
+func (c *DomainCache) Stop() {
+	close(c.stopCh)
+}
+
 // cleanupLoop периодически очищает кэш
 func (c *DomainCache) cleanupLoop() {
 	ticker := time.NewTicker(c.ttl / 10)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		c.cleanup()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.cleanup()
+		}
 	}
 }
 

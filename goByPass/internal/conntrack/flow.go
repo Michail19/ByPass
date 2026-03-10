@@ -119,8 +119,7 @@ type Flow struct {
 	StrategyID          int
 	IsHandshakeModified bool
 	reverseDNSPending   bool
-	mu                  sync.Mutex
-	Mu                  sync.RWMutex // for SetHostname etc.
+	Mu                  sync.RWMutex // single mutex for all fields
 
 	// Новые поля из analyzer.go
 	IsECH               bool
@@ -273,13 +272,13 @@ func (f *Flow) GetSrcPort() uint16 {
 }
 
 func (f *Flow) IsReverseDNSPending() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.Mu.RLock()
+	defer f.Mu.RUnlock()
 	return f.reverseDNSPending
 }
 
 func (f *Flow) SetReverseDNSPending(pending bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
 	f.reverseDNSPending = pending
 }

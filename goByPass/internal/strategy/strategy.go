@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	_ "encoding/json"
 	"fmt"
 	"time"
 )
@@ -107,7 +106,7 @@ type Strategy struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	
+
 	// Применять к каким протоколам
 	ApplyToHTTP bool `json:"apply_to_http"`
 	ApplyToTLS  bool `json:"apply_to_tls"`

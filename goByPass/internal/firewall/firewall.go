@@ -54,11 +54,6 @@ var (
 
 // NewManager создает менеджер файрвола в зависимости от бэкенда и платформы
 func NewManager(cfg Config) (Manager, error) {
-	// Проверяем права администратора на Windows
-	if runtime.GOOS == "windows" && !isAdmin() {
-		return nil, ErrPermissionDenied
-	}
-
 	backend := cfg.Backend
 	if backend == "auto" {
 		backend = detectBackend()
@@ -136,6 +131,15 @@ func runCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("command failed: %s %v: %s - %v", name, args, string(output), err)
+	}
+	return nil
+}
+
+// requireAdmin returns ErrPermissionDenied if the process lacks elevated privileges.
+// The actual check is delegated to platformIsAdmin() defined in platform-specific files.
+func requireAdmin() error {
+	if !platformIsAdmin() {
+		return ErrPermissionDenied
 	}
 	return nil
 }
