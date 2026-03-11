@@ -126,6 +126,12 @@ type Flow struct {
 	ALPN                []string
 	IsAnalyzed          bool // для кэширования анализа
 	DataPacketsModified int  // сколько data-пакетов уже модифицировали
+
+	// QUICFakeInjected: fake QUIC Initial уже инжектированы для этого потока (#5).
+	// QUIC fake injection нужна только для первых 1-2 пакетов handshake.
+	// После этого поток идёт как video streaming — тысячи пакетов.
+	// Без этого флага каждый UDP:443 пакет генерирует 6 fake → убивает throughput.
+	QUICFakeInjected bool
 }
 
 // NewFlow создает новый поток

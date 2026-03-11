@@ -145,6 +145,18 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	}
 
 	// ── 3–8. Split/Disorder (только для ClientHello или AnyProtocol) ──────────
+	//
+	// originalReplaced = true означает что packets[] уже содержит полную замену
+	// оригинального payload (сегменты покрывают те же seq numbers что и original).
+	// В этом случае SendOriginal должен быть false (#1):
+	//   - Для split/seqovl/disorder отправка original ПОСЛЕ сегментов бессмысленна:
+	//     сегменты покрывают весь original (TCP принимает по seq, дубль игнорируется).
+	//   - Для disorder это критично: DPI видит unmodified ORIGINAL после сегментов
+	//     и анализирует именно его → bypass полностью теряет эффект.
+	//   - Для fake-only (без сегментов) SendOriginal=true — fake пакеты гибнут по TTL,
+	//     оригинал должен дойти до сервера.
+	var originalReplaced bool
+
 	if !isClientHello && !strat.AnyProtocol {
 		goto finalize
 	}
@@ -153,10 +165,22 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	if strat.NeedsSeqOvl() && isClientHello {
 		seqPkts, err := pm.ApplySeqOvl(
 			packet, strat.SeqOvlLen, strat.SeqOvlPatternData, strat.SplitPositions,
+			// SeqOvl TTL: предпочитаем DisorderTTL (запретовский default=1), fallback FakeTTL.
+			// ovl-пакет идёт с seq < ISN — должен умереть до сервера, но дойти до DPI.
+			func() int {
+				if strat.DisorderTTL > 0 {
+					return strat.DisorderTTL
+				}
+				if strat.FakeTTL > 0 {
+					return strat.FakeTTL
+				}
+				return 6 // zapret default
+			}(),
 		)
 		if err == nil && len(seqPkts) > 0 {
 			packets = append(packets, seqPkts...)
 			pm.stats.SplitCount += uint64(len(seqPkts))
+			originalReplaced = true // seqPkts содержит реальные сегменты
 			goto finalize
 		}
 	}
@@ -181,6 +205,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 			// Заменяем packets (fake из шага 2 уже внутри ApplyFakedSplit)
 			packets = fsPkts
 			pm.stats.SplitCount += uint64(len(fsPkts))
+			originalReplaced = true // fsPkts содержит реальные сегменты
 			goto finalize
 		}
 	}
@@ -201,6 +226,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		if err == nil && len(dPkts) > 0 {
 			packets = append(packets, dPkts...)
 			pm.stats.DisorderCount += uint64(len(dPkts))
+			originalReplaced = true // dPkts содержит реальные сегменты после decoy
 			goto finalize
 		}
 	}
@@ -211,6 +237,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		if err == nil && len(hfPkts) > 0 {
 			packets = append(packets, hfPkts...)
 			pm.stats.SplitCount += uint64(len(hfPkts))
+			originalReplaced = true
 			goto finalize
 		}
 	}
@@ -221,6 +248,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		if err == nil && len(splitPkts) > 0 {
 			packets = append(packets, splitPkts...)
 			pm.stats.SplitCount += uint64(len(splitPkts))
+			originalReplaced = true // splitPkts — полная замена original
 			goto finalize
 		}
 	}
@@ -243,6 +271,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 				packets = append(packets, newPkt)
 				seq += uint32(len(frag))
 			}
+			originalReplaced = true // TLS fragments покрывают весь payload
 		}
 	}
 
@@ -269,7 +298,13 @@ finalize:
 	return &ModifyResult{
 		StrategyID:      strat.ID,
 		ModifiedPackets: packets,
-		SendOriginal:    true,
+		// SendOriginal=true только когда packets[] содержат только decoy-пакеты (fake с низким TTL)
+		// и реальный оригинал ещё не отправлен.
+		// SendOriginal=false когда packets[] содержат сегменты оригинального payload (#1):
+		//   - split/seqovl/disorder: сегменты покрывают все seq numbers оригинала
+		//   - Отправка оригинала ПОСЛЕ сегментов при disorder убивает bypass:
+		//     DPI видит unmodified ORIGINAL и анализирует его вместо разрозненных частей.
+		SendOriginal: !originalReplaced,
 	}, nil
 }
 
@@ -406,27 +441,43 @@ func replaceHTTPHost(payload []byte, newHost string) []byte {
 	return result
 }
 
-// isClientHelloPacket — полноценная проверка TLS ClientHello
+// isClientHelloPacket — полноценная проверка TLS ClientHello.
+//
+// Намеренно принимает частичные (fragmented) ClientHello (#1):
+// Браузеры часто отправляют ClientHello в нескольких TCP сегментах.
+// Старая проверка "5+recordLen > len(p)" отбрасывала такие пакеты →
+// split/disorder/fake не применялись ни к одному из сегментов.
+//
+// Relaxed логика: если первые 9 байт выглядят как TLS 1.x ClientHello —
+// считаем это ClientHello. Первый сегмент всегда начинается с record header.
 func isClientHelloPacket(packet []byte, payloadOffset, payloadLen int) bool {
 	if payloadLen < 9 {
 		return false
 	}
 	p := packet[payloadOffset:]
+	// ContentType: Handshake (0x16)
 	if p[0] != 0x16 {
 		return false
 	}
+	// Version: TLS 1.0–1.3 (major=0x03, minor=0x00..0x04)
+	// TLS 1.3 передаётся как 0x0303 с supported_versions extension
 	if p[1] != 0x03 || p[2] > 0x04 {
 		return false
 	}
-	recordLen := int(binary.BigEndian.Uint16(p[3:5]))
-	if recordLen < 4 || 5+recordLen > len(p) {
-		return false
-	}
+	// HandshakeType: ClientHello = 0x01
+	// p[5] = HandshakeType (первый байт за record header)
 	if p[5] != 0x01 {
 		return false
 	}
+	// Длина handshake body (3-байтовое BE число)
 	hsLen := int(p[6])<<16 | int(p[7])<<8 | int(p[8])
-	return hsLen > 0 && hsLen <= recordLen-4
+	if hsLen <= 0 {
+		return false
+	}
+	// Старая проверка "5+recordLen > len(p)" отбрасывала фрагментированные ClientHello.
+	// Вместо этого: если первые 9 байт валидны — это ClientHello.
+	// Мы не парсим SNI из фрагментированного пакета, но применяем bypass.
+	return true
 }
 
 func (pm *PacketModifier) GetStats() ModifierStats {

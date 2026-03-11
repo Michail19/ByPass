@@ -155,12 +155,11 @@ func (d *Discovery) runDiscovery() {
 // Как это работает:
 //  1. SetTestOverride(domain, strategy.ID) — WinDivert pipeline начнёт применять
 //     эту стратегию ко всем пакетам с SNI == domain
-//  2. testConnection() — реальное TLS-соединение через ОС; пакеты перехватываются
+//  2. Для QUIC-стратегий дополнительно SetTestOverrideByIP() — SNI недоступен
+//     в QUIC-пакетах, поэтому override по hostname не сработает (#5).
+//  3. testConnection() — реальное TLS-соединение через ОС; пакеты перехватываются
 //     WinDivert и модифицируются согласно выбранной стратегии
-//  3. ClearTestOverride() — снимаем форсирование
-//
-// Таким образом результат теста отражает реальную эффективность стратегии
-// против DPI провайдера, а не просто доступность сервера.
+//  4. ClearTestOverride / ClearTestOverrideByIP — снимаем форсирование
 func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 	result := &DiscoveryResult{
 		StrategyID: strategy.ID,
@@ -172,8 +171,28 @@ func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 	d.manager.SetTestOverride(domain, strategy.ID)
 	defer d.manager.ClearTestOverride(domain)
 
-	log.Printf("[DISCOVERY] Testing strategy %d (%s) on %s:%d",
-		strategy.ID, strategy.Name, domain, port)
+	// Для QUIC-стратегий: резолвим IP домена и регистрируем override по IP (#5).
+	// QUIC-пакеты зашифрованы — SNI из них не извлечь, hostname в flow будет пустым.
+	// SelectStrategy для UDP проверяет testOverrides["ip:<addr>"] как fallback.
+	var resolvedIPs []string
+	if strategy.ApplyToQUIC || strategy.FakeQUICFile != "" {
+		if addrs, err := net.LookupHost(domain); err == nil {
+			for _, addr := range addrs {
+				d.manager.SetTestOverrideByIP(addr, strategy.ID)
+				resolvedIPs = append(resolvedIPs, addr)
+			}
+		} else {
+			log.Printf("[DISCOVERY] Warning: failed to resolve %s for QUIC override: %v", domain, err)
+		}
+		defer func() {
+			for _, addr := range resolvedIPs {
+				d.manager.ClearTestOverrideByIP(addr)
+			}
+		}()
+	}
+
+	log.Printf("[DISCOVERY] Testing strategy %d (%s) on %s:%d (QUIC IPs: %v)",
+		strategy.ID, strategy.Name, domain, port, resolvedIPs)
 
 	for i := 0; i < d.config.SamplesPerTest; i++ {
 		time.Sleep(d.config.TestInterval)

@@ -184,18 +184,26 @@ func (p *Pipeline) packetForwarder() {
 			workerIdx := p.hashPacketToWorker(packet.Data)
 			ch := p.workerChans[workerIdx]
 
-			select {
-			case ch <- packet:
-				// Успешно поставлен в очередь нужного воркера
-			default:
-				// Канал воркера переполнен — дропаем пакет.
-				// tempBuffer (старое решение) был опасен: 100 пакетов накапливались
-				// и потом выстреливали burst'ом, ломая TCP pacing.
-				// Дроп честнее: TCP retransmit восстановит потерянное.
-				p.updateStats(func(stats *PipelineStats) {
-					stats.PacketsDropped++
-				})
-				log.Printf("WARNING: Worker %d queue full, dropping packet", workerIdx)
+			// Приоритетный dispatch для SYN и TLS ClientHello (#6).
+			// При переполнении очереди data-пакеты дропаются сразу (TCP retransmit восстановит).
+			// SYN и ClientHello дропать нельзя: браузер ждёт retransmit timeout (1-3 сек)
+			// прежде чем повторить — это видимый пользователю фриз при каждом открытии страницы.
+			if isHandshakePacket(packet.Data) {
+				// Блокирующий send с небольшим timeout для handshake пакетов.
+				// 2ms достаточно чтобы воркер разгрузился; превышение означает перегрузку системы.
+				select {
+				case ch <- packet:
+				case <-time.After(2 * time.Millisecond):
+					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
+					log.Printf("WARNING: Worker %d queue full, dropping handshake packet after 2ms", workerIdx)
+				}
+			} else {
+				select {
+				case ch <- packet:
+				default:
+					// data-пакеты дропаем немедленно — TCP retransmit восстановит.
+					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
+				}
 			}
 		}
 	}
@@ -203,6 +211,41 @@ func (p *Pipeline) packetForwarder() {
 
 // hashPacketToWorker вычисляет индекс воркера для пакета на основе 5-tuple.
 // Использует XOR-хэш — без аллокаций, O(1), достаточно равномерный.
+// isHandshakePacket быстро определяет что пакет — SYN или TLS ClientHello (#6).
+// Используется при dispatch чтобы дать handshake пакетам приоритет перед data пакетами.
+// Намеренно inline и без аллокаций — вызывается в hot path packetForwarder.
+//
+// Детектируем:
+//   - TCP SYN: isSYN флаг в TCP заголовке (flags & 0x02)
+//   - TLS ClientHello: ContentType=0x16 (Handshake) + HandshakeType=0x01 (ClientHello)
+func isHandshakePacket(data []byte) bool {
+	if len(data) < 20 || data[0]>>4 != 4 {
+		return false
+	}
+	proto := data[9]
+	if proto != 6 { // только TCP
+		return false
+	}
+	ihl := int(data[0]&0x0F) * 4
+	if len(data) < ihl+20 {
+		return false
+	}
+	flags := data[ihl+13]
+	if flags&0x02 != 0 { // SYN
+		return true
+	}
+	// TLS ClientHello: payload[0]=0x16, payload[5]=0x01
+	tcpHdrLen := int(data[ihl+12]>>4) * 4
+	payloadOffset := ihl + tcpHdrLen
+	if len(data) >= payloadOffset+6 &&
+		data[payloadOffset] == 0x16 && // TLS ContentType: Handshake
+		data[payloadOffset+1] == 0x03 && // TLS major version
+		data[payloadOffset+5] == 0x01 { // HandshakeType: ClientHello
+		return true
+	}
+	return false
+}
+
 func (p *Pipeline) hashPacketToWorker(data []byte) int {
 	if p.workers <= 1 || len(data) < 20 {
 		return 0
@@ -283,17 +326,46 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// fixUDPChecksum обязателен — без него сервер/DPI дропнет пакет silently.
 	if protocol == 17 {
 		if dstPort == 443 {
-			strat := p.strategyMgr.SelectStrategy(dstIP.String(), "", 443, "udp")
+			// Передаём flow.Hostname вместо "":
+			//   - Если flow уже имеет hostname (из предыдущего TCP-соединения к тому же IP,
+			//     или если QUIC-поток позже обновит hostname) — testOverride из Discovery
+			//     корректно применится (#5).
+			//   - SelectStrategy приоритет: testOverride (по hostname) → isGoogleIP (по IP) →
+			//     bestForProtocol. Если hostname пуст — isGoogleIP всё равно сработает.
+			strat := p.strategyMgr.SelectStrategy(dstIP.String(), flow.Hostname, 443, "udp")
 			if strat != nil && strat.NeedsQUICFake() {
-				repeats := strat.FakeQUICRepeats
-				if repeats <= 0 {
-					repeats = 6
+				// Inject fake QUIC Initial только для первых пакетов handshake (#5).
+				// QUIC-соединение: 1-2 Initial пакета → handshake → тысячи data пакетов.
+				// Без ограничения: 6 fake × тысячи пакетов = throughput collapse.
+				flow.Mu.Lock()
+				alreadyInjected := flow.QUICFakeInjected
+				if !alreadyInjected {
+					flow.QUICFakeInjected = true
 				}
-				for i := 0; i < repeats; i++ {
-					fakePkt := buildFakeQUICPacket(pkt.Data, strat.FakeQUICFileData)
-					if fakePkt != nil {
-						p.sendModifiedPacket(fakePkt, pkt.Addr)
-						p.updateStats(func(stats *PipelineStats) { stats.PacketsModified++ })
+				flow.Mu.Unlock()
+
+				if !alreadyInjected {
+					repeats := strat.FakeQUICRepeats
+					if repeats <= 0 {
+						repeats = 6
+					}
+					// TTL для fake QUIC (#2): используем QUICttl если задан, иначе FakeTTL.
+					// Без TTL ограничения fake пакет доходит до Google QUIC сервера (TTL=64/128),
+					// Google может ответить Stateless Reset → connection retry → slow start.
+					// Цель: пакет доходит до DPI (1-3 hop), умирает до сервера (~6-10 hop).
+					fakeTTL := strat.QUICttl
+					if fakeTTL <= 0 {
+						fakeTTL = strat.FakeTTL
+					}
+					if fakeTTL <= 0 {
+						fakeTTL = 6 // zapret default: TTL=6
+					}
+					for i := 0; i < repeats; i++ {
+						fakePkt := buildFakeQUICPacket(pkt.Data, strat.FakeQUICFileData, fakeTTL)
+						if fakePkt != nil {
+							p.sendModifiedPacket(fakePkt, pkt.Addr)
+							p.updateStats(func(stats *PipelineStats) { stats.PacketsModified++ })
+						}
 					}
 				}
 			}
@@ -565,13 +637,14 @@ func calculateChecksum(data []byte) uint16 {
 //
 // Копирует IP и UDP заголовки из оригинального пакета (src/dst IP:port),
 // подставляет quicPayload как тело UDP, пересчитывает все длины и checksums.
+// fakeTTL устанавливается явно (#2): должен быть достаточно мал чтобы пакет
+// умер до QUIC сервера (~6-10 hop), но дошёл до DPI (обычно 1-3 hop от клиента).
+// Без TTL ограничения Google QUIC сервер получает fake, парсит его, отвечает
+// Stateless Reset → браузер делает connection retry → slow start.
 //
 // DPI видит fake QUIC Initial и теряет контекст перед реальным пакетом.
 // Реальный пакет реинжектируется без изменений после всех fake.
-//
-// Требования к quicPayload: содержимое quic_initial_*.bin — захваченный
-// QUIC Initial пакет (только QUIC payload, без IP/UDP заголовков).
-func buildFakeQUICPacket(original []byte, quicPayload []byte) []byte {
+func buildFakeQUICPacket(original []byte, quicPayload []byte, fakeTTL int) []byte {
 	if len(original) < 28 || len(quicPayload) == 0 {
 		return nil
 	}
@@ -598,6 +671,11 @@ func buildFakeQUICPacket(original []byte, quicPayload []byte) []byte {
 	// Сохраняем DF бит оригинала — fake не должен выделяться несоответствием флагов
 	pkt[6] = original[6]
 	pkt[7] = original[7]
+	// Устанавливаем fakeTTL (#2): оригинальный TTL (64 или 128) доходит до сервера.
+	// fakeTTL должен быть достаточно мал (обычно 6) чтобы умереть до QUIC сервера.
+	if fakeTTL > 0 && fakeTTL < 256 {
+		pkt[8] = byte(fakeTTL)
+	}
 
 	// UDP заголовок: src/dst порты из оригинала
 	copy(pkt[ipHdrLen:ipHdrLen+4], original[ipHdrLen:ipHdrLen+4])

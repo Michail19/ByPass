@@ -404,6 +404,23 @@ func (m *Manager) ClearTestOverride(hostname string) {
 	m.testOverridesMu.Unlock()
 }
 
+// SetTestOverrideByIP форсирует стратегию для конкретного IP.
+// Используется Discovery для QUIC-тестов: QUIC-пакеты не содержат SNI в открытом виде,
+// поэтому hostname-based override не срабатывает (#5).
+// Ключ в testOverrides: "ip:<addr>" — не конфликтует с hostname-ключами.
+func (m *Manager) SetTestOverrideByIP(ip string, strategyID int) {
+	m.testOverridesMu.Lock()
+	m.testOverrides["ip:"+ip] = strategyID
+	m.testOverridesMu.Unlock()
+}
+
+// ClearTestOverrideByIP снимает IP-based override.
+func (m *Manager) ClearTestOverrideByIP(ip string) {
+	m.testOverridesMu.Lock()
+	delete(m.testOverrides, "ip:"+ip)
+	m.testOverridesMu.Unlock()
+}
+
 // hostnameRules — сопоставление подстрок hostname с nameHint для поиска стратегии.
 // Проверки идут в порядке убывания специфичности (первое совпадение выигрывает).
 var hostnameRules = []struct {
@@ -514,19 +531,35 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 
 	// 0. Test override — форсированная стратегия от Discovery.
 	//    Проверяем ДО всех остальных правил чтобы результат теста был чистым.
+	//
+	//    Два варианта lookup (#5):
+	//    (a) По hostname — основной путь (TCP с извлечённым SNI)
+	//    (b) По IP — fallback для QUIC/UDP где SNI недоступен.
+	//        Discovery при тестировании QUIC-стратегии резолвит домен в IP
+	//        и регистрирует override по IP через SetTestOverrideByIP.
+	m.testOverridesMu.RLock()
+	var overrideStratID int
+	var hasOverride bool
 	if hostname != "" {
-		lower := strings.ToLower(hostname)
-		m.testOverridesMu.RLock()
-		overrideID, hasOverride := m.testOverrides[lower]
-		m.testOverridesMu.RUnlock()
-		if hasOverride {
-			m.mu.RLock()
-			s, exists := m.strategies[overrideID]
-			m.mu.RUnlock()
-			if exists {
-				log.Printf("[SELECT] TestOverride hostname='%s' → strategy %d (%s)", lower, s.ID, s.Name)
-				return s
-			}
+		overrideStratID, hasOverride = m.testOverrides[strings.ToLower(hostname)]
+	} else {
+		// hostname пустой — ищем по IP (путь для QUIC/UDP, где SNI недоступен) (#5)
+		overrideStratID, hasOverride = m.testOverrides["ip:"+ip]
+	}
+	m.testOverridesMu.RUnlock()
+
+	if hasOverride {
+		m.mu.RLock()
+		s, exists := m.strategies[overrideStratID]
+		m.mu.RUnlock()
+		if exists {
+			log.Printf("[SELECT] TestOverride %s → strategy %d (%s)", func() string {
+				if hostname != "" {
+					return "hostname='" + strings.ToLower(hostname) + "'"
+				}
+				return "IP='" + ip + "'"
+			}(), s.ID, s.Name)
+			return s
 		}
 	}
 

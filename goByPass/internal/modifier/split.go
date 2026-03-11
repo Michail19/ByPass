@@ -57,6 +57,7 @@ func (pm *PacketModifier) ApplySeqOvl(
 	ovlLen int,
 	pattern []byte,
 	splitPositions []int,
+	seqOvlTTL int, // TTL для seqovl-пакета (#SeqOvlTTL): должен умереть до сервера
 ) ([][]byte, error) {
 
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
@@ -93,6 +94,13 @@ func (pm *PacketModifier) ApplySeqOvl(
 	copy(ovlPkt[payloadOffset:], ovlData)
 	// DF: сохраняем из оригинала (#6) — ovlPkt скопирован из packet[:payloadOffset],
 	// packet[6] уже содержит оригинальные Flags+FragOffset.
+	//
+	// SeqOvl TTL: ovl-пакет должен умереть до сервера — иначе TCP стек сервера
+	// получает пакет с seq < ISN, который вне TCP-окна → RST или retransmit (#SeqOvlTTL).
+	// Используем seqOvlTTL (обычно DisorderTTL или FakeTTL из стратегии, default 6).
+	if seqOvlTTL > 0 {
+		ovlPkt[8] = byte(seqOvlTTL)
+	}
 	recalculateIPChecksum(ovlPkt)
 	FixTCPChecksum(ovlPkt)
 	results = append(results, ovlPkt)

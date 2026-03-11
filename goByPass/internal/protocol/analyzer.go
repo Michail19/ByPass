@@ -126,7 +126,7 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 	if len(payload) >= 5 && payload[0] == 0x16 && payload[1] == 0x03 {
 		// TLS Handshake или Application Data
 		info.IsTLS = true
-		info.IsHandshake = payload[5] == 0x01
+		info.IsHandshake = len(payload) > 5 && payload[5] == 0x01
 
 		if !info.IsHandshake {
 			return info, nil // Не handshake — не парсим SNI/ECH и т.д.
@@ -145,9 +145,31 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 			info.IsECH = true
 		}
 
-		if len(payload) < 150 && info.IsHandshake {
+		if len(payload) < 60 && info.IsHandshake {
+			// PossibleFragment: реальный TLS ClientHello ≥ 100-200 байт (extensions + session).
+			// Порог 150 (#3) был слишком велик — обычные ClientHello помечались как фрагменты.
+			// Порог 60 байт: payload короче 60 не может содержать полный ClientHello
+			// (version(2) + random(32) + session + ciphers + exts ≥ 60 байт minimum).
 			info.PossibleFragment = true
 		}
+	} else if isTLSFragment(payload) {
+		// Фрагментированный ClientHello (#1): первый пакет содержит только record header
+		// без HandshakeType byte, или TCP segmentation разбил ClientHello между пакетами.
+		//
+		// Пример:
+		//   packet1: 16 03 01 02 00   (TLS record header, recordLen=512)
+		//   packet2: 01 00 01 f4 ...  (HandshakeType=ClientHello + body)
+		//
+		// Старая проверка "payload[0]==0x16 && payload[1]==0x03" не ловила packet2.
+		// isTLSFragment: проверяет можно ли это быть началом TLS Handshake body.
+		//
+		// Для таких пакетов:
+		//   - IsTLS = true, IsHandshake = true (предположительно)
+		//   - SNI извлечь невозможно (нет record header) — hostname будет пустым
+		//   - pipeline применит bypass на основе flow.IsTLS уже установленного первым пакетом
+		info.IsTLS = true
+		info.IsHandshake = true
+		info.PossibleFragment = true
 	} else if bytes.HasPrefix(payload, []byte("GET ")) ||
 		bytes.HasPrefix(payload, []byte("POST ")) ||
 		bytes.HasPrefix(payload, []byte("HTTP/")) {
@@ -157,10 +179,14 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 			info.Host = host
 			log.Printf("[Analyzer] Extracted HTTP Host: %s", host)
 		}
-	} else if len(payload) >= 5 && (payload[0]&0xC0) == 0xC0 && dstPort == 443 {
+	} else if len(payload) >= 17 && (payload[0]&0xC0) == 0xC0 && dstPort == 443 {
 		// QUIC Long Header: top 2 bits = 11 → (byte & 0xC0) == 0xC0.
 		// Маска 0xF0 была неверной — она требовала bits[4..7]=0xC0, пропуская
 		// пакеты с type-specific bits != 0 (например, 0xD0, 0xE0, 0xFF).
+		//
+		// Минимальный размер QUIC Long Header (#2):
+		//   1 (flags) + 4 (version) + 1 (DCIL) + 1 (SCIL) + ... ≥ 17 байт.
+		//   Проверка len >= 5 давала false positives для DTLS, WireGuard, random UDP.
 		//
 		// Дополнительная проверка версии снижает false positives с DTLS и random UDP:
 		//   QUIC v1       = 0x00000001
@@ -433,4 +459,32 @@ func extractHTTPHost(data []byte) string {
 // IsTLS — простая проверка
 func IsTLS(data []byte) bool {
 	return len(data) >= 5 && data[0] == 0x16 && data[1] == 0x03
+}
+
+// isTLSFragment определяет что payload — фрагмент TLS ClientHello (#1).
+//
+// Ситуация: TCP segmentation разбил ClientHello между пакетами.
+// Первый пакет содержит record header (16 03 xx xx xx) + начало HandshakeType byte.
+// Второй пакет начинается прямо с HandshakeType=0x01 (ClientHello) и его 3-байтовой длины.
+//
+// Простая эвристика: если
+//   - payload[0] == 0x01 (HandshakeType: ClientHello)
+//   - payload длина >= 4 (HandshakeType + 3 байта длины)
+//   - handshake body length разумный (> 32, < 65535)
+//
+// это вероятно фрагмент ClientHello body.
+// False positives: некоторый двоичный мусор на порту 443 может совпасть,
+// но это лучше чем полностью пропустить фрагментированный ClientHello.
+func isTLSFragment(payload []byte) bool {
+	if len(payload) < 4 {
+		return false
+	}
+	// HandshakeType: ClientHello = 0x01
+	if payload[0] != 0x01 {
+		return false
+	}
+	// 3-байтовая длина handshake body
+	hsLen := int(payload[1])<<16 | int(payload[2])<<8 | int(payload[3])
+	// ClientHello body минимум ~38 байт, максимум ~16000 байт
+	return hsLen >= 38 && hsLen <= 16000
 }
