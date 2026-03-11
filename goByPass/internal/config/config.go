@@ -4,6 +4,37 @@ import (
 	"time"
 )
 
+// HostnameRuleConfig правило маршрутизации hostname→стратегия в конфиге.
+//
+// Определено в пакете config (а не strategy) чтобы избежать циклического импорта.
+// В main.go конвертируется в []strategy.HostnameRule перед передачей в Manager.
+//
+// Пример YAML:
+//
+//	hostname_rules:
+//	  - pattern: "*.youtube.com"
+//	    strategy: "yt-discord-2026-zapret"
+//	    comment: "YouTube основной"
+//	  - pattern: "*.discord.com"
+//	    strategy: "discord-2026"
+type HostnameRuleConfig struct {
+	// Pattern — SNI/Host паттерн.
+	// "*.youtube.com" → wildcard (любой субдомен + bare domain)
+	// "youtube.com"   → точное совпадение
+	Pattern string `yaml:"pattern" json:"pattern"`
+
+	// Strategy — подстрока имени стратегии из strategies.json.
+	// Приоритет над StrategyID.
+	Strategy string `yaml:"strategy" json:"strategy"`
+
+	// StrategyID — числовой ID стратегии.
+	// Используется если Strategy не задан или не найден.
+	StrategyID int `yaml:"strategy_id,omitempty" json:"strategy_id,omitempty"`
+
+	// Comment — произвольный комментарий, выводится в лог при старте.
+	Comment string `yaml:"comment,omitempty" json:"comment,omitempty"`
+}
+
 // Config основная конфигурация приложения
 type Config struct {
 	App       AppConfig       `yaml:"app" json:"app"`
@@ -28,10 +59,10 @@ type AppConfig struct {
 
 // CaptureConfig конфигурация захвата
 type CaptureConfig struct {
-	Type         string        `yaml:"type" json:"type"`               // "nfqueue", "windivert", "pcap"
-	QueueNum     int           `yaml:"queue_num" json:"queue_num"`     // номер очереди NFQUEUE
-	BufferSize   int           `yaml:"buffer_size" json:"buffer_size"` // размер буфера
-	Interface    string        `yaml:"interface" json:"interface"`     // интерфейс (пустая строка = все)
+	Type         string        `yaml:"type" json:"type"`
+	QueueNum     int           `yaml:"queue_num" json:"queue_num"`
+	BufferSize   int           `yaml:"buffer_size" json:"buffer_size"`
+	Interface    string        `yaml:"interface" json:"interface"`
 	MaxPacketLen int           `yaml:"max_packet_len" json:"max_packet_len"`
 	Promiscuous  bool          `yaml:"promiscuous" json:"promiscuous"`
 	Timeout      time.Duration `yaml:"timeout" json:"timeout"`
@@ -39,18 +70,18 @@ type CaptureConfig struct {
 
 // FirewallConfig конфигурация файрвола
 type FirewallConfig struct {
-	Backend       string   `yaml:"backend" json:"backend"`             // "iptables", "nftables", "auto"
-	Ports         []int    `yaml:"ports" json:"ports"`                 // порты для обработки (80,443)
-	Direction     string   `yaml:"direction" json:"direction"`         // "outgoing", "incoming", "both"
-	ExcludeIPs    []string `yaml:"exclude_ips" json:"exclude_ips"`     // исключить IP
-	ExcludePorts  []int    `yaml:"exclude_ports" json:"exclude_ports"` // исключить порты
+	Backend       string   `yaml:"backend" json:"backend"`
+	Ports         []int    `yaml:"ports" json:"ports"`
+	Direction     string   `yaml:"direction" json:"direction"`
+	ExcludeIPs    []string `yaml:"exclude_ips" json:"exclude_ips"`
+	ExcludePorts  []int    `yaml:"exclude_ports" json:"exclude_ports"`
 	CleanupOnExit bool     `yaml:"cleanup_on_exit" json:"cleanup_on_exit"`
 }
 
 // ConntrackConfig конфигурация отслеживания потоков
 type ConntrackConfig struct {
-	Timeout         time.Duration `yaml:"timeout" json:"timeout"`     // таймаут потока
-	MaxFlows        int           `yaml:"max_flows" json:"max_flows"` // максимум потоков
+	Timeout         time.Duration `yaml:"timeout" json:"timeout"`
+	MaxFlows        int           `yaml:"max_flows" json:"max_flows"`
 	CleanupInterval time.Duration `yaml:"cleanup_interval" json:"cleanup_interval"`
 }
 
@@ -66,15 +97,22 @@ type CacheConfig struct {
 		Enabled bool          `yaml:"enabled" json:"enabled"`
 		TTL     time.Duration `yaml:"ttl" json:"ttl"`
 		MaxSize int           `yaml:"max_size" json:"max_size"`
-		Preload []string      `yaml:"preload" json:"preload"` // домены для предзагрузки
+		Preload []string      `yaml:"preload" json:"preload"`
 	} `yaml:"domain_cache" json:"domain_cache"`
 }
 
 // StrategyConfig конфигурация стратегий
 type StrategyConfig struct {
-	DefaultStrategy string `yaml:"default_strategy" json:"default_strategy"` // имя стратегии по умолчанию
-	StrategyFile    string `yaml:"strategy_file" json:"strategy_file"`       // файл с кастомными стратегиями
-	AutoDiscovery   struct {
+	DefaultStrategy string `yaml:"default_strategy" json:"default_strategy"`
+	StrategyFile    string `yaml:"strategy_file" json:"strategy_file"`
+
+	// HostnameRules — статические правила hostname→стратегия.
+	// FIX #12: поле добавлено — main.go ссылается на cfg.Strategy.HostnameRules.
+	// Если список пуст — main.go использует встроенные дефолты (defaultHostnameRules()).
+	// Тип: []HostnameRuleConfig (не strategy.HostnameRule) во избежание циклического импорта.
+	HostnameRules []HostnameRuleConfig `yaml:"hostname_rules" json:"hostname_rules"`
+
+	AutoDiscovery struct {
 		Enabled        bool     `yaml:"enabled" json:"enabled"`
 		TestDomains    []string `yaml:"test_domains" json:"test_domains"`
 		TestPorts      []int    `yaml:"test_ports" json:"test_ports"`
@@ -93,19 +131,19 @@ type PipelineConfig struct {
 
 // SenderConfig конфигурация отправителя
 type SenderConfig struct {
-	Type        string        `yaml:"type" json:"type"`               // "raw", "pcap", "tun"
-	Interface   string        `yaml:"interface" json:"interface"`     // интерфейс отправки
-	BufferSize  int           `yaml:"buffer_size" json:"buffer_size"` // размер буфера
+	Type        string        `yaml:"type" json:"type"`
+	Interface   string        `yaml:"interface" json:"interface"`
+	BufferSize  int           `yaml:"buffer_size" json:"buffer_size"`
 	SendTimeout time.Duration `yaml:"send_timeout" json:"send_timeout"`
-	BatchSize   int           `yaml:"batch_size" json:"batch_size"` // пакетов в батче
+	BatchSize   int           `yaml:"batch_size" json:"batch_size"`
 }
 
 // LoggingConfig конфигурация логирования
 type LoggingConfig struct {
-	Level      string `yaml:"level" json:"level"`             // debug, info, warn, error
-	Output     string `yaml:"output" json:"output"`           // stdout, stderr, file
-	FilePath   string `yaml:"file_path" json:"file_path"`     // путь к файлу лога
-	MaxSize    int    `yaml:"max_size" json:"max_size"`       // максимальный размер файла (MB)
-	MaxBackups int    `yaml:"max_backups" json:"max_backups"` // количество бэкапов
-	Compress   bool   `yaml:"compress" json:"compress"`       // сжимать ли бэкапы
+	Level      string `yaml:"level" json:"level"`
+	Output     string `yaml:"output" json:"output"`
+	FilePath   string `yaml:"file_path" json:"file_path"`
+	MaxSize    int    `yaml:"max_size" json:"max_size"`
+	MaxBackups int    `yaml:"max_backups" json:"max_backups"`
+	Compress   bool   `yaml:"compress" json:"compress"`
 }

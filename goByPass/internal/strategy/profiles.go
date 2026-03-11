@@ -1,14 +1,21 @@
 package strategy
 
+import "log"
+
 // loadDefaultStrategies загружает встроенные стратегии.
-// Все стратегии используют новую систему: Fooling-битмаска вместо FakeMode,
-// SeqOvl вместо SplitAfterSNI/SplitFirstByte, SynData/MultiDisorder вместо DisorderReverseFrag.
+// FIX #8: AddStrategy возвращает ошибку если ID уже занят.
+// Используем mustAdd — паникует при дублировании ID (ошибка программиста, не рантайм).
 func (m *Manager) loadDefaultStrategies() {
+
+	mustAdd := func(s *Strategy) {
+		if err := m.AddStrategy(s); err != nil {
+			log.Panicf("[Profiles] Failed to add built-in strategy id=%d name=%q: %v", s.ID, s.Name, err)
+		}
+	}
 
 	// ── 1. Passthrough ────────────────────────────────────────────────────────
 	// Priority: 999999 — никогда не выбирается в fallback-цикле.
-	// Используется только явно из pipeline как «ничего не делать».
-	m.AddStrategy(&Strategy{
+	mustAdd(&Strategy{
 		ID:          1,
 		Name:        "passthrough",
 		Description: "Без модификаций (для тестов)",
@@ -20,7 +27,7 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	// ── 2. Light — split pos=1 + hostcase ─────────────────────────────────────
-	m.AddStrategy(&Strategy{
+	mustAdd(&Strategy{
 		ID:                     2,
 		Name:                   "light",
 		Description:            "Лёгкий: split 1 байт + hostcase",
@@ -36,7 +43,7 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	// ── 3. Medium — split 1+5 + fake TS ──────────────────────────────────────
-	m.AddStrategy(&Strategy{
+	mustAdd(&Strategy{
 		ID:                     3,
 		Name:                   "medium",
 		Description:            "Средний: split 1+5 + fake fooling=ts",
@@ -55,7 +62,7 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	// ── 4. Hard — split + disorder OOB + fake TS ──────────────────────────────
-	m.AddStrategy(&Strategy{
+	mustAdd(&Strategy{
 		ID:                     4,
 		Name:                   "hard",
 		Description:            "Жёсткий: split + disorder OOB + fake fooling=ts",
@@ -75,7 +82,7 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	// ── 12. Telegram — split 1+5 + fake TS + TLS record split ─────────────────
-	m.AddStrategy(&Strategy{
+	mustAdd(&Strategy{
 		ID:                     12,
 		Name:                   "telegram",
 		Description:            "Telegram: split 1+5 + fake TS + TLS record split",
@@ -96,8 +103,7 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	// ── 20. YouTube 2026 — multisplit seqovl=681 + fake TS + disorder OOB ─────
-	// Аналог general.bat: multisplit seqovl=681 pos=1 (tls_clienthello_www_google_com.bin)
-	m.AddStrategy(&Strategy{
+	mustAdd(&Strategy{
 		ID:          20,
 		Name:        "youtube-2026",
 		Description: "YouTube 2026: multisplit seqovl=681 + fake fooling=ts + disorder OOB",
@@ -105,18 +111,15 @@ func (m *Manager) loadDefaultStrategies() {
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		// multisplit (seqovl)
 		SplitMode:         SplitSeqOvl,
 		SplitPositions:    []int{1},
 		SeqOvlLen:         681,
 		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
 
-		// disorder
 		DisorderMode: DisorderOutOfBand,
 		DisorderPos:  []int{1},
 		DisorderTTL:  1,
 
-		// fake
 		Fooling:     FoolingTS,
 		FakeTTL:     6,
 		FakeRepeats: 6,
@@ -124,7 +127,6 @@ func (m *Manager) loadDefaultStrategies() {
 			"tls_clienthello_www_google_com.bin",
 		},
 
-		// QUIC
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 
@@ -133,8 +135,8 @@ func (m *Manager) loadDefaultStrategies() {
 		ModifyFirstDataPackets: 4,
 	})
 
-	// ── 21. Discord 2026 — split 1+5 + fake TS + TLS record split ─────────────
-	m.AddStrategy(&Strategy{
+	// ── 21. Discord 2026 ───────────────────────────────────────────────────────
+	mustAdd(&Strategy{
 		ID:             21,
 		Name:           "discord-2026",
 		Description:    "Discord: split 1+5 + fake fooling=ts + TLS record split",
@@ -154,23 +156,19 @@ func (m *Manager) loadDefaultStrategies() {
 		Priority:       2,
 	})
 
-	// ── 25. yt-discord-2026-zapret — multisplit seqovl=681 + fake + fooling=ts ──
-	// Аналог general.bat (основной рабочий пресет):
-	// multisplit seqovl=681 pos=1 fooling=ts repeats=6 tls=google+stun
-	m.AddStrategy(&Strategy{
+	// ── 25. yt-discord-2026-zapret — основной рабочий пресет 2026 ─────────────
+	mustAdd(&Strategy{
 		ID:          25,
 		Name:        "yt-discord-2026-zapret",
 		Description: "TSPU 2026: multisplit seqovl=681 + fake fooling=ts x6 (аналог zapret general.bat)",
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		// multisplit seqovl
 		SplitMode:         SplitSeqOvl,
 		SplitPositions:    []int{1},
 		SeqOvlLen:         681,
 		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
 
-		// fake
 		Fooling:     FoolingTS,
 		FakeTTL:     6,
 		FakeRepeats: 6,
@@ -180,16 +178,14 @@ func (m *Manager) loadDefaultStrategies() {
 		},
 		FakeHTTPFile: "tls_clienthello_max_ru.bin",
 
-		// QUIC
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 
 		Priority: 1,
 	})
 
-	// ── 60. syndata+multidisorder — агрессивный режим (ALT5) ─────────────────
-	// NOT RECOMMENDED: не работает на некоторых провайдерах
-	m.AddStrategy(&Strategy{
+	// ── 60. syndata+multidisorder — агрессивный режим ──────────────────────────
+	mustAdd(&Strategy{
 		ID:            60,
 		Name:          "syndata-multidisorder",
 		Description:   "syndata+multidisorder (агрессивный, НЕ РЕКОМЕНДУЕТСЯ — ALT5)",

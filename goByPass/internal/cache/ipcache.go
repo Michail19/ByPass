@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// defaultCacheTTL используется если TTL не задан или равен нулю.
+// FIX #10: time.NewTicker(0) паникует — нужен ненулевой интервал.
+const defaultCacheTTL = 30 * time.Minute
+
 // IPCacheEntry запись в кэше IP (неизменяемая копия для внешнего использования)
 type IPCacheEntry struct {
 	IP           string
@@ -46,8 +50,18 @@ type CacheStats struct {
 	TotalEntries uint64
 }
 
-// NewIPCache создает новый IP-кэш
+// NewIPCache создает новый IP-кэш.
+// FIX #10: если ttl <= 0 — используем defaultCacheTTL вместо того чтобы передавать 0
+// в time.NewTicker (panic: non-positive interval for NewTicker).
 func NewIPCache(ttl time.Duration, maxSize int) *IPCache {
+	if ttl <= 0 {
+		log.Printf("[IPCache] Warning: invalid TTL %v, using default %v", ttl, defaultCacheTTL)
+		ttl = defaultCacheTTL
+	}
+	if maxSize <= 0 {
+		maxSize = 10000
+	}
+
 	c := &IPCache{
 		entries: make(map[string]*internalEntry),
 		ttl:     ttl,
@@ -55,7 +69,6 @@ func NewIPCache(ttl time.Duration, maxSize int) *IPCache {
 		stopCh:  make(chan struct{}),
 	}
 
-	// Запускаем очистку
 	go c.cleanupLoop()
 
 	return c
@@ -83,7 +96,6 @@ func (c *IPCache) Get(ip string) (*IPCacheEntry, bool) {
 		return nil, false
 	}
 
-	// Обновляем статистику и возвращаем копию
 	c.updateHits(entry)
 
 	return &IPCacheEntry{
@@ -109,7 +121,6 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Проверяем размер кэша
 	if len(c.entries) >= c.maxSize {
 		c.evictOldest()
 	}
@@ -117,7 +128,6 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 	now := time.Now()
 
 	if entry, exists := c.entries[ip]; exists {
-		// Обновляем существующую запись
 		entry.Hits++
 		entry.LastSeen = now
 		entry.Hostname = hostname
@@ -125,7 +135,6 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 		entry.StrategyID = strategyID
 		entry.expireAt = now.Add(c.ttl)
 	} else {
-		// Создаем новую запись
 		c.entries[ip] = &internalEntry{
 			IPCacheEntry: &IPCacheEntry{
 				IP:           ip,
@@ -157,7 +166,7 @@ func (c *IPCache) Delete(ip string) {
 	c.mu.Unlock()
 }
 
-// InvalidateByStrategy удаляет все записи, связанные с указанной стратегией, возвращает количество удалённых записей
+// InvalidateByStrategy удаляет все записи с указанной стратегией
 func (c *IPCache) InvalidateByStrategy(strategyID int) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -177,26 +186,24 @@ func (c *IPCache) InvalidateByStrategy(strategyID int) int {
 	return count
 }
 
-// UpdateLatency обновляет информацию о задержке
+// UpdateLatency обновляет информацию о задержке (EMA α=0.3)
 func (c *IPCache) UpdateLatency(ip string, latency time.Duration, loss float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if entry, exists := c.entries[ip]; exists {
-		// Экспоненциальное скользящее среднее с защитой от переполнения
 		if entry.AvgLatency == 0 {
 			entry.AvgLatency = latency
 			entry.PacketLoss = loss
 		} else {
-			avgLatency := float64(entry.AvgLatency)
-			newLatency := float64(latency)
-			entry.AvgLatency = time.Duration(avgLatency*0.7 + newLatency*0.3)
+			entry.AvgLatency = time.Duration(float64(entry.AvgLatency)*0.7 + float64(latency)*0.3)
 			entry.PacketLoss = entry.PacketLoss*0.7 + loss*0.3
 		}
 	}
 }
 
-// cleanupLoop периодически удаляет устаревшие записи
+// cleanupLoop периодически удаляет устаревшие записи.
+// FIX #10: ticker interval = ttl/10, но ttl уже проверен в NewIPCache (> 0).
 func (c *IPCache) cleanupLoop() {
 	ticker := time.NewTicker(c.ttl / 10)
 	defer ticker.Stop()
@@ -260,7 +267,6 @@ func (c *IPCache) Clear() {
 	c.mu.Unlock()
 }
 
-// Вспомогательные методы для обновления статистики с блокировками
 func (c *IPCache) updateMisses() {
 	c.mu.Lock()
 	c.stats.Misses++

@@ -43,9 +43,15 @@ type Manager struct {
 	lastUpdateTime time.Time
 	updateErr      error
 
+	// hostnameRules — статические правила hostname→strategy.
+	// Загружаются один раз при старте через SetHostnameRules().
+	// Имеют приоритет над testOverrides, IP-кэшем и дефолтным fallback.
+	// FIX #1/#2: тип *hostnameRules (не var), инициализируется в NewManager.
+	hostnameRules *hostnameRules
+
 	// testOverrides используется только Discovery для временного форсирования
 	// конкретной стратегии при тестовом соединении к домену.
-	// SelectStrategy проверяет его первым — ДО IP и hostname rules.
+	// SelectStrategy проверяет его ПОСЛЕ hostnameRules — ДО IP и hostname fallback.
 	// Ключ: hostname в нижнем регистре. Значение: ID стратегии.
 	testOverrides   map[string]int
 	testOverridesMu sync.RWMutex
@@ -70,6 +76,12 @@ func NewManager() *Manager {
 		googleRanges:  make([]*net.IPNet, 0),
 		cidrIndex:     make(map[byte][]*net.IPNet),
 		testOverrides: make(map[string]int),
+	}
+
+	// FIX #2: hostnameRules — pointer, необходима явная инициализация.
+	// Было: m.hostnameRules.byExact = make(...) → nil ptr dereference panic.
+	m.hostnameRules = &hostnameRules{
+		byExact: make(map[string]int),
 	}
 
 	// Загружаем стратегии по умолчанию
@@ -102,27 +114,18 @@ func (m *Manager) startGoogleIPUpdater() {
 	}
 }
 
-// fallbackRanges ...
+// fallbackRanges используется когда онлайн-источники недоступны
 var fallbackRanges = []string{
 	// Минимальный набор для YouTube (актуально на 2026)
 	"8.8.4.0/24",
 	"8.8.8.0/24",
 	"8.34.208.0/20",
 	"8.35.192.0/20",
-	"8.228.0.0/14",
-	"8.232.0.0/14",
-	"8.236.0.0/15",
 	"23.236.48.0/20",
 	"23.251.128.0/19",
 	"34.0.0.0/15",
 	"34.2.0.0/16",
 	"34.3.0.0/23",
-	"34.3.3.0/24",
-	"34.3.4.0/24",
-	"34.3.8.0/21",
-	"34.3.16.0/20",
-	"34.3.32.0/19",
-	"34.3.64.0/18",
 	"34.4.0.0/14",
 	"34.8.0.0/13",
 	"34.16.0.0/12",
@@ -139,66 +142,35 @@ var fallbackRanges = []string{
 	"35.208.0.0/12",
 	"35.224.0.0/12",
 	"35.240.0.0/13",
-	"35.252.0.0/14",
 	"64.15.112.0/20",
 	"64.233.112.0/20",
-	"70.32.112.0/20",
-	"74.114.24.0/21",
-	"104.154.0.0/15",
-	"104.196.0.0/14",
-	"104.237.160.0/19",
-	"107.167.160.0/19",
-	"107.178.192.0/18",
-	"108.59.80.0/20",
-	"108.170.192.0/18",
-	"74.125.0.0/16",
-	"142.250.0.0/15",
-	"172.217.0.0/16",
-	"172.253.0.0/16",
-	"173.194.0.0/16",
-	"209.85.128.0/17",
-	"216.58.192.0/19",
-	"216.239.32.0/19",
 	"64.233.160.0/19",
 	"66.102.0.0/20",
 	"66.249.64.0/19",
+	"70.32.112.0/20",
 	"72.14.192.0/18",
+	"74.114.24.0/21",
+	"74.125.0.0/16",
+	"104.154.0.0/15",
+	"104.196.0.0/14",
+	"108.59.80.0/20",
+	"108.170.192.0/18",
 	"108.177.0.0/17",
 	"130.211.0.0/16",
-	"136.22.2.0/23",
-	"136.22.4.0/23",
-	"136.22.8.0/22",
-	"136.22.160.0/20",
-	"136.22.176.0/21",
-	"136.22.184.0/23",
-	"136.22.186.0/24",
-	"136.23.48.0/20",
-	"136.23.64.0/18",
-	"136.64.0.0/11",
-	"136.107.0.0/16",
-	"136.108.0.0/14",
-	"136.112.0.0/13",
-	"136.120.0.0/22",
-	"136.124.0.0/15",
 	"142.250.0.0/15",
 	"146.148.0.0/17",
-	"162.120.128.0/17",
 	"162.216.148.0/22",
 	"162.222.176.0/21",
 	"172.110.32.0/21",
 	"172.217.0.0/16",
 	"172.253.0.0/16",
 	"173.194.0.0/16",
-	"173.255.112.0/20",
-	"192.104.160.0/23",
 	"192.158.28.0/22",
 	"192.178.0.0/15",
-	"193.186.4.0/24",
 	"199.36.154.0/23",
 	"199.36.156.0/24",
 	"199.192.112.0/22",
 	"199.223.232.0/21",
-	"207.175.0.0/16",
 	"207.223.160.0/20",
 	"208.65.152.0/22",
 	"208.68.108.0/22",
@@ -208,7 +180,6 @@ var fallbackRanges = []string{
 	"216.58.192.0/19",
 	"216.73.80.0/20",
 	"216.239.32.0/19",
-	"216.252.220.0/22",
 }
 
 // updateGoogleIPRanges — полный rewrite с диагностикой и retry
@@ -302,7 +273,6 @@ func (m *Manager) updateGoogleIPRanges() {
 			continue
 		}
 		newRanges = append(newRanges, netw)
-		// Индексируем по первому октету (IPv4 хранится в последних 4 байтах IP в Go)
 		if ip4 := netw.IP.To4(); ip4 != nil {
 			octet := ip4[0]
 			newIndex[octet] = append(newIndex[octet], netw)
@@ -316,7 +286,8 @@ func (m *Manager) updateGoogleIPRanges() {
 	m.updateErr = nil
 	m.rangesMu.Unlock()
 
-	log.Printf("[GoogleIP] Loaded %d IPv4 ranges (fallback=%t)", len(newRanges), len(allPrefixes) == len(fallbackRanges))
+	usingFallback := len(allPrefixes) == len(fallbackRanges)
+	log.Printf("[GoogleIP] Loaded %d IPv4 ranges (fallback=%t)", len(newRanges), usingFallback)
 }
 
 // isGoogleIP проверяет, входит ли IP в диапазоны Google/YouTube.
@@ -336,14 +307,12 @@ func (m *Manager) isGoogleIP(ipStr string) bool {
 	defer m.rangesMu.RUnlock()
 
 	if len(m.cidrIndex) == 0 {
-		log.Printf("[GoogleIP] No ranges loaded, using hostname fallback")
 		return false
 	}
 
-	// Быстрая проверка по первому октету
 	candidates, ok := m.cidrIndex[ip4[0]]
 	if !ok {
-		return false // нет ни одной сети с таким первым октетом
+		return false
 	}
 
 	for _, cidr := range candidates {
@@ -365,7 +334,6 @@ func (m *Manager) AddStrategy(strategy *Strategy) error {
 	defer m.mu.Unlock()
 
 	if strategy.ID == 0 {
-		// Генерируем ID
 		strategy.ID = len(m.strategies) + 1
 	}
 
@@ -379,7 +347,8 @@ func (m *Manager) AddStrategy(strategy *Strategy) error {
 	return nil
 }
 
-// GetStrategy возвращает стратегию по ID
+// GetStrategy возвращает стратегию по ID.
+// Возвращает (nil, false) если стратегия не найдена.
 func (m *Manager) GetStrategy(id int) (*Strategy, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -390,7 +359,6 @@ func (m *Manager) GetStrategy(id int) (*Strategy, bool) {
 
 // SetTestOverride временно форсирует стратегию strategyID для hostname.
 // Используется Discovery: вызвать перед тестовым соединением, ClearTestOverride — после.
-// Потокобезопасно.
 func (m *Manager) SetTestOverride(hostname string, strategyID int) {
 	m.testOverridesMu.Lock()
 	m.testOverrides[strings.ToLower(hostname)] = strategyID
@@ -405,9 +373,8 @@ func (m *Manager) ClearTestOverride(hostname string) {
 }
 
 // SetTestOverrideByIP форсирует стратегию для конкретного IP.
-// Используется Discovery для QUIC-тестов: QUIC-пакеты не содержат SNI в открытом виде,
-// поэтому hostname-based override не срабатывает (#5).
-// Ключ в testOverrides: "ip:<addr>" — не конфликтует с hostname-ключами.
+// Используется Discovery для QUIC-тестов: QUIC-пакеты не содержат SNI.
+// Ключ: "ip:<addr>" — не конфликтует с hostname-ключами.
 func (m *Manager) SetTestOverrideByIP(ip string, strategyID int) {
 	m.testOverridesMu.Lock()
 	m.testOverrides["ip:"+ip] = strategyID
@@ -421,9 +388,13 @@ func (m *Manager) ClearTestOverrideByIP(ip string) {
 	m.testOverridesMu.Unlock()
 }
 
-// hostnameRules — сопоставление подстрок hostname с nameHint для поиска стратегии.
-// Проверки идут в порядке убывания специфичности (первое совпадение выигрывает).
-var hostnameRules = []struct {
+// FIX #1: переименовали package-level var с hostnameRules → builtinHostnameMappings,
+// чтобы устранить конфликт имён с типом hostnameRules (hostname_rules.go).
+// Было: var hostnameRules = []struct{...}  ← compile error: redeclared in this block.
+//
+// builtinHostnameMappings — таблица «содержит подстроку → nameHint для стратегии».
+// Используется в SelectStrategy шаг 2 (после hostnameRules и testOverrides).
+var builtinHostnameMappings = []struct {
 	hostnameContains string // подстрока в hostname (lowercase)
 	stratNameHint    string // подстрока в имени стратегии
 }{
@@ -447,9 +418,7 @@ var hostnameRules = []struct {
 	{".t.me", "telegram"},
 }
 
-// protocolMatches — проверяет применимость стратегии к протоколу/порту.
-// TCP-стратегия: ApplyToTLS || ApplyToHTTP (не QUIC-only).
-// UDP-стратегия: ApplyToQUIC && port==443 (строго — DNS и прочий UDP не перехватываем).
+// protocolMatches проверяет применимость стратегии к протоколу/порту.
 func protocolMatches(s *Strategy, protocol string, port int) bool {
 	switch protocol {
 	case "tcp":
@@ -497,6 +466,28 @@ func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strateg
 	return best
 }
 
+// findByName ищет стратегию по подстроке имени без фильтрации по протоколу.
+// Используется hostname_rules.go при компиляции правил (SetHostnameRules),
+// когда protocol/port ещё неизвестны.
+// Вызывается под m.mu.RLock.
+func (m *Manager) findByName(nameHint string) *Strategy {
+	var best *Strategy
+	bestPri := int(^uint(0) >> 1)
+	for _, s := range m.strategies {
+		if isPassthrough(s) {
+			continue
+		}
+		if !strings.Contains(s.Name, nameHint) {
+			continue
+		}
+		if s.Priority < bestPri {
+			best = s
+			bestPri = s.Priority
+		}
+	}
+	return best
+}
+
 // bestForProtocol выбирает лучшую (наименьший Priority) не-passthrough стратегию
 // для данного протокола. Вызывается под m.mu.RLock.
 func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
@@ -520,30 +511,33 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 // SelectStrategy выбирает стратегию для пакета.
 //
 // Порядок приоритетов:
-//  1. IP входит в диапазоны Google → лучшая "google" стратегия (по nameHint)
-//  2. Hostname содержит известный домен → стратегия по nameHint из hostnameRules
-//  3. Fallback: лучшая по Priority не-passthrough стратегия для данного протокола
-//
-// Стратегии ищутся по подстроке имени — числовые ID не хардкодируются,
-// что позволяет загружать strategies.json с любыми ID без правки кода.
+//  0. HostnameRules (SetHostnameRules) — статические правила, абсолютный приоритет
+//  1. testOverrides — форсирование от Discovery (hostname или IP)
+//  2. Google IP диапазоны → стратегия по nameHint "google"/"quic"
+//  3. builtinHostnameMappings — hostname содержит известную подстроку
+//  4. Fallback: лучшая по Priority не-passthrough стратегия для данного протокола
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
 	log.Printf("[SELECT] IP=%s:%d hostname='%s' proto=%s", ip, port, hostname, protocol)
 
-	// 0. Test override — форсированная стратегия от Discovery.
-	//    Проверяем ДО всех остальных правил чтобы результат теста был чистым.
-	//
-	//    Два варианта lookup (#5):
-	//    (a) По hostname — основной путь (TCP с извлечённым SNI)
-	//    (b) По IP — fallback для QUIC/UDP где SNI недоступен.
-	//        Discovery при тестировании QUIC-стратегии резолвит домен в IP
-	//        и регистрирует override по IP через SetTestOverrideByIP.
+	// ── 0. Hostname Rules (абсолютный приоритет) ─────────────────────────────
+	// Статические правила из SetHostnameRules: youtube.com → yt-discord-2026-zapret, etc.
+	// Проверяются ДО discovery overrides — гарантируют стабильную стратегию.
+	if hostname != "" {
+		if s := m.hostnameRuleStrategy(hostname); s != nil {
+			log.Printf("[SELECT] HostnameRule '%s' → strategy %d (%s)", hostname, s.ID, s.Name)
+			return s
+		}
+	}
+
+	// ── 1. Test override — форсированная стратегия от Discovery ──────────────
+	// (a) По hostname — основной путь (TCP с извлечённым SNI)
+	// (b) По IP — fallback для QUIC/UDP где SNI недоступен
 	m.testOverridesMu.RLock()
 	var overrideStratID int
 	var hasOverride bool
 	if hostname != "" {
 		overrideStratID, hasOverride = m.testOverrides[strings.ToLower(hostname)]
 	} else {
-		// hostname пустой — ищем по IP (путь для QUIC/UDP, где SNI недоступен) (#5)
 		overrideStratID, hasOverride = m.testOverrides["ip:"+ip]
 	}
 	m.testOverridesMu.RUnlock()
@@ -553,12 +547,11 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		s, exists := m.strategies[overrideStratID]
 		m.mu.RUnlock()
 		if exists {
-			log.Printf("[SELECT] TestOverride %s → strategy %d (%s)", func() string {
-				if hostname != "" {
-					return "hostname='" + strings.ToLower(hostname) + "'"
-				}
-				return "IP='" + ip + "'"
-			}(), s.ID, s.Name)
+			label := "IP='" + ip + "'"
+			if hostname != "" {
+				label = "hostname='" + strings.ToLower(hostname) + "'"
+			}
+			log.Printf("[SELECT] TestOverride %s → strategy %d (%s)", label, s.ID, s.Name)
 			return s
 		}
 	}
@@ -566,28 +559,26 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// 1. Google IP — самый надёжный признак для YouTube/CDN
-	//    (hostname может быть пустым на первых пакетах потока)
+	// ── 2. Google IP — надёжный признак для YouTube/CDN ─────────────────────
 	if m.isGoogleIP(ip) {
 		hint := "google"
 		if protocol == "udp" {
-			hint = "quic" // QUIC fake стратегии называются "quic-fake-*"
+			hint = "quic"
 		}
 		if s := m.selectByNameHint(hint, protocol, port); s != nil {
 			log.Printf("[SELECT] Google IP %s → strategy %d (%s)", ip, s.ID, s.Name)
 			return s
 		}
-		// google-стратегия не найдена — берём лучшую для протокола
 		if s := m.bestForProtocol(protocol, port); s != nil {
 			log.Printf("[SELECT] Google IP %s (no google strat) → strategy %d (%s)", ip, s.ID, s.Name)
 			return s
 		}
 	}
 
-	// 2. Hostname match
+	// ── 3. builtinHostnameMappings — hostname match ───────────────────────────
 	if hostname != "" {
 		lower := strings.ToLower(hostname)
-		for _, rule := range hostnameRules {
+		for _, rule := range builtinHostnameMappings {
 			if strings.Contains(lower, rule.hostnameContains) {
 				if s := m.selectByNameHint(rule.stratNameHint, protocol, port); s != nil {
 					log.Printf("[SELECT] Hostname '%s' → strategy %d (%s)", lower, s.ID, s.Name)
@@ -597,7 +588,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// 3. Fallback: лучшая для протокола
+	// ── 4. Fallback: лучшая для протокола ────────────────────────────────────
 	if s := m.bestForProtocol(protocol, port); s != nil {
 		log.Printf("[SELECT] Fallback → strategy %d (%s) priority=%d", s.ID, s.Name, s.Priority)
 		return s
@@ -662,7 +653,6 @@ func (m *Manager) UpdateStrategy(id int, success bool, responseTime time.Duratio
 		strat.SuccessCount++
 		m.stats.SuccessfulAttempts++
 
-		// Обновляем среднее время ответа
 		if strat.AvgResponseMs == 0 {
 			strat.AvgResponseMs = responseTime.Milliseconds()
 		} else {
@@ -689,7 +679,6 @@ func (m *Manager) processResults() {
 	for {
 		select {
 		case <-m.closeChan:
-			// Drain channel to avoid leaks
 			for len(m.updateChan) > 0 {
 				<-m.updateChan
 			}
@@ -700,7 +689,7 @@ func (m *Manager) processResults() {
 	}
 }
 
-// ListStrategies возвращает список всех стратегий
+// ListStrategies возвращает список всех стратегий, отсортированный по приоритету
 func (m *Manager) ListStrategies() []*Strategy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -710,7 +699,6 @@ func (m *Manager) ListStrategies() []*Strategy {
 		strategies = append(strategies, strat)
 	}
 
-	// Сортируем по приоритету
 	sort.Slice(strategies, func(i, j int) bool {
 		return strategies[i].Priority < strategies[j].Priority
 	})
@@ -723,7 +711,7 @@ func (m *Manager) SaveToFile(filename string) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	data, err := json.MarshalIndent(m.strategies, "", " ")
+	data, err := json.MarshalIndent(m.strategies, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -731,7 +719,10 @@ func (m *Manager) SaveToFile(filename string) error {
 	return os.WriteFile(filename, data, 0644)
 }
 
-// LoadFromFile загружает стратегии из файла
+// LoadFromFile загружает стратегии из файла.
+// FIX #5: не заменяет m.strategies целиком — добавляет/обновляет стратегии из файла,
+// сохраняя встроенные стратегии из profiles.go.
+// Было: m.strategies = make(map[int]*Strategy) → встроенные стратегии уничтожались.
 func (m *Manager) LoadFromFile(filename string) error {
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -744,17 +735,16 @@ func (m *Manager) LoadFromFile(filename string) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		// Очищаем существующие стратегии
-		m.strategies = make(map[int]*Strategy)
-
-		// Добавляем каждую стратегию из массива
+		loaded := 0
 		for _, s := range strategiesArray {
 			if s.ID == 0 {
 				continue
 			}
 			m.strategies[s.ID] = s
+			loaded++
 		}
 		m.stats.TotalStrategies = len(m.strategies)
+		log.Printf("[LoadFromFile] Merged %d strategies from %s (total: %d)", loaded, filename, len(m.strategies))
 		return nil
 	}
 
@@ -766,8 +756,14 @@ func (m *Manager) LoadFromFile(filename string) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.strategies = strategiesMap
-	m.stats.TotalStrategies = len(strategiesMap)
+
+	loaded := 0
+	for id, s := range strategiesMap {
+		m.strategies[id] = s
+		loaded++
+	}
+	m.stats.TotalStrategies = len(m.strategies)
+	log.Printf("[LoadFromFile] Merged %d strategies from %s (total: %d)", loaded, filename, len(m.strategies))
 	return nil
 }
 
@@ -779,9 +775,6 @@ func (m *Manager) GetStats() ManagerStats {
 	stats := m.stats
 	stats.TotalStrategies = len(m.strategies)
 	stats.ActiveStrategies = 1
-	if m.activeID > 0 {
-		stats.ActiveStrategies = 1
-	}
 
 	return stats
 }

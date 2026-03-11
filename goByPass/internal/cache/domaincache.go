@@ -39,8 +39,17 @@ type DomainCacheStats struct {
 	ResolveErrors uint64
 }
 
-// NewDomainCache создает новый кэш доменов
+// NewDomainCache создает новый кэш доменов.
+// FIX #11: если ttl <= 0 — используем defaultCacheTTL вместо передачи 0 в time.NewTicker.
 func NewDomainCache(ttl time.Duration, maxSize int) *DomainCache {
+	if ttl <= 0 {
+		log.Printf("[DomainCache] Warning: invalid TTL %v, using default %v", ttl, defaultCacheTTL)
+		ttl = defaultCacheTTL
+	}
+	if maxSize <= 0 {
+		maxSize = 5000
+	}
+
 	c := &DomainCache{
 		entries: make(map[string]*DomainCacheEntry),
 		ttl:     ttl,
@@ -74,7 +83,6 @@ func (c *DomainCache) Get(domain string) (*DomainCacheEntry, bool) {
 		return nil, false
 	}
 
-	// Update LastSeen and stats under write lock to avoid races
 	c.mu.Lock()
 	entry.LastSeen = time.Now()
 	c.stats.Hits++
@@ -85,12 +93,10 @@ func (c *DomainCache) Get(domain string) (*DomainCacheEntry, bool) {
 
 // Resolve разрешает домен в IP (с кэшированием и таймаутом)
 func (c *DomainCache) Resolve(domain string) ([]net.IP, error) {
-	// Проверяем кэш
 	if entry, exists := c.Get(domain); exists {
 		return entry.IPs, nil
 	}
 
-	// Создаем контекст с таймаутом
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -125,7 +131,6 @@ func (c *DomainCache) Put(domain string, ips []net.IP, cname string, resolveTime
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Проверяем размер
 	if len(c.entries) >= c.maxSize {
 		c.evictOldest()
 	}
@@ -143,7 +148,7 @@ func (c *DomainCache) Put(domain string, ips []net.IP, cname string, resolveTime
 	}
 }
 
-// PutWithTTL добавляет запись с указанным TTL
+// PutWithTTL добавляет запись с указанным TTL из DNS
 func (c *DomainCache) PutWithTTL(domain string, ips []net.IP, cname string, ttl int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -173,7 +178,8 @@ func (c *DomainCache) Stop() {
 	close(c.stopCh)
 }
 
-// cleanupLoop периодически очищает кэш
+// cleanupLoop периодически очищает кэш.
+// FIX #11: ticker interval = ttl/10, но ttl уже проверен в NewDomainCache (> 0).
 func (c *DomainCache) cleanupLoop() {
 	ticker := time.NewTicker(c.ttl / 10)
 	defer ticker.Stop()
@@ -201,7 +207,7 @@ func (c *DomainCache) cleanup() {
 	}
 }
 
-// evictOldest удаляет самую старую запись
+// evictOldest удаляет самую старую запись при переполнении
 func (c *DomainCache) evictOldest() {
 	var oldestDomain string
 	var oldestTime time.Time
@@ -228,16 +234,15 @@ func (c *DomainCache) GetStats() DomainCacheStats {
 	return stats
 }
 
-// Preload популярные домены
+// Preload предзагружает список доменов (параллельно, до 5 одновременно)
 func (c *DomainCache) Preload(domains []string) error {
-	semaphore := make(chan struct{}, 5) // Максимум 5 одновременных запросов
+	semaphore := make(chan struct{}, 5)
 
 	for _, domain := range domains {
 		semaphore <- struct{}{}
 		go func(d string) {
 			defer func() { <-semaphore }()
-			_, err := c.Resolve(d)
-			if err != nil {
+			if _, err := c.Resolve(d); err != nil {
 				log.Printf("Failed to preload domain %s: %v", d, err)
 			}
 		}(domain)

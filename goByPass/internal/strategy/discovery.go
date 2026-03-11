@@ -17,7 +17,7 @@ type DiscoveryConfig struct {
 	TestPorts      []int         // порты для тестирования
 	TestTimeout    time.Duration // таймаут теста
 	TestInterval   time.Duration // интервал между тестами
-	MaxConcurrent  int           // максимум одновременных тестов
+	MaxConcurrent  int           // максимум одновременных тестов (по доменам)
 	MinSuccessRate float64       // минимальный процент успеха
 	SamplesPerTest int           // количество проб на тест
 }
@@ -42,6 +42,9 @@ type Discovery struct {
 	mu       sync.RWMutex
 	running  bool
 	stopChan chan struct{}
+	// FIX #9: sync.Once гарантирует что stopChan закрывается ровно один раз.
+	// Было: close(stopChan) вызывался напрямую — повторный вызов Stop() паниковал.
+	stopOnce sync.Once
 	progress DiscoveryProgress
 }
 
@@ -67,7 +70,7 @@ func NewDiscovery(manager *Manager, config DiscoveryConfig) *Discovery {
 		config.MaxConcurrent = 5
 	}
 	if config.MinSuccessRate == 0 {
-		config.MinSuccessRate = 0.7 // 70% успеха
+		config.MinSuccessRate = 0.7
 	}
 	if config.SamplesPerTest == 0 {
 		config.SamplesPerTest = 10
@@ -90,19 +93,19 @@ func (d *Discovery) Start() error {
 	d.running = true
 	d.progress.StartTime = time.Now()
 
-	// Запускаем в горутине
 	go d.runDiscovery()
 
 	return nil
 }
 
-// Stop останавливает автоподбор
+// Stop останавливает автоподбор.
+// FIX #9: безопасен для многократного вызова благодаря sync.Once.
+// Было: close(d.stopChan) напрямую → panic при двойном вызове.
 func (d *Discovery) Stop() {
-	if d.running {
+	d.stopOnce.Do(func() {
 		close(d.stopChan)
-
 		d.running = false
-	}
+	})
 }
 
 // runDiscovery основной цикл подбора.
@@ -117,14 +120,9 @@ func (d *Discovery) runDiscovery() {
 
 	d.progress.TotalTests = len(strategies) * len(domains) * len(ports)
 
-	// Семафор для ограничения общей конкурентности
 	semaphore := make(chan struct{}, d.config.MaxConcurrent)
 	var wg sync.WaitGroup
 
-	// Итерируем по доменам во внешнем цикле — все стратегии для одного домена
-	// тестируются последовательно внутри одной горутины.
-	// Это гарантирует что SetTestOverride(domain, ...) не перезаписывается
-	// параллельной горутиной для того же домена.
 	for _, domain := range domains {
 		for _, port := range ports {
 			wg.Add(1)
@@ -155,30 +153,23 @@ func (d *Discovery) runDiscovery() {
 // Как это работает:
 //  1. SetTestOverride(domain, strategy.ID) — WinDivert pipeline начнёт применять
 //     эту стратегию ко всем пакетам с SNI == domain
-//  2. Для QUIC-стратегий дополнительно SetTestOverrideByIP() — SNI недоступен
-//     в QUIC-пакетах, поэтому override по hostname не сработает (#5).
-//  3. testConnection() — реальное TLS-соединение через ОС; пакеты перехватываются
-//     WinDivert и модифицируются согласно выбранной стратегии
+//  2. Для QUIC-стратегий дополнительно SetTestOverrideByIP()
+//  3. testConnection() — реальное TLS-соединение через ОС
 //  4. ClearTestOverride / ClearTestOverrideByIP — снимаем форсирование
-func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
+func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 	result := &DiscoveryResult{
-		StrategyID: strategy.ID,
+		StrategyID: strat.ID,
 		Timestamp:  time.Now(),
 	}
 
-	// Форсируем стратегию для этого домена на время теста.
-	// ClearTestOverride вызывается в defer — гарантированное снятие даже при панике.
-	d.manager.SetTestOverride(domain, strategy.ID)
+	d.manager.SetTestOverride(domain, strat.ID)
 	defer d.manager.ClearTestOverride(domain)
 
-	// Для QUIC-стратегий: резолвим IP домена и регистрируем override по IP (#5).
-	// QUIC-пакеты зашифрованы — SNI из них не извлечь, hostname в flow будет пустым.
-	// SelectStrategy для UDP проверяет testOverrides["ip:<addr>"] как fallback.
 	var resolvedIPs []string
-	if strategy.ApplyToQUIC || strategy.FakeQUICFile != "" {
+	if strat.ApplyToQUIC || strat.FakeQUICFile != "" {
 		if addrs, err := net.LookupHost(domain); err == nil {
 			for _, addr := range addrs {
-				d.manager.SetTestOverrideByIP(addr, strategy.ID)
+				d.manager.SetTestOverrideByIP(addr, strat.ID)
 				resolvedIPs = append(resolvedIPs, addr)
 			}
 		} else {
@@ -192,7 +183,7 @@ func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 	}
 
 	log.Printf("[DISCOVERY] Testing strategy %d (%s) on %s:%d (QUIC IPs: %v)",
-		strategy.ID, strategy.Name, domain, port, resolvedIPs)
+		strat.ID, strat.Name, domain, port, resolvedIPs)
 
 	for i := 0; i < d.config.SamplesPerTest; i++ {
 		time.Sleep(d.config.TestInterval)
@@ -225,11 +216,11 @@ func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 	result.SuccessRate = float64(result.SuccessSamples) / float64(result.Samples)
 
 	log.Printf("[DISCOVERY] Strategy %d (%s) on %s: %.0f%% success (%d/%d), avg=%v",
-		strategy.ID, strategy.Name, domain,
+		strat.ID, strat.Name, domain,
 		result.SuccessRate*100, result.SuccessSamples, result.Samples, result.AvgResponse)
 
 	d.mu.Lock()
-	d.results[strategy.ID] = result
+	d.results[strat.ID] = result
 	d.mu.Unlock()
 
 	atomic.AddInt64(&d.progress.CompletedTests, 1)
@@ -241,7 +232,9 @@ func (d *Discovery) testConnection(domain string, port int) error {
 	dialer := &net.Dialer{Timeout: d.config.TestTimeout}
 
 	if port == 443 {
-		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{InsecureSkipVerify: true})
+		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // intentional for discovery
+		})
 		if err != nil {
 			return err
 		}
@@ -255,7 +248,6 @@ func (d *Discovery) testConnection(domain string, port int) error {
 	}
 	defer conn.Close()
 
-	// Отправляем минимальный запрос
 	request := []byte("GET / HTTP/1.1\r\nHost: " + domain + "\r\n\r\n")
 
 	conn.SetWriteDeadline(time.Now().Add(d.config.TestTimeout))
@@ -263,7 +255,6 @@ func (d *Discovery) testConnection(domain string, port int) error {
 		return err
 	}
 
-	// Ждем ответ
 	conn.SetReadDeadline(time.Now().Add(d.config.TestTimeout))
 	response := make([]byte, 1024)
 	n, err := conn.Read(response)
@@ -274,7 +265,7 @@ func (d *Discovery) testConnection(domain string, port int) error {
 	return nil
 }
 
-// GetResults возвращает результаты подбора
+// GetResults возвращает результаты подбора, отсортированные по успешности (убыв.)
 func (d *Discovery) GetResults() []*DiscoveryResult {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -284,7 +275,6 @@ func (d *Discovery) GetResults() []*DiscoveryResult {
 		results = append(results, res)
 	}
 
-	// Сортируем по успешности
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].SuccessRate > results[j].SuccessRate
 	})
@@ -292,31 +282,23 @@ func (d *Discovery) GetResults() []*DiscoveryResult {
 	return results
 }
 
-// GetBestStrategy возвращает лучшую стратегию
+// GetBestStrategy возвращает лучший результат с SuccessRate >= MinSuccessRate.
+// Возвращает nil если подходящей стратегии ещё нет.
 func (d *Discovery) GetBestStrategy() *DiscoveryResult {
 	results := d.GetResults()
-	if len(results) == 0 {
-		return nil
-	}
-
-	// Находим стратегию с максимальной успешностью
-	var best *DiscoveryResult
 	for _, res := range results {
 		if res.SuccessRate >= d.config.MinSuccessRate {
-			if best == nil || res.SuccessRate > best.SuccessRate {
-				best = res
-			}
+			return res
 		}
 	}
-
-	return best
+	return nil
 }
 
-// ApplyBestStrategy применяет лучшую стратегию
+// ApplyBestStrategy применяет лучшую найденную стратегию как активную
 func (d *Discovery) ApplyBestStrategy() error {
 	best := d.GetBestStrategy()
 	if best == nil {
-		return fmt.Errorf("no good strategy found")
+		return fmt.Errorf("no good strategy found (min_success_rate=%.0f%%)", d.config.MinSuccessRate*100)
 	}
 
 	return d.manager.SetActive(best.StrategyID)
@@ -328,10 +310,13 @@ func (d *Discovery) GetProgress() DiscoveryProgress {
 	defer d.mu.RUnlock()
 
 	progress := d.progress
-	if progress.TotalTests > 0 && progress.CompletedTests > 0 {
+	completed := atomic.LoadInt64(&d.progress.CompletedTests)
+	progress.CompletedTests = completed
+
+	if progress.TotalTests > 0 && completed > 0 {
 		elapsed := time.Since(progress.StartTime)
 		progress.EstimatedTime = time.Duration(float64(elapsed) *
-			float64(progress.TotalTests) / float64(progress.CompletedTests))
+			float64(progress.TotalTests) / float64(completed))
 	}
 
 	return progress
