@@ -3,6 +3,7 @@ package strategy
 import (
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	"sort"
 	"sync"
@@ -104,35 +105,44 @@ func (d *Discovery) Stop() {
 	}
 }
 
-// runDiscovery основной цикл подбора
+// runDiscovery основной цикл подбора.
+//
+// Тесты одного домена сериализованы — горутины для одного домена не запускаются
+// параллельно, так как SetTestOverride перезаписывает глобальное состояние.
+// Разные домены тестируются параллельно (в пределах MaxConcurrent).
 func (d *Discovery) runDiscovery() {
 	strategies := d.manager.ListStrategies()
-	d.progress.TotalTests = len(strategies) * len(d.config.TestDomains) * len(d.config.TestPorts)
+	domains := d.config.TestDomains
+	ports := d.config.TestPorts
 
-	// Используем семафор для ограничения конкурентности
+	d.progress.TotalTests = len(strategies) * len(domains) * len(ports)
+
+	// Семафор для ограничения общей конкурентности
 	semaphore := make(chan struct{}, d.config.MaxConcurrent)
 	var wg sync.WaitGroup
 
-	for _, strategy := range strategies {
-		select {
-		case <-d.stopChan:
-			return
-		default:
-		}
+	// Итерируем по доменам во внешнем цикле — все стратегии для одного домена
+	// тестируются последовательно внутри одной горутины.
+	// Это гарантирует что SetTestOverride(domain, ...) не перезаписывается
+	// параллельной горутиной для того же домена.
+	for _, domain := range domains {
+		for _, port := range ports {
+			wg.Add(1)
+			semaphore <- struct{}{}
 
-		for _, domain := range d.config.TestDomains {
-			for _, port := range d.config.TestPorts {
-				wg.Add(1)
-				semaphore <- struct{}{}
+			go func(domain string, port int) {
+				defer wg.Done()
+				defer func() { <-semaphore }()
 
-				go func(strat *Strategy, domain string, port int) {
-					defer wg.Done()
-					defer func() { <-semaphore }()
-
+				for _, strat := range strategies {
+					select {
+					case <-d.stopChan:
+						return
+					default:
+					}
 					d.testStrategy(strat, domain, port)
-					// НЕ инкрементируем здесь — это уже делает testStrategy через atomic.AddInt64
-				}(strategy, domain, port)
-			}
+				}
+			}(domain, port)
 		}
 	}
 
@@ -140,15 +150,32 @@ func (d *Discovery) runDiscovery() {
 	d.running = false
 }
 
-// testStrategy тестирует стратегию на одном домене
+// testStrategy тестирует стратегию на одном домене.
+//
+// Как это работает:
+//  1. SetTestOverride(domain, strategy.ID) — WinDivert pipeline начнёт применять
+//     эту стратегию ко всем пакетам с SNI == domain
+//  2. testConnection() — реальное TLS-соединение через ОС; пакеты перехватываются
+//     WinDivert и модифицируются согласно выбранной стратегии
+//  3. ClearTestOverride() — снимаем форсирование
+//
+// Таким образом результат теста отражает реальную эффективность стратегии
+// против DPI провайдера, а не просто доступность сервера.
 func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 	result := &DiscoveryResult{
 		StrategyID: strategy.ID,
 		Timestamp:  time.Now(),
 	}
 
+	// Форсируем стратегию для этого домена на время теста.
+	// ClearTestOverride вызывается в defer — гарантированное снятие даже при панике.
+	d.manager.SetTestOverride(domain, strategy.ID)
+	defer d.manager.ClearTestOverride(domain)
+
+	log.Printf("[DISCOVERY] Testing strategy %d (%s) on %s:%d",
+		strategy.ID, strategy.Name, domain, port)
+
 	for i := 0; i < d.config.SamplesPerTest; i++ {
-		// Небольшая задержка между тестами
 		time.Sleep(d.config.TestInterval)
 
 		select {
@@ -157,7 +184,6 @@ func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 		default:
 		}
 
-		// Пытаемся подключиться к домену
 		start := time.Now()
 		err := d.testConnection(domain, port)
 		duration := time.Since(start)
@@ -168,19 +194,21 @@ func (d *Discovery) testStrategy(strategy *Strategy, domain string, port int) {
 			result.AvgResponse += duration
 		} else {
 			result.FailSamples++
-			if len(result.Errors) < 10 { // сохраняем только первые 10 ошибок
+			if len(result.Errors) < 10 {
 				result.Errors = append(result.Errors, err.Error())
 			}
 		}
 	}
 
-	// Вычисляем метрики
 	if result.SuccessSamples > 0 {
 		result.AvgResponse = result.AvgResponse / time.Duration(result.SuccessSamples)
 	}
 	result.SuccessRate = float64(result.SuccessSamples) / float64(result.Samples)
 
-	// Сохраняем результат
+	log.Printf("[DISCOVERY] Strategy %d (%s) on %s: %.0f%% success (%d/%d), avg=%v",
+		strategy.ID, strategy.Name, domain,
+		result.SuccessRate*100, result.SuccessSamples, result.Samples, result.AvgResponse)
+
 	d.mu.Lock()
 	d.results[strategy.ID] = result
 	d.mu.Unlock()

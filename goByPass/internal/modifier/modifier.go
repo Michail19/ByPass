@@ -236,7 +236,8 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 				binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
 				binary.BigEndian.PutUint32(newPkt[ipHdrLen+4:], seq)
 				copy(newPkt[payloadOffset:], frag)
-				newPkt[6] &^= 0x40
+				// DF: не трогаем — newPkt скопирован из packet[:payloadOffset],
+				// packet[6] уже содержит оригинальные Flags+FragOffset (#6).
 				recalculateIPChecksum(newPkt)
 				FixTCPChecksum(newPkt)
 				packets = append(packets, newPkt)
@@ -246,24 +247,19 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	}
 
 finalize:
-	// Финальный пересчёт checksum для всех пакетов.
-	// FakeBadSum: checksum намеренно испорчен — не трогаем (ApplyFake уже вернул готовый).
-	for _, pkt := range packets {
-		if len(pkt) < 20 || pkt[9] != 6 {
-			continue
-		}
-		iHL := int(pkt[0]&0x0F) * 4
-		tcpOff := iHL + 16
-		if tcpOff+1 >= len(pkt) {
-			continue
-		}
-		// Если checksum нулевой — это FakeBadSum (после XOR 0xFF checksum стал 0x00FE→0x00),
-		// либо пакет был специально зануле. Не пересчитываем.
-		if pkt[tcpOff] != 0 || pkt[tcpOff+1] != 0 {
-			recalculateIPChecksum(pkt)
-			FixTCPChecksum(pkt)
-		}
-	}
+	// Checksums уже пересчитаны в каждом из путей выше (#1):
+	//   ApplyFake         → setIPTTL + recalculate + FixTCP (или FakeBadSum: умышленно испорчен)
+	//   buildTCPSegments  → recalculate + FixTCP на каждый сегмент
+	//   ApplySeqOvl       → recalculate + FixTCP на seqovl + buildTCPSegments
+	//   ApplyDisorder     → recalculate + FixTCP на decoy + buildTCPSegments
+	//   ApplyFakedSplit   → ApplyFake + buildTCPSegments
+	//   TLS record split  → явные вызовы обоих
+	//
+	// Повторный пересчёт здесь ЗАПРЕЩЁН:
+	//   - FakeBadSum: checksum умышленно испорчен. Проверка "if checksum != 0" некорректна:
+	//     TCP checksum 0x0000 — легальное значение по RFC (передаётся как 0xFFFF),
+	//     т.е. обычный пакет с checksum=0 ошибочно пропустится без пересчёта.
+	//   - Двойной пересчёт ломает FakeBadSum и не даёт никакой пользы.
 
 	if len(packets) == 0 {
 		return &ModifyResult{SendOriginal: true}, nil
@@ -292,7 +288,11 @@ func (pm *PacketModifier) selectFakeTLSPayload(
 ) []byte {
 
 	if strat.FakeTLSNullBytes {
-		return []byte{0x00, 0x00, 0x00, 0x00}
+		// Минимальный TLS record: ContentType=Handshake(0x16) + TLS1.0 + length=0.
+		// 4 нулевых байта тривиально детектируются как не-TLS (#4).
+		// Пустой Handshake record структурно валиден — сервер дропнет без RST,
+		// DPI принимает как начало Handshake и теряет контекст.
+		return []byte{0x16, 0x03, 0x01, 0x00, 0x00}
 	}
 
 	if strat.FakeTLSPrevPacket {

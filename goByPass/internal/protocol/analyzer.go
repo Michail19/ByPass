@@ -157,11 +157,14 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 			info.Host = host
 			log.Printf("[Analyzer] Extracted HTTP Host: %s", host)
 		}
-	} else if len(payload) >= 5 && (payload[0]&0xF0) == 0xC0 && dstPort == 443 {
-		// QUIC Long Header: top 2 bits = 11 (0xC0–0xFF).
+	} else if len(payload) >= 5 && (payload[0]&0xC0) == 0xC0 && dstPort == 443 {
+		// QUIC Long Header: top 2 bits = 11 → (byte & 0xC0) == 0xC0.
+		// Маска 0xF0 была неверной — она требовала bits[4..7]=0xC0, пропуская
+		// пакеты с type-specific bits != 0 (например, 0xD0, 0xE0, 0xFF).
+		//
 		// Дополнительная проверка версии снижает false positives с DTLS и random UDP:
 		//   QUIC v1       = 0x00000001
-		//   QUIC v2 draft = 0x6b3343cf
+		//   QUIC v2       = 0x6b3343cf
 		//   QUIC grease   = 0x?a?a?a?a (нижний nibble каждого байта = 0xA)
 		version := binary.BigEndian.Uint32(payload[1:5])
 		isKnownQUIC := version == 0x00000001 ||
@@ -176,27 +179,52 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 	return info, nil
 }
 
-// extractSNI — надёжный парсер SNI из TLS ClientHello
+// extractSNI — надёжный парсер SNI из TLS ClientHello.
+// Все продвижения pos проверяются на выход за границы данных (#6).
 func extractSNI(data []byte) string {
 	if len(data) < 43 {
 		return ""
 	}
-	pos := 5               // TLS record header = type(1)+version(2)+length(2)
-	if data[pos] != 0x01 { // data[5] = HandshakeType: 0x01 = ClientHello
+	pos := 5
+	if data[pos] != 0x01 {
 		return ""
 	}
-	pos += 4 // skip handshake header: type(1)+length(3)
+	pos += 4  // handshake header
+	pos += 34 // version(2) + random(32)
 
-	pos += 34                    // version(2) + random(32)
-	sessionLen := int(data[pos]) // legacy session id
-	pos += 1 + sessionLen
+	if pos >= len(data) {
+		return ""
+	}
+	sessionLen := int(data[pos])
+	pos++
+	if pos+sessionLen > len(data) {
+		return ""
+	}
+	pos += sessionLen
 
+	if pos+2 > len(data) {
+		return ""
+	}
 	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
-	pos += 2 + cipherLen
+	pos += 2
+	if pos+cipherLen > len(data) {
+		return ""
+	}
+	pos += cipherLen
 
+	if pos >= len(data) {
+		return ""
+	}
 	compLen := int(data[pos])
-	pos += 1 + compLen
+	pos++
+	if pos+compLen > len(data) {
+		return ""
+	}
+	pos += compLen
 
+	if pos+2 > len(data) {
+		return ""
+	}
 	extLen := int(binary.BigEndian.Uint16(data[pos:]))
 	pos += 2
 	end := pos + extLen
@@ -208,18 +236,25 @@ func extractSNI(data []byte) string {
 		extType := binary.BigEndian.Uint16(data[pos : pos+2])
 		extDataLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
 		pos += 4
+		if pos+extDataLen > end {
+			return "" // усечённое расширение
+		}
 
 		if extType == 0x0000 { // server_name
-			if pos+5 > end {
+			// listLen(2) + nameType(1) + nameLen(2) + name
+			if extDataLen < 5 {
 				return ""
 			}
-			pos += 3 // list length(2) + name type(1)
-			nameLen := int(binary.BigEndian.Uint16(data[pos:]))
-			pos += 2
-			if pos+nameLen <= end {
-				return string(data[pos : pos+nameLen])
+			nameType := data[pos+2]
+			if nameType != 0x00 {
+				return ""
 			}
-			return ""
+			nameLen := int(binary.BigEndian.Uint16(data[pos+3:]))
+			nameStart := pos + 5
+			if nameLen == 0 || nameStart+nameLen > end {
+				return ""
+			}
+			return string(data[nameStart : nameStart+nameLen])
 		}
 		pos += extDataLen
 	}
@@ -290,11 +325,94 @@ func hasECH(data []byte) bool {
 	return false
 }
 
-// extractALPN — извлечение ALPN из extension 0x0010
+// extractALPN — извлечение списка протоколов из ALPN extension (0x0010).
+//
+// Формат extension data:
+//
+//	alpnListLen(2) [ protoLen(1) proto(...) ]...
 func extractALPN(data []byte) []string {
-	// Аналогично extractSNI, но ищем extType == 16 (0x0010)
-	// Реализация опущена для краткости — добавьте по аналогии
-	return nil // ← замените на реальный парсинг
+	if len(data) < 43 {
+		return nil
+	}
+	pos := 5
+	if data[pos] != 0x01 {
+		return nil
+	}
+	pos += 4
+	pos += 34
+	if pos >= len(data) {
+		return nil
+	}
+	sessionLen := int(data[pos])
+	pos++
+	if pos+sessionLen > len(data) {
+		return nil
+	}
+	pos += sessionLen
+
+	if pos+2 > len(data) {
+		return nil
+	}
+	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2
+	if pos+cipherLen > len(data) {
+		return nil
+	}
+	pos += cipherLen
+
+	if pos >= len(data) {
+		return nil
+	}
+	compLen := int(data[pos])
+	pos++
+	if pos+compLen > len(data) {
+		return nil
+	}
+	pos += compLen
+
+	if pos+2 > len(data) {
+		return nil
+	}
+	extTotalLen := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2
+	end := pos + extTotalLen
+	if end > len(data) {
+		return nil
+	}
+
+	for pos+4 <= end {
+		extType := binary.BigEndian.Uint16(data[pos : pos+2])
+		extDataLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
+		pos += 4
+		if pos+extDataLen > end {
+			return nil
+		}
+
+		if extType == 0x0010 { // ALPN
+			if extDataLen < 2 {
+				return nil
+			}
+			alpnListLen := int(binary.BigEndian.Uint16(data[pos:]))
+			alpnEnd := pos + 2 + alpnListLen
+			if alpnEnd > pos+extDataLen {
+				return nil
+			}
+			cur := pos + 2
+			var protos []string
+			for cur < alpnEnd {
+				protoLen := int(data[cur])
+				cur++
+				if protoLen == 0 || cur+protoLen > alpnEnd {
+					break
+				}
+				protos = append(protos, string(data[cur:cur+protoLen]))
+				cur += protoLen
+			}
+			return protos
+		}
+		pos += extDataLen
+	}
+	return nil
 }
 
 // extractHTTPHost — извлечение Host из HTTP

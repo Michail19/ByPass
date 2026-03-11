@@ -23,18 +23,18 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
-	seen := map[int]bool{}
+	// Dedup без map-аллокации (#10): sort + linear pass
 	var validPos []int
 	for _, pos := range splitPos {
-		if pos > 0 && pos < payloadLen && !seen[pos] {
+		if pos > 0 && pos < payloadLen {
 			validPos = append(validPos, pos)
-			seen[pos] = true
 		}
 	}
 	if len(validPos) == 0 {
 		return [][]byte{packet}, nil
 	}
 	sortInts(validPos)
+	validPos = dedupInts(validPos)
 
 	return buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos), nil
 }
@@ -48,6 +48,10 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 //
 // ovlLen: типичные значения 568, 652, 664, 679, 681 (из bat-файлов zapret).
 // pattern: данные из .bin файла (tls_clienthello_*.bin, stun.bin).
+//
+// Заметка о TCP window (#2): seqovl-пакет идёт с низким TTL (FakeTTL) и не доходит
+// до сервера — только до DPI. Сервер никогда не видит пакет с seq < ISN,
+// поэтому TCP window на старте соединения не имеет значения.
 func (pm *PacketModifier) ApplySeqOvl(
 	packet []byte,
 	ovlLen int,
@@ -87,22 +91,22 @@ func (pm *PacketModifier) ApplySeqOvl(
 	ovlSeq := originalSeq - uint32(len(ovlData))
 	binary.BigEndian.PutUint32(ovlPkt[ipHdrLen+4:], ovlSeq)
 	copy(ovlPkt[payloadOffset:], ovlData)
-	ovlPkt[6] &^= 0x40 // clear DF
+	// DF: сохраняем из оригинала (#6) — ovlPkt скопирован из packet[:payloadOffset],
+	// packet[6] уже содержит оригинальные Flags+FragOffset.
 	recalculateIPChecksum(ovlPkt)
 	FixTCPChecksum(ovlPkt)
 	results = append(results, ovlPkt)
 
 	// 2. Реальные сегменты в прямом порядке
-	// Позиции разбивки (опциональные)
-	seen := map[int]bool{}
+	// Dedup без map-аллокации (#10)
 	var validPos []int
 	for _, pos := range splitPositions {
-		if pos > 0 && pos < payloadLen && !seen[pos] {
+		if pos > 0 && pos < payloadLen {
 			validPos = append(validPos, pos)
-			seen[pos] = true
 		}
 	}
 	sortInts(validPos)
+	validPos = dedupInts(validPos)
 
 	realSegs := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
 	results = append(results, realSegs...)
@@ -118,12 +122,12 @@ func (pm *PacketModifier) ApplySeqOvl(
 // DPI видит fake с нулевым байтом и не успевает анализировать реальный следом.
 func (pm *PacketModifier) ApplyFakedSplit(
 	packet []byte,
-	splitPos int, // позиция разбивки в payload (0 = не разбивать, только fake)
+	splitPos int,
 	patternByte byte,
 	fooling uint32,
 	badSeqIncrement int64,
 	fakeTTL int,
-	fakeTLSData []byte, // nil = использовать оригинальный payload
+	fakeTLSData []byte,
 ) ([][]byte, error) {
 
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
@@ -140,7 +144,7 @@ func (pm *PacketModifier) ApplyFakedSplit(
 
 	var results [][]byte
 
-	// Fake пакет: оригинальный payload с патерном вместо первого байта
+	// Fake пакет: оригинальный payload с паттерном вместо первого байта
 	var fakePktPayload []byte
 	if fakeTLSData != nil {
 		fakePktPayload = fakeTLSData
@@ -170,7 +174,8 @@ func (pm *PacketModifier) ApplyFakedSplit(
 // отправить SYN-пакет с данными fake payload перед реальным SYN.
 // DPI теряет начало потока и не успевает анализировать реальный handshake.
 //
-// --dpi-desync=syndata
+// Замечание (#5): SYN+data отклоняется некоторыми middlebox'ами (Cloudflare, корп. firewall).
+// Включать только для провайдеров где это явно работает.
 func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte) ([][]byte, error) {
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
 		return nil, nil
@@ -184,16 +189,12 @@ func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte) ([][]byte
 	isACK := (flags & 0x10) != 0
 
 	if !isSYN || isACK {
-		// Не SYN-пакет — syndata применяется только к SYN
 		return nil, nil
 	}
-
 	if len(fakeData) == 0 {
 		return nil, nil
 	}
 
-	// Создаём SYN-пакет с данными:
-	// seq = original_seq - len(fakeData), чтобы не сдвигать реальный поток
 	originalSeq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
 	synDataSeq := originalSeq - uint32(len(fakeData))
 
@@ -201,26 +202,25 @@ func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte) ([][]byte
 	copy(synPkt, packet[:ipHdrLen+tcpHdrLen])
 	binary.BigEndian.PutUint16(synPkt[2:4], uint16(len(synPkt)))
 	binary.BigEndian.PutUint32(synPkt[ipHdrLen+4:], synDataSeq)
-	synPkt[6] &^= 0x40 // clear DF
-	// Флаги: SYN=0x02 (только SYN, без PSH/ACK/etc.)
+	// DF: сохраняем из оригинала (#6) — synPkt скопирован из packet[:ipHdrLen+tcpHdrLen],
+	// packet[6] уже содержит оригинальные Flags+FragOffset.
 	synPkt[ipHdrLen+13] = flags & 0x02 // оставить только SYN
 	copy(synPkt[ipHdrLen+tcpHdrLen:], fakeData)
 	recalculateIPChecksum(synPkt)
 	FixTCPChecksum(synPkt)
 
-	// Результат: [fake SYN с данными, реальный SYN]
 	return [][]byte{synPkt, packet}, nil
 }
 
 // buildTCPSegments разбивает packet на TCP-сегменты по validPos (уже отсортированным).
 // Если validPos пуст — возвращает packet как есть.
+// DF flag: копируется из оригинального packet[6] через copy(newPkt, packet[:payloadOffset]) (#6).
 func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, validPos []int) [][]byte {
 	payloadLen := len(packet) - payloadOffset
 	if payloadLen <= 0 {
 		return [][]byte{packet}
 	}
 
-	// Собираем отрезки payload
 	var chunks [][]byte
 	prev := 0
 	for _, pos := range validPos {
@@ -233,11 +233,11 @@ func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, val
 	var results [][]byte
 	for _, seg := range chunks {
 		newPkt := make([]byte, ipHdrLen+tcpHdrLen+len(seg))
-		copy(newPkt, packet[:payloadOffset])
+		copy(newPkt, packet[:payloadOffset]) // копирует packet[6] включая DF бит
 		binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
 		binary.BigEndian.PutUint32(newPkt[ipHdrLen+4:], seq)
 		copy(newPkt[payloadOffset:], seg)
-		newPkt[6] &^= 0x40
+		// Не трогаем newPkt[6] — DF уже скопирован из оригинала (#6)
 		recalculateIPChecksum(newPkt)
 		FixTCPChecksum(newPkt)
 		results = append(results, newPkt)

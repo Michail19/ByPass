@@ -292,7 +292,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 				for i := 0; i < repeats; i++ {
 					fakePkt := buildFakeQUICPacket(pkt.Data, strat.FakeQUICFileData)
 					if fakePkt != nil {
-						p.sendPacket(fakePkt, pkt.Addr)
+						p.sendModifiedPacket(fakePkt, pkt.Addr)
 						p.updateStats(func(stats *PipelineStats) { stats.PacketsModified++ })
 					}
 				}
@@ -454,10 +454,12 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		if len(result.ModifiedPackets) > 0 {
 			for i, modPkt := range result.ModifiedPackets {
 				if len(modPkt) >= 20 && (modPkt[0]>>4 == 4) {
-					// Добавлен recalc checksum после модификации
+					// Checksums уже пересчитаны модификатором.
+					// sendModifiedPacket сбрасывает offload флаги — иначе
+					// Windows перезапишет наш checksum (в т.ч. intentionally bad для FakeBadSum).
 					fixTCPChecksum(modPkt)
 					recalculateIPChecksum(modPkt)
-					p.sendPacket(modPkt, pkt.Addr)
+					p.sendModifiedPacket(modPkt, pkt.Addr)
 					p.updateStats(func(stats *PipelineStats) {
 						stats.PacketsModified++
 						stats.PacketsSent++
@@ -496,35 +498,52 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	})
 }
 
-// fixTCPChecksum пересчитывает TCP контрольную сумму
+// fixTCPChecksum пересчитывает TCP checksum без аллокаций (#6).
+// Считает checksum streaming-способом: сначала псевдозаголовок, потом TCP данные —
+// без make([]byte) и append, которые дают ~2 аллокации на каждый пакет.
 func fixTCPChecksum(packet []byte) {
 	if len(packet) < 40 {
 		return
 	}
-
-	ipHeaderLen := (packet[0] & 0x0F) * 4
-	tcpOffset := int(ipHeaderLen)
-
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpOffset := ipHeaderLen
 	if len(packet) < tcpOffset+20 {
 		return
 	}
 
+	// Обнуляем поле checksum перед расчётом
 	packet[tcpOffset+16] = 0
 	packet[tcpOffset+17] = 0
 
-	pseudo := make([]byte, 12)
-	copy(pseudo[0:4], packet[12:16]) // Source IP
-	copy(pseudo[4:8], packet[16:20]) // Dest IP
+	tcpLen := len(packet) - tcpOffset
 
-	pseudo[9] = 6 // Protocol TCP
-	binary.BigEndian.PutUint16(pseudo[10:12], uint16(len(packet)-tcpOffset))
+	// Счёт ведём как uint32 — overflow складывается обратно
+	var sum uint32
 
-	tcpData := packet[tcpOffset:]
-	fullData := append(pseudo, tcpData...)
+	// Псевдозаголовок IPv4: srcIP(4) + dstIP(4) + 0(1) + proto(1) + tcpLen(2)
+	sum += uint32(packet[12])<<8 | uint32(packet[13]) // srcIP[0:2]
+	sum += uint32(packet[14])<<8 | uint32(packet[15]) // srcIP[2:4]
+	sum += uint32(packet[16])<<8 | uint32(packet[17]) // dstIP[0:2]
+	sum += uint32(packet[18])<<8 | uint32(packet[19]) // dstIP[2:4]
+	sum += uint32(6)                                  // protocol = TCP
+	sum += uint32(tcpLen)                             // TCP segment length
 
-	checksum := calculateChecksum(fullData)
-	packet[tcpOffset+16] = byte(checksum >> 8)
-	packet[tcpOffset+17] = byte(checksum & 0xFF)
+	// TCP заголовок + данные
+	tcp := packet[tcpOffset:]
+	for i := 0; i+1 < len(tcp); i += 2 {
+		sum += uint32(tcp[i])<<8 | uint32(tcp[i+1])
+	}
+	if len(tcp)%2 == 1 {
+		sum += uint32(tcp[len(tcp)-1]) << 8
+	}
+
+	// Свёртка
+	for sum>>16 != 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	cs := ^uint16(sum)
+	packet[tcpOffset+16] = byte(cs >> 8)
+	packet[tcpOffset+17] = byte(cs)
 }
 
 // calculateChecksum вычисляет контрольную сумму для TCP/UDP
@@ -572,11 +591,12 @@ func buildFakeQUICPacket(original []byte, quicPayload []byte) []byte {
 	// IP заголовок из оригинала (src/dst IP, TTL и т.д.)
 	copy(pkt[:ipHdrLen], original[:ipHdrLen])
 	binary.BigEndian.PutUint16(pkt[2:4], uint16(totalLen))
-	// Новый IP ID чтобы не конфликтовать с оригиналом
-	pkt[4] = 0
-	pkt[5] = 0
-	// Сбросить DF бит
-	pkt[6] = original[6] &^ 0x40
+	// IP ID: original+1 — выглядит как следующий пакет в потоке,
+	// а не как статичный 0 который легко fingerprint-ится (#7).
+	origID := binary.BigEndian.Uint16(original[4:6])
+	binary.BigEndian.PutUint16(pkt[4:6], origID+1)
+	// Сохраняем DF бит оригинала — fake не должен выделяться несоответствием флагов
+	pkt[6] = original[6]
 	pkt[7] = original[7]
 
 	// UDP заголовок: src/dst порты из оригинала
@@ -596,7 +616,7 @@ func buildFakeQUICPacket(original []byte, quicPayload []byte) []byte {
 	return pkt
 }
 
-// fixUDPChecksum пересчитывает UDP checksum (псевдозаголовок IPv4 + UDP).
+// fixUDPChecksum пересчитывает UDP checksum без аллокаций (#6).
 func fixUDPChecksum(packet []byte) {
 	if len(packet) < 28 {
 		return
@@ -610,16 +630,31 @@ func fixUDPChecksum(packet []byte) {
 	packet[udpOffset+7] = 0
 
 	udpLen := len(packet) - udpOffset
-	pseudo := make([]byte, 12)
-	copy(pseudo[0:4], packet[12:16])
-	copy(pseudo[4:8], packet[16:20])
-	pseudo[9] = 17
-	binary.BigEndian.PutUint16(pseudo[10:12], uint16(udpLen))
 
-	full := append(pseudo, packet[udpOffset:]...)
-	cs := calculateChecksum(full)
+	var sum uint32
+	// Псевдозаголовок
+	sum += uint32(packet[12])<<8 | uint32(packet[13])
+	sum += uint32(packet[14])<<8 | uint32(packet[15])
+	sum += uint32(packet[16])<<8 | uint32(packet[17])
+	sum += uint32(packet[18])<<8 | uint32(packet[19])
+	sum += uint32(17) // protocol UDP
+	sum += uint32(udpLen)
+
+	// UDP заголовок + данные
+	udp := packet[udpOffset:]
+	for i := 0; i+1 < len(udp); i += 2 {
+		sum += uint32(udp[i])<<8 | uint32(udp[i+1])
+	}
+	if len(udp)%2 == 1 {
+		sum += uint32(udp[len(udp)-1]) << 8
+	}
+
+	for sum>>16 != 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	cs := ^uint16(sum)
 	packet[udpOffset+6] = byte(cs >> 8)
-	packet[udpOffset+7] = byte(cs & 0xFF)
+	packet[udpOffset+7] = byte(cs)
 }
 
 // Вспомогательная функция
@@ -628,22 +663,38 @@ func getTCPSeq(pkt []byte) uint32 {
 	return binary.BigEndian.Uint32(pkt[ipLen+4:])
 }
 
-// sendPacket отправляет пакет через sender.
+// sendPacket реинжектирует пакет без модификаций (passthrough).
+// Checksum offload биты не трогаем — Windows пересчитает checksum сама.
 func (p *Pipeline) sendPacket(data []byte, addr []byte) bool {
 	if len(data) < 20 {
 		log.Printf("WARNING: Attempted to send packet too short (%d bytes)", len(data))
 		return false
 	}
-
-	// WinDivert требует валидный addr из WinDivertRecv.
-	// Если addr пустой — пакет не может быть реинжектирован корректно.
 	if len(addr) == 0 {
 		log.Printf("ERROR: addr is empty, WinDivert requires original WINDIVERT_ADDRESS — skipping send")
 		return false
 	}
-
 	if err := p.sender.Send(data, addr); err != nil {
 		log.Printf("ERROR: Failed to send packet: %v", err)
+		return false
+	}
+	return true
+}
+
+// sendModifiedPacket отправляет fake/split/disorder пакет с ручным checksum.
+// Вызывает SendModified — сбрасывает checksum offload биты в addr,
+// иначе Windows перезапишет наш intentionally-recalculated/bad checksum своим.
+func (p *Pipeline) sendModifiedPacket(data []byte, addr []byte) bool {
+	if len(data) < 20 {
+		log.Printf("WARNING: Attempted to send modified packet too short (%d bytes)", len(data))
+		return false
+	}
+	if len(addr) == 0 {
+		log.Printf("ERROR: addr is empty — skipping modified send")
+		return false
+	}
+	if err := p.sender.SendModified(data, addr); err != nil {
+		log.Printf("ERROR: Failed to send modified packet: %v", err)
 		return false
 	}
 	return true

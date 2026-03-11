@@ -42,6 +42,13 @@ type Manager struct {
 	rangesMu       sync.RWMutex
 	lastUpdateTime time.Time
 	updateErr      error
+
+	// testOverrides используется только Discovery для временного форсирования
+	// конкретной стратегии при тестовом соединении к домену.
+	// SelectStrategy проверяет его первым — ДО IP и hostname rules.
+	// Ключ: hostname в нижнем регистре. Значение: ID стратегии.
+	testOverrides   map[string]int
+	testOverridesMu sync.RWMutex
 }
 
 // ManagerStats статистика менеджера
@@ -56,12 +63,13 @@ type ManagerStats struct {
 // NewManager создает новый менеджер стратегий
 func NewManager() *Manager {
 	m := &Manager{
-		strategies:   make(map[int]*Strategy),
-		filters:      make(map[string]*StrategyFilter),
-		updateChan:   make(chan *StrategyResult, 1000),
-		closeChan:    make(chan struct{}),
-		googleRanges: make([]*net.IPNet, 0),
-		cidrIndex:    make(map[byte][]*net.IPNet),
+		strategies:    make(map[int]*Strategy),
+		filters:       make(map[string]*StrategyFilter),
+		updateChan:    make(chan *StrategyResult, 1000),
+		closeChan:     make(chan struct{}),
+		googleRanges:  make([]*net.IPNet, 0),
+		cidrIndex:     make(map[byte][]*net.IPNet),
+		testOverrides: make(map[string]int),
 	}
 
 	// Загружаем стратегии по умолчанию
@@ -380,119 +388,62 @@ func (m *Manager) GetStrategy(id int) (*Strategy, bool) {
 	return strat, exists
 }
 
-// hostnameStrategyID возвращает ID стратегии по подстроке hostname.
-// Проверки идут в порядке убывания специфичности.
-// Возвращает 0 если совпадений нет.
+// SetTestOverride временно форсирует стратегию strategyID для hostname.
+// Используется Discovery: вызвать перед тестовым соединением, ClearTestOverride — после.
+// Потокобезопасно.
+func (m *Manager) SetTestOverride(hostname string, strategyID int) {
+	m.testOverridesMu.Lock()
+	m.testOverrides[strings.ToLower(hostname)] = strategyID
+	m.testOverridesMu.Unlock()
+}
+
+// ClearTestOverride снимает тестовый override для hostname.
+func (m *Manager) ClearTestOverride(hostname string) {
+	m.testOverridesMu.Lock()
+	delete(m.testOverrides, strings.ToLower(hostname))
+	m.testOverridesMu.Unlock()
+}
+
+// hostnameRules — сопоставление подстрок hostname с nameHint для поиска стратегии.
+// Проверки идут в порядке убывания специфичности (первое совпадение выигрывает).
 var hostnameRules = []struct {
-	contains   string
-	strategyID int
+	hostnameContains string // подстрока в hostname (lowercase)
+	stratNameHint    string // подстрока в имени стратегии
 }{
-	// Google / YouTube / CDN — стратегия 25 (zapret general.bat)
-	{"youtube.com", 25},
-	{"googlevideo.com", 25}, // стриминг YouTube
-	{"googleapis.com", 25},
-	{"gstatic.com", 25},
-	{"ggpht.com", 25},
-	{"ytimg.com", 25},
-	{"youtu.be", 25},
-	{"googleusercontent.com", 25},
-	{"google.com", 25},
-	{"gmail.com", 25},
-	// Discord
-	{"discord.com", 21},
-	{"discord.gg", 21},
-	{"discordapp.com", 21},
-	{"discordapp.net", 21},
-	{"discord.media", 21},
-	// Telegram
-	{"telegram.org", 12},
-	{"telegram.me", 12},
-	{"t.me", 12},
+	{"youtube.com", "google"},
+	{"googlevideo.com", "google"},
+	{"googleapis.com", "google"},
+	{"gstatic.com", "google"},
+	{"ggpht.com", "google"},
+	{"ytimg.com", "google"},
+	{"youtu.be", "google"},
+	{"googleusercontent.com", "google"},
+	{"google.com", "google"},
+	{"gmail.com", "google"},
+	{"discord.com", "discord"},
+	{"discord.gg", "discord"},
+	{"discordapp.com", "discord"},
+	{"discordapp.net", "discord"},
+	{"discord.media", "discord"},
+	{"telegram.org", "telegram"},
+	{"telegram.me", "telegram"},
+	{".t.me", "telegram"},
 }
 
-// SelectStrategy выбирает стратегию для пакета.
-//
-// Порядок приоритетов:
-//  1. IP входит в диапазоны Google → strategy 25
-//  2. Hostname содержит известный домен → соответствующая стратегия
-//  3. Fallback: стратегия с наименьшим Priority (меньше = важнее),
-//     при этом стратегия 1 (passthrough) никогда не выбирается в fallback —
-//     только явно через pipeline как последний резерв.
-func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
-	log.Printf("[SELECT] Called for IP %s:%d, hostname='%s'", ip, port, hostname)
-
-	// 1. Проверка по IP — самый надёжный способ для YouTube/CDN
-	//    (hostname может отсутствовать при первых пакетах потока)
-	if m.isGoogleIP(ip) {
-		m.mu.RLock()
-		strat, exists := m.strategies[25]
-		m.mu.RUnlock()
-		if exists {
-			log.Printf("[SELECT] Google/YouTube IP match: %s → strategy 25 (%s)", ip, strat.Name)
-			return strat
-		}
-		// strategy 25 не загружена — ищем strategy 20 как запасную
-		m.mu.RLock()
-		strat, exists = m.strategies[20]
-		m.mu.RUnlock()
-		if exists {
-			log.Printf("[SELECT] Google IP fallback: %s → strategy 20 (%s)", ip, strat.Name)
-			return strat
-		}
+// protocolMatches — проверяет применимость стратегии к протоколу/порту.
+// TCP-стратегия: ApplyToTLS || ApplyToHTTP (не QUIC-only).
+// UDP-стратегия: ApplyToQUIC && port==443 (строго — DNS и прочий UDP не перехватываем).
+func protocolMatches(s *Strategy, protocol string, port int) bool {
+	switch protocol {
+	case "tcp":
+		return s.ApplyToTLS || s.ApplyToHTTP
+	case "udp":
+		return port == 443 && (s.ApplyToQUIC || s.FakeQUICFile != "")
 	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	lower := strings.ToLower(hostname)
-	log.Printf("[SELECT] Hostname lookup: '%s'", lower)
-
-	// 2. Hostname-матч
-	if lower != "" {
-		for _, rule := range hostnameRules {
-			if strings.Contains(lower, rule.contains) {
-				if strat, exists := m.strategies[rule.strategyID]; exists {
-					log.Printf("[SELECT] Hostname match '%s' ⊃ '%s' → strategy %d (%s)",
-						lower, rule.contains, strat.ID, strat.Name)
-					return strat
-				}
-			}
-		}
-	}
-
-	// 3. Fallback: лучшая не-passthrough стратегия для данного протокола/порта.
-	//    isPassthrough() проверяет, что у стратегии нет реальных модификаций.
-	var best *Strategy
-	bestPriority := int(^uint(0) >> 1) // MaxInt
-
-	for _, strat := range m.strategies {
-		if strat.ID == 1 || isPassthrough(strat) {
-			continue // никогда не выбираем passthrough в fallback
-		}
-		// TCP: WinDivert уже ограничивает 80/443 — порт не проверяем
-		// UDP: строго port==443 — иначе udp:53 (DNS) попадёт под QUIC-стратегию
-		protocolMatch := (protocol == "tcp" && (strat.ApplyToTLS || strat.ApplyToHTTP)) ||
-			(protocol == "udp" && port == 443 && strat.ApplyToQUIC)
-		if !protocolMatch {
-			continue
-		}
-		if strat.Priority < bestPriority {
-			best = strat
-			bestPriority = strat.Priority
-		}
-	}
-
-	if best != nil {
-		log.Printf("[SELECT] Fallback → strategy %d (%s) priority=%d", best.ID, best.Name, best.Priority)
-		return best
-	}
-
-	log.Printf("[SELECT] No non-passthrough strategy found for %s:%d (hostname: '%s')", ip, port, hostname)
-	return nil
+	return false
 }
 
-// isPassthrough возвращает true если стратегия не делает никаких реальных модификаций.
-// Такие стратегии не должны выигрывать fallback-выбор.
+// isPassthrough возвращает true если стратегия не делает реальных модификаций.
 func isPassthrough(s *Strategy) bool {
 	return s.SplitMode == SplitNone &&
 		s.DisorderMode == DisorderNone &&
@@ -500,7 +451,127 @@ func isPassthrough(s *Strategy) bool {
 		!s.SynData &&
 		!s.MultiDisorder &&
 		!s.FakedSplit &&
-		s.SeqOvlLen == 0
+		s.SeqOvlLen == 0 &&
+		len(s.FakeTLSFiles) == 0 &&
+		s.FakeQUICFile == ""
+}
+
+// selectByNameHint ищет стратегию с наименьшим Priority среди тех, чьё имя
+// содержит nameHint и чей протокол соответствует protocol/port.
+// Вызывается под m.mu.RLock.
+func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strategy {
+	var best *Strategy
+	bestPri := int(^uint(0) >> 1)
+	for _, s := range m.strategies {
+		if isPassthrough(s) {
+			continue
+		}
+		if !strings.Contains(s.Name, nameHint) {
+			continue
+		}
+		if !protocolMatches(s, protocol, port) {
+			continue
+		}
+		if s.Priority < bestPri {
+			best = s
+			bestPri = s.Priority
+		}
+	}
+	return best
+}
+
+// bestForProtocol выбирает лучшую (наименьший Priority) не-passthrough стратегию
+// для данного протокола. Вызывается под m.mu.RLock.
+func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
+	var best *Strategy
+	bestPri := int(^uint(0) >> 1)
+	for _, s := range m.strategies {
+		if isPassthrough(s) {
+			continue
+		}
+		if !protocolMatches(s, protocol, port) {
+			continue
+		}
+		if s.Priority < bestPri {
+			best = s
+			bestPri = s.Priority
+		}
+	}
+	return best
+}
+
+// SelectStrategy выбирает стратегию для пакета.
+//
+// Порядок приоритетов:
+//  1. IP входит в диапазоны Google → лучшая "google" стратегия (по nameHint)
+//  2. Hostname содержит известный домен → стратегия по nameHint из hostnameRules
+//  3. Fallback: лучшая по Priority не-passthrough стратегия для данного протокола
+//
+// Стратегии ищутся по подстроке имени — числовые ID не хардкодируются,
+// что позволяет загружать strategies.json с любыми ID без правки кода.
+func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
+	log.Printf("[SELECT] IP=%s:%d hostname='%s' proto=%s", ip, port, hostname, protocol)
+
+	// 0. Test override — форсированная стратегия от Discovery.
+	//    Проверяем ДО всех остальных правил чтобы результат теста был чистым.
+	if hostname != "" {
+		lower := strings.ToLower(hostname)
+		m.testOverridesMu.RLock()
+		overrideID, hasOverride := m.testOverrides[lower]
+		m.testOverridesMu.RUnlock()
+		if hasOverride {
+			m.mu.RLock()
+			s, exists := m.strategies[overrideID]
+			m.mu.RUnlock()
+			if exists {
+				log.Printf("[SELECT] TestOverride hostname='%s' → strategy %d (%s)", lower, s.ID, s.Name)
+				return s
+			}
+		}
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// 1. Google IP — самый надёжный признак для YouTube/CDN
+	//    (hostname может быть пустым на первых пакетах потока)
+	if m.isGoogleIP(ip) {
+		hint := "google"
+		if protocol == "udp" {
+			hint = "quic" // QUIC fake стратегии называются "quic-fake-*"
+		}
+		if s := m.selectByNameHint(hint, protocol, port); s != nil {
+			log.Printf("[SELECT] Google IP %s → strategy %d (%s)", ip, s.ID, s.Name)
+			return s
+		}
+		// google-стратегия не найдена — берём лучшую для протокола
+		if s := m.bestForProtocol(protocol, port); s != nil {
+			log.Printf("[SELECT] Google IP %s (no google strat) → strategy %d (%s)", ip, s.ID, s.Name)
+			return s
+		}
+	}
+
+	// 2. Hostname match
+	if hostname != "" {
+		lower := strings.ToLower(hostname)
+		for _, rule := range hostnameRules {
+			if strings.Contains(lower, rule.hostnameContains) {
+				if s := m.selectByNameHint(rule.stratNameHint, protocol, port); s != nil {
+					log.Printf("[SELECT] Hostname '%s' → strategy %d (%s)", lower, s.ID, s.Name)
+					return s
+				}
+			}
+		}
+	}
+
+	// 3. Fallback: лучшая для протокола
+	if s := m.bestForProtocol(protocol, port); s != nil {
+		log.Printf("[SELECT] Fallback → strategy %d (%s) priority=%d", s.ID, s.Name, s.Priority)
+		return s
+	}
+
+	log.Printf("[SELECT] No strategy for %s:%d (hostname='%s')", ip, port, hostname)
+	return nil
 }
 
 // SetDefault устанавливает стратегию по умолчанию

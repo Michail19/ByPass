@@ -24,13 +24,12 @@ type WinDivertHandle uintptr
 
 // RawSender отправляет пакеты через WinDivert (Windows)
 type RawSender struct {
-	handle     WinDivertHandle
-	cfg        Config
-	stats      SenderStats
-	dll        *syscall.DLL  // Сохранённая DLL
-	sendProc   *syscall.Proc // Сохранённая процедура
-	sendExProc *syscall.Proc // Для batch
-	closeProc  *syscall.Proc // Для close
+	handle    WinDivertHandle
+	cfg       Config
+	stats     SenderStats
+	dll       *syscall.DLL
+	sendProc  *syscall.Proc
+	closeProc *syscall.Proc
 }
 
 // init регистрирует фабричную функцию для Windows
@@ -54,11 +53,6 @@ func newWindowsSender(cfg Config) (Sender, error) {
 		dll.Release()
 		return nil, fmt.Errorf("failed to find WinDivertSend: %v", err)
 	}
-	sendExProc, err := dll.FindProc("WinDivertSendEx")
-	if err != nil {
-		log.Printf("WinDivertSendEx not found, batch will use loop: %v", err)
-		sendExProc = nil
-	}
 	closeProc, err := dll.FindProc("WinDivertClose")
 	if err != nil {
 		dll.Release()
@@ -74,12 +68,11 @@ func newWindowsSender(cfg Config) (Sender, error) {
 
 	log.Printf("WinDivert initialized with handle: %v", handle)
 	return &RawSender{
-		handle:     handle,
-		cfg:        cfg,
-		dll:        dll,
-		sendProc:   sendProc,
-		sendExProc: sendExProc,
-		closeProc:  closeProc,
+		handle:    handle,
+		cfg:       cfg,
+		dll:       dll,
+		sendProc:  sendProc,
+		closeProc: closeProc,
 	}, nil
 }
 
@@ -116,20 +109,65 @@ func openWinDivertWithDLL(dll *syscall.DLL) (WinDivertHandle, error) {
 	return WinDivertHandle(handle), nil
 }
 
+// winDivertAddrClearChecksumFlags сбрасывает checksum-offload биты в WINDIVERT_ADDRESS.
+//
+// WINDIVERT_ADDRESS layout (WinDivert 2.x):
+//
+//	[0..7]  Timestamp (INT64)
+//	[8..11] Flags (UINT32 bitfield):
+//	          bits 0-7:  Layer
+//	          bits 8-15: Event
+//	          bit 16: Sniffed
+//	          bit 17: Outbound
+//	          bit 18: Loopback
+//	          bit 19: Impostor
+//	          bit 20: IPv6
+//	          bit 21: IPChecksum   ← нужно сбросить для модифицированных пакетов
+//	          bit 22: TCPChecksum  ← нужно сбросить для модифицированных пакетов
+//	          bit 23: UDPChecksum  ← нужно сбросить для модифицированных пакетов
+//
+// Если offload-флаги выставлены, Windows пересчитает checksum сама и перезапишет
+// наш вручную посчитанный — в результате DPI увидит правильный checksum.
+// Для modified пакетов (fake/split/disorder) мы хотим именно наш checksum.
+//
+// Для passthrough пакетов НЕ вызываем — пусть offload работает как обычно.
+func winDivertAddrClearChecksumFlags(addr []byte) {
+	if len(addr) < 11 {
+		return
+	}
+	// byte 10 содержит bits 16-23; IPChecksum=bit5, TCPChecksum=bit6, UDPChecksum=bit7
+	addr[10] &^= 0xE0 // сбросить bits 5,6,7 байта 10 = bits 21,22,23 слова
+}
+
 // Send отправляет пакет через WinDivert с addr
 func (s *RawSender) Send(packet []byte, addr []byte) error {
+	return s.sendInternal(packet, addr, false)
+}
+
+// SendModified отправляет модифицированный пакет — сбрасывает checksum-offload флаги (#2).
+// Используется для fake/split/disorder пакетов где checksum уже пересчитан вручную.
+func (s *RawSender) SendModified(packet []byte, addr []byte) error {
+	return s.sendInternal(packet, addr, true)
+}
+
+func (s *RawSender) sendInternal(packet []byte, addr []byte, clearChecksumFlags bool) error {
 	if len(packet) < 20 {
-		s.stats.PacketsFailed++
+		s.stats.PacketsFailed.Add(1)
 		return fmt.Errorf("%w: packet too short: %d bytes", ErrInvalidPacket, len(packet))
 	}
-
-	// ВАЖНО: addr — это структура WINDIVERT_ADDRESS, передаваемая из WinDivertRecv.
-	// Её НЕЛЬЗЯ модифицировать или паддить — это сбросит Direction, InterfaceIndex,
-	// ChecksumOffload флаги и другие поля, что приведёт к неправильному реинжекту.
-	// Если addr пустой — это ошибка вызывающего кода.
 	if len(addr) == 0 {
-		s.stats.PacketsFailed++
+		s.stats.PacketsFailed.Add(1)
 		return fmt.Errorf("addr is empty: WinDivertSend requires original WINDIVERT_ADDRESS from WinDivertRecv")
+	}
+
+	// Для модифицированных пакетов: сбросить offload флаги в копии addr.
+	// Оригинальный addr не трогаем — он может понадобиться для последующих sendPacket.
+	sendAddr := addr
+	if clearChecksumFlags && len(addr) >= 11 {
+		addrCopy := make([]byte, len(addr))
+		copy(addrCopy, addr)
+		winDivertAddrClearChecksumFlags(addrCopy)
+		sendAddr = addrCopy
 	}
 
 	var sendLen uint
@@ -138,11 +176,11 @@ func (s *RawSender) Send(packet []byte, addr []byte) error {
 		uintptr(unsafe.Pointer(&packet[0])),
 		uintptr(len(packet)),
 		uintptr(unsafe.Pointer(&sendLen)),
-		uintptr(unsafe.Pointer(&addr[0])),
+		uintptr(unsafe.Pointer(&sendAddr[0])),
 	)
 
 	if ret == 0 {
-		s.stats.PacketsFailed++
+		s.stats.PacketsFailed.Add(1)
 		return fmt.Errorf("WinDivertSend failed: %v", callErr)
 	}
 
@@ -150,8 +188,8 @@ func (s *RawSender) Send(packet []byte, addr []byte) error {
 		log.Printf("WARNING: Sent %d bytes but expected %d", sendLen, len(packet))
 	}
 
-	s.stats.PacketsSent++
-	s.stats.BytesSent += uint64(sendLen)
+	s.stats.PacketsSent.Add(1)
+	s.stats.BytesSent.Add(uint64(sendLen))
 	return nil
 }
 
@@ -161,38 +199,19 @@ func (s *RawSender) SendWithDelay(packet []byte, addr []byte, delay time.Duratio
 	return s.Send(packet, addr)
 }
 
-// SendBatch отправляет несколько пакетов
+// SendBatch отправляет несколько пакетов последовательно.
+//
+// WinDivertSendEx НЕ поддерживает batch в виде массива буферов.
+// Его настоящая сигнатура идентична WinDivertSend — это просто версия с флагами.
+// Батч-отправка через один syscall в WinDivert невозможна (#3).
+// Используем цикл — overhead минимален, пакеты уходят без лишних аллокаций.
 func (s *RawSender) SendBatch(packets [][]byte, addr []byte) error {
-	if s.sendExProc == nil {
-		// Fallback loop
-		for _, pkt := range packets {
-			if err := s.Send(pkt, addr); err != nil {
-				return err
-			}
+	for _, pkt := range packets {
+		if err := s.Send(pkt, addr); err != nil {
+			return err
 		}
-		s.stats.BatchesSent++
-		return nil
 	}
-
-	// Native batch
-	ptrs := make([]uintptr, len(packets))
-	lens := make([]uint, len(packets))
-	for i, pkt := range packets {
-		ptrs[i] = uintptr(unsafe.Pointer(&pkt[0]))
-		lens[i] = uint(len(pkt))
-	}
-
-	ret, _, err := s.sendExProc.Call(
-		uintptr(s.handle),
-		uintptr(unsafe.Pointer(&ptrs[0])),
-		uintptr(unsafe.Pointer(&lens[0])),
-		uintptr(len(packets)),
-	)
-	if ret == 0 {
-		return fmt.Errorf("WinDivertSendEx failed: %v", err)
-	}
-	s.stats.PacketsSent += uint64(len(packets))
-	s.stats.BatchesSent++
+	s.stats.BatchesSent.Add(1)
 	return nil
 }
 
@@ -212,15 +231,14 @@ func (s *RawSender) Close() error {
 	}
 
 	s.sendProc = nil
-	s.sendExProc = nil
 	s.closeProc = nil
 
 	return nil
 }
 
-// GetStats возвращает статистику
-func (s *RawSender) GetStats() SenderStats {
-	return s.stats
+// GetStats возвращает иммутабельный снимок статистики.
+func (s *RawSender) GetStats() SenderStatsSnapshot {
+	return s.stats.Snapshot()
 }
 
 // newWindowsSenderWithHandle создает с handle
@@ -241,12 +259,6 @@ func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
 		return nil, fmt.Errorf("failed to find WinDivertSend: %v", err)
 	}
 
-	sendExProc, err := dll.FindProc("WinDivertSendEx")
-	if err != nil {
-		log.Printf("WinDivertSendEx not found: %v", err)
-		sendExProc = nil
-	}
-
 	closeProc, err := dll.FindProc("WinDivertClose")
 	if err != nil {
 		dll.Release()
@@ -254,12 +266,11 @@ func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
 	}
 
 	return &RawSender{
-		handle:     WinDivertHandle(handle),
-		cfg:        cfg,
-		dll:        dll,
-		sendProc:   sendProc,
-		sendExProc: sendExProc,
-		closeProc:  closeProc,
+		handle:    WinDivertHandle(handle),
+		cfg:       cfg,
+		dll:       dll,
+		sendProc:  sendProc,
+		closeProc: closeProc,
 	}, nil
 }
 

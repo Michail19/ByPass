@@ -10,10 +10,10 @@ import (
 // НЕ меняет порядок TCP сегментов (→ missing packets → duplicate ACK → slow start reset).
 // Вместо этого: decoy с низким TTL + реальные сегменты в прямом порядке.
 //
-// DisorderOutOfBand:  OOB decoy (bad seq + low TTL), затем все сегменты прямо
-// DisorderTTLZero:    decoy = первый сегмент с TTL=disorder_ttl, затем все сегменты
-// DisorderFakedDisorder: fake-пакет перед сегментами
-// DisorderMulti:      disorder в нескольких позициях (multidisorder)
+// DisorderOutOfBand:      OOB decoy (bad seq + low TTL), затем все сегменты прямо
+// DisorderTTLZero:        decoy = первый сегмент с TTL=disorder_ttl, затем все сегменты
+// DisorderFakedDisorder:  fake-пакет перед сегментами
+// DisorderMulti:          disorder в нескольких позициях (multidisorder)
 func (pm *PacketModifier) ApplyDisorder(
 	packet []byte,
 	disorderPos []int,
@@ -38,28 +38,30 @@ func (pm *PacketModifier) ApplyDisorder(
 		return nil, nil
 	}
 
-	seen := map[int]bool{}
+	// Dedup без map-аллокации (#10): sort + linear pass
 	var validPos []int
 	for _, pos := range disorderPos {
-		if pos > 0 && pos < payloadLen && !seen[pos] {
+		if pos > 0 && pos < payloadLen {
 			validPos = append(validPos, pos)
-			seen[pos] = true
 		}
 	}
 	if len(validPos) == 0 {
 		return nil, nil
 	}
 	sortInts(validPos)
+	validPos = dedupInts(validPos)
 
 	originalSeq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
 	var results [][]byte
 
 	switch mode {
 	case strategy.DisorderOutOfBand:
-		// OOB: пакет с заведомо неверным seq + low TTL
+		// OOB: пакет с заведомо неверным seq + low TTL.
+		// seq = originalSeq - 1: один байт "до" начала потока — вне TCP-окна у сервера,
+		// но не паляется как 0xFFFFFFFF который тривиально детектится DPI (#3).
 		oobPkt := make([]byte, len(packet))
 		copy(oobPkt, packet)
-		binary.BigEndian.PutUint32(oobPkt[ipHdrLen+4:], 0xFFFFFFFF)
+		binary.BigEndian.PutUint32(oobPkt[ipHdrLen+4:], originalSeq-1)
 		setIPTTL(oobPkt, ttl)
 		recalculateIPChecksum(oobPkt)
 		FixTCPChecksum(oobPkt)
@@ -81,7 +83,8 @@ func (pm *PacketModifier) ApplyDisorder(
 		binary.BigEndian.PutUint16(decoy[2:4], uint16(firstSegEnd))
 		binary.BigEndian.PutUint32(decoy[ipHdrLen+4:], originalSeq)
 		copy(decoy[payloadOffset:], packet[payloadOffset:firstSegEnd])
-		decoy[6] &^= 0x40
+		// DF: сохраняем из оригинала (#6) — decoy скопирован из packet[:payloadOffset],
+		// packet[6] уже содержит оригинальные Flags+FragOffset.
 		setIPTTL(decoy, ttl)
 		recalculateIPChecksum(decoy)
 		FixTCPChecksum(decoy)
@@ -133,4 +136,20 @@ func sortInts(a []int) {
 			a[j], a[j-1] = a[j-1], a[j]
 		}
 	}
+}
+
+// dedupInts удаляет дубликаты из уже отсортированного среза без аллокации (#10).
+// Работает in-place: возвращает подрез исходного слайса.
+func dedupInts(a []int) []int {
+	if len(a) <= 1 {
+		return a
+	}
+	w := 1
+	for i := 1; i < len(a); i++ {
+		if a[i] != a[i-1] {
+			a[w] = a[i]
+			w++
+		}
+	}
+	return a[:w]
 }
