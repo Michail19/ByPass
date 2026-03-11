@@ -4,44 +4,83 @@ import (
 	"ByPass/internal/strategy"
 	"encoding/binary"
 	"fmt"
-	"math/rand"
 )
 
-// ApplyFake создает поддельный пакет.
+// ApplyFake создаёт поддельный пакет на основе оригинала.
 //
-// TTL должен подбираться как "расстояние до DPI":
-//   - слишком малый → fake не достигает DPI, обход не работает
-//   - слишком большой → fake достигает сервера, который получает bad seq/checksum
-//     и сбрасывает соединение RST
-//     Рекомендуемые значения: 4–8 (настраивается в стратегии как FakeTTL).
-func (pm *PacketModifier) ApplyFake(packet []byte, pos int, ttl int, mode strategy.FakeMode, fooling uint32) ([][]byte, error) {
-	fake := append([]byte{}, packet...)
+// fakePayload — если не nil, заменяет TCP payload в fake-пакете
+// (используется для FakeTLSFile/FakeTLSMod режимов).
+//
+// Fooling-маска определяет, как fake-пакет будет "невидим" для сервера:
+//   - FoolingTS     : обнулить TCP Timestamp → сервер дропнет тихо
+//   - FoolingMD5Sig : добавить TCP MD5 опцию → unsupported, дроп
+//   - FoolingBadSum : испортить TCP checksum → сервер дропнет, DPI принимает
+//   - FoolingBadSeq : seq += BadSeqIncrement → вне TCP-окна у сервера
+//   - FoolingDataNoAck : убрать флаг ACK
+//
+// Для FoolingBadSum: TCP checksum намеренно испорчен и НЕ пересчитывается после.
+func (pm *PacketModifier) ApplyFake(
+	packet []byte,
+	ttl int,
+	fooling uint32,
+	badSeqIncrement int64,
+	fakePayload []byte,
+) ([][]byte, error) {
 
-	ipHdrLen := int(fake[0]&0x0F) * 4
+	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
+		return nil, fmt.Errorf("invalid packet")
+	}
+
+	ipHdrLen := int(packet[0]&0x0F) * 4
 	tcpOffset := ipHdrLen
+	tcpHdrLen := int(packet[tcpOffset+12]>>4) * 4
+	payloadOffset := tcpOffset + tcpHdrLen
 
-	switch mode {
-	case strategy.FakeBadSum:
-		// ВАЖНО: сначала считаем правильный checksum, потом портим — и больше НЕ пересчитываем.
-		// Старый код вызывал FixTCPChecksum в конце, что восстанавливало валидный checksum
-		// и делало FakeBadSum бесполезным: DPI принимал пакет как настоящий.
-		FixTCPChecksum(fake)
-		fake[tcpOffset+16] ^= 0xFF
-		fake[tcpOffset+17] ^= 0xFF
-		// Только IP checksum (TTL изменится ниже, IP checksum нужно обновить)
+	var fake []byte
+
+	if fakePayload != nil {
+		// Заменяем TCP payload на fakePayload (например, другой TLS ClientHello)
+		newLen := payloadOffset + len(fakePayload)
+		fake = make([]byte, newLen)
+		copy(fake, packet[:payloadOffset])
+		copy(fake[payloadOffset:], fakePayload)
+		binary.BigEndian.PutUint16(fake[2:4], uint16(newLen))
+	} else {
+		fake = make([]byte, len(packet))
+		copy(fake, packet)
+	}
+
+	// FoolingBadSum: специальный путь — портим checksum и выходим сразу.
+	// FixTCPChecksum в конце НЕ вызываем — это сломало бы весь смысл.
+	if fooling&strategy.FoolingBadSum != 0 {
 		setIPTTL(fake, ttl)
 		recalculateIPChecksum(fake)
-		// TCP checksum НЕ пересчитываем — он намеренно испорчен
+		FixTCPChecksum(fake) // сначала считаем правильный
+		fake[tcpOffset+16] ^= 0xFF
+		fake[tcpOffset+17] ^= 0xFF
+		// IP checksum уже правильный, TCP умышленно испорчен
 		return [][]byte{fake}, nil
+	}
 
-	case strategy.FakeBadSeq:
-		delta := uint32(rand.Int31n(1000000) + 1)
-		modifyTCPSeq(fake, delta)
+	// Остальные режимы
+	if fooling&strategy.FoolingBadSeq != 0 {
+		if badSeqIncrement == 0 {
+			badSeqIncrement = 2 // минимальный безопасный дефолт
+		}
+		seq := binary.BigEndian.Uint32(fake[tcpOffset+4:])
+		seq += uint32(badSeqIncrement)
+		binary.BigEndian.PutUint32(fake[tcpOffset+4:], seq)
+	}
 
-	case strategy.FakeDataNoAck:
-		clearTCPACK(fake)
+	if fooling&strategy.FoolingDataNoAck != 0 {
+		fake[tcpOffset+13] &^= 0x10 // clear ACK
+	}
 
-	case strategy.FakeMD5Sig:
+	if fooling&strategy.FoolingTS != 0 {
+		zeroTCPTimestamp(fake, ipHdrLen)
+	}
+
+	if fooling&strategy.FoolingMD5Sig != 0 {
 		var err error
 		fake, err = addTCPOptionMD5(fake)
 		if err != nil {
@@ -49,7 +88,6 @@ func (pm *PacketModifier) ApplyFake(packet []byte, pos int, ttl int, mode strate
 		}
 	}
 
-	// Для всех режимов кроме FakeBadSum: устанавливаем TTL и пересчитываем checksums
 	setIPTTL(fake, ttl)
 	recalculateIPChecksum(fake)
 	FixTCPChecksum(fake)
@@ -57,100 +95,64 @@ func (pm *PacketModifier) ApplyFake(packet []byte, pos int, ttl int, mode strate
 	return [][]byte{fake}, nil
 }
 
-// modifyTCPWindow изменяет window size (для ACK)
-func modifyTCPWindow(packet []byte, window uint16) {
-	if len(packet) < 40 || packet[9] != 6 {
-		return // или error
-	}
-	ipHeaderLen := int(packet[0]&0x0F) * 4
-	tcpHeaderOffset := ipHeaderLen
-	if len(packet) < tcpHeaderOffset+20 {
-		return
+// zeroTCPTimestamp обнуляет значение TCP Timestamp опции (kind=8).
+// Сервер получает пакет с timestamp=0, который не совпадает с его окном →
+// пакет отбрасывается тихо (RFC 7323, §5.3).
+func zeroTCPTimestamp(packet []byte, ipHdrLen int) {
+	tcpOffset := ipHdrLen
+	tcpHdrLen := int(packet[tcpOffset+12]>>4) * 4
+	optStart := tcpOffset + 20
+	optEnd := tcpOffset + tcpHdrLen
+
+	if optEnd > len(packet) {
+		optEnd = len(packet)
 	}
 
-	// Window size в байтах 14-15 TCP заголовка
-	binary.BigEndian.PutUint16(packet[tcpHeaderOffset+14:], window)
+	pos := optStart
+	for pos < optEnd {
+		kind := packet[pos]
+		switch kind {
+		case 0: // End of Options
+			return
+		case 1: // NOP
+			pos++
+		case 8: // Timestamp (kind=8, len=10: val[4] + ecr[4])
+			if pos+10 <= optEnd {
+				// val: bytes [pos+2..pos+5] → ставим 0
+				packet[pos+2] = 0
+				packet[pos+3] = 0
+				packet[pos+4] = 0
+				packet[pos+5] = 0
+				// ecr: bytes [pos+6..pos+9] → тоже 0 (опционально)
+				packet[pos+6] = 0
+				packet[pos+7] = 0
+				packet[pos+8] = 0
+				packet[pos+9] = 0
+			}
+			return
+		default:
+			if pos+1 >= optEnd {
+				return
+			}
+			length := int(packet[pos+1])
+			if length < 2 {
+				return
+			}
+			pos += length
+		}
+	}
 }
 
-// addTCPOptionMD5 добавляет опцию MD5 Signature в TCP заголовок и возвращает новый пакет
-func addTCPOptionMD5(packet []byte) ([]byte, error) {
-	if len(packet) < 40 {
-		return nil, fmt.Errorf("packet too short")
-	}
-
-	// Проверяем, что это TCP
-	if packet[9] != 6 {
-		return nil, fmt.Errorf("not TCP packet")
-	}
-
-	ipHeaderLen := int(packet[0]&0x0F) * 4
-	tcpHeaderOffset := ipHeaderLen
-
-	if len(packet) < tcpHeaderOffset+20 {
-		return nil, fmt.Errorf("packet too short for TCP header")
-	}
-
-	// Определяем длину TCP заголовка
-	tcpHeaderLenWords := int(packet[tcpHeaderOffset+12] >> 4)
-	tcpHeaderLen := tcpHeaderLenWords * 4
-
-	// Новый TCP заголовок с опцией MD5 (18 байт, но выравниваем на 20 для простоты)
-	newTCPHeaderLen := tcpHeaderLen + 20
-	if newTCPHeaderLen > 60 {
-		return nil, fmt.Errorf("TCP header too long")
-	}
-
-	// Новый полный пакет
-	newPacketLen := ipHeaderLen + newTCPHeaderLen + (len(packet) - tcpHeaderOffset - tcpHeaderLen)
-	newPacket := make([]byte, newPacketLen)
-
-	// Копируем IP заголовок
-	copy(newPacket[:ipHeaderLen], packet[:ipHeaderLen])
-
-	// Копируем старый TCP заголовок
-	copy(newPacket[ipHeaderLen:ipHeaderLen+tcpHeaderLen], packet[tcpHeaderOffset:tcpHeaderOffset+tcpHeaderLen])
-
-	// Добавляем опцию MD5
-	optPos := ipHeaderLen + tcpHeaderLen
-	newPacket[optPos] = 19   // kind MD5
-	newPacket[optPos+1] = 18 // length
-	// 16 байт данных (нулями)
-
-	// Копируем данные после TCP заголовка
-	if len(packet) > tcpHeaderOffset+tcpHeaderLen {
-		copy(newPacket[ipHeaderLen+newTCPHeaderLen:], packet[tcpHeaderOffset+tcpHeaderLen:])
-	}
-
-	// Обновляем длину TCP заголовка
-	newTCPHeaderLenWords := newTCPHeaderLen / 4
-	newPacket[ipHeaderLen+12] = byte(newTCPHeaderLenWords<<4) | (packet[tcpHeaderOffset+12] & 0x0F)
-
-	// Обновляем totalLen в IP
-	newTotalLen := uint16(newPacketLen)
-	binary.BigEndian.PutUint16(newPacket[2:4], newTotalLen)
-
-	// Пересчитываем IP checksum
-	binary.BigEndian.PutUint16(newPacket[10:12], 0)
-	ipChecksum := calculateIPChecksum(newPacket[:ipHeaderLen])
-	binary.BigEndian.PutUint16(newPacket[10:12], ipChecksum)
-
-	// Пересчитываем TCP checksum (позже в вызывающем коде)
-
-	return newPacket, nil
-}
-
-// modifyTCPSeq изменяет sequence number
+// modifyTCPSeq изменяет sequence number (legacy, используется в disorder.go)
 func modifyTCPSeq(packet []byte, delta uint32) {
 	if len(packet) < 40 || packet[9] != 6 {
-		return // или error
+		return
 	}
 	ipHeaderLen := int(packet[0]&0x0F) * 4
 	tcpHeaderOffset := ipHeaderLen
 	if len(packet) < tcpHeaderOffset+20 {
 		return
 	}
-
-	// Sequence number находится в байтах 4-7 TCP заголовка
 	seq := binary.BigEndian.Uint32(packet[tcpHeaderOffset+4:])
 	seq += delta
 	binary.BigEndian.PutUint32(packet[tcpHeaderOffset+4:], seq)
@@ -159,15 +161,62 @@ func modifyTCPSeq(packet []byte, delta uint32) {
 // clearTCPACK сбрасывает флаг ACK
 func clearTCPACK(packet []byte) {
 	if len(packet) < 40 || packet[9] != 6 {
-		return // или error
-	}
-	ipHeaderLen := int(packet[0]&0x0F) * 4
-	tcpHeaderOffset := ipHeaderLen
-	if len(packet) < tcpHeaderOffset+20 {
 		return
 	}
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	packet[ipHeaderLen+13] &^= 0x10
+}
 
-	// Флаги находятся в байте 13 TCP заголовка
-	// Сбрасываем бит ACK (0x10)
-	packet[tcpHeaderOffset+13] &^= 0x10
+// addTCPOptionMD5 добавляет опцию MD5 Signature (kind=19, len=18)
+func addTCPOptionMD5(packet []byte) ([]byte, error) {
+	if len(packet) < 40 {
+		return nil, fmt.Errorf("packet too short")
+	}
+	if packet[9] != 6 {
+		return nil, fmt.Errorf("not TCP")
+	}
+
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	tcpHeaderLenWords := int(packet[ipHeaderLen+12] >> 4)
+	tcpHeaderLen := tcpHeaderLenWords * 4
+
+	// MD5 option: kind(1) + len(1) + md5(16) = 18 байт, выравниваем до 20 (NOP×2)
+	addLen := 20
+	newTCPHeaderLen := tcpHeaderLen + addLen
+	if newTCPHeaderLen > 60 {
+		return nil, fmt.Errorf("TCP header overflow")
+	}
+
+	dataOffset := ipHeaderLen + tcpHeaderLen
+	newPacketLen := ipHeaderLen + newTCPHeaderLen + (len(packet) - dataOffset)
+	newPkt := make([]byte, newPacketLen)
+
+	copy(newPkt[:ipHeaderLen], packet[:ipHeaderLen])
+	copy(newPkt[ipHeaderLen:ipHeaderLen+tcpHeaderLen], packet[ipHeaderLen:ipHeaderLen+tcpHeaderLen])
+
+	optPos := ipHeaderLen + tcpHeaderLen
+	newPkt[optPos] = 19   // kind: MD5
+	newPkt[optPos+1] = 18 // length
+	// 16 байт MD5 (нули достаточно — сервер дропнет из-за неверного значения)
+
+	if len(packet) > dataOffset {
+		copy(newPkt[ipHeaderLen+newTCPHeaderLen:], packet[dataOffset:])
+	}
+
+	// Обновить data offset в TCP заголовке
+	newPkt[ipHeaderLen+12] = byte(newTCPHeaderLen/4<<4) | (packet[ipHeaderLen+12] & 0x0F)
+
+	// Обновить Total Length в IP
+	binary.BigEndian.PutUint16(newPkt[2:4], uint16(newPacketLen))
+
+	return newPkt, nil
+}
+
+// modifyTCPWindow изменяет window size
+func modifyTCPWindow(packet []byte, window uint16) {
+	if len(packet) < 40 || packet[9] != 6 {
+		return
+	}
+	ipHeaderLen := int(packet[0]&0x0F) * 4
+	binary.BigEndian.PutUint16(packet[ipHeaderLen+14:], window)
 }

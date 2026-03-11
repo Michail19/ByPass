@@ -89,10 +89,11 @@ func openWinDivertWithDLL(dll *syscall.DLL) (WinDivertHandle, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to find WinDivertOpen: %v", err)
 	}
-	// Только TCP: QUIC (UDP 443) не трогаем — он encrypted и packet-number based,
-	// любая модификация приводит к QUIC_NETWORK_IDLE_TIMEOUT.
-	// zapret тоже не перехватывает QUIC.
-	filter := "outbound and !loopback and (tcp.DstPort == 443 or tcp.DstPort == 80)"
+	// Перехватываем TCP 443/80 и UDP 443 (QUIC).
+	// UDP 443 нужен для инжекции fake QUIC Initial перед реальным пакетом.
+	// Реальный QUIC-пакет реинжектируется как есть — только fake-пакеты создаются из .bin.
+	// WinDivert ожидает полный пакет (IP+UDP+payload) — fake строится с нуля в pipeline.
+	filter := "outbound and !loopback and (tcp.DstPort == 443 or tcp.DstPort == 80 or (udp.DstPort == 443))"
 	log.Printf("DEBUG: Opening WinDivert with filter: %s", filter)
 
 	filterPtr, err := syscall.BytePtrFromString(filter)

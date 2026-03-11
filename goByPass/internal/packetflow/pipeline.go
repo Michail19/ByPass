@@ -271,12 +271,34 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// Получаем или создаём поток
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
 
-	// UDP passthrough: QUIC (и любой другой UDP) не трогаем.
-	// QUIC — зашифрованный, packet-number based протокол.
-	// setIPTTL на UDP инвалидирует UDP checksum (не пересчитываем).
-	// makeFakeQUICInitial не включает IP/UDP заголовки — WinDivert дропнет пакет.
-	// zapret тоже не трогает UDP. Просто реинжектируем как есть.
+	// UDP 443 = QUIC: инжектируем fake QUIC Initial из .bin перед реальным пакетом.
+	//
+	// Стратегия zapret для QUIC:
+	//   - НЕ модифицируем реальный QUIC-пакет (encrypted + packet-number based)
+	//   - Отправляем N копий fake QUIC Initial (из quic_initial_www_google_com.bin)
+	//     перед реальным пакетом — DPI видит мусор и теряет контекст
+	//   - Реальный пакет реинжектируется без изменений
+	//
+	// Fake-пакет: строится как полный IP+UDP пакет с заменёнными src/dst из оригинала.
+	// fixUDPChecksum обязателен — без него сервер/DPI дропнет пакет silently.
 	if protocol == 17 {
+		if dstPort == 443 {
+			strat := p.strategyMgr.SelectStrategy(dstIP.String(), "", 443, "udp")
+			if strat != nil && strat.NeedsQUICFake() {
+				repeats := strat.FakeQUICRepeats
+				if repeats <= 0 {
+					repeats = 6
+				}
+				for i := 0; i < repeats; i++ {
+					fakePkt := buildFakeQUICPacket(pkt.Data, strat.FakeQUICFileData)
+					if fakePkt != nil {
+						p.sendPacket(fakePkt, pkt.Addr)
+						p.updateStats(func(stats *PipelineStats) { stats.PacketsModified++ })
+					}
+				}
+			}
+		}
+		// Реальный UDP-пакет реинжектируем без изменений
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
 	}
@@ -365,16 +387,14 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		shouldBypass = cached.ShouldBypass
 	}
 
-	// 3. Финальный fallback, если ничего не выбрано
+	// 3. Финальный fallback: SelectStrategy вернула nil —
+	//    нет подходящей стратегии для этого IP/hostname/порта.
+	//    Просто реинжектируем пакет без модификаций (passthrough).
 	if strats == nil {
-		strategyID = 1
-		strats, _ = p.strategyMgr.GetStrategy(1)
-		if strats == nil {
-			log.Printf("[STRATEGY] CRITICAL: No passthrough strategy (id=1) found!")
-			p.sendPacket(pkt.Data, pkt.Addr)
-			return
-		}
-		shouldBypass = false // passthrough = без модификаций
+		log.Printf("[STRATEGY] No strategy for %s:%d (hostname: '%s') — passthrough",
+			dstIP.String(), dstPort, flow.Hostname)
+		p.sendPacket(pkt.Data, pkt.Addr)
+		return
 	}
 
 	log.Printf("[STRATEGY] Final decision for %s:%d (hostname: %s): strategy %d (%s), bypass=%v",
@@ -522,11 +542,85 @@ func calculateChecksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-// makeFakeQUICInitial удалена: UDP/QUIC пакеты теперь реинжектируются без изменений.
-// Причины:
-//   1) WinDivert ожидает полный пакет (IP + UDP + payload), fake создавал только payload;
-//   2) UDP checksum не пересчитывался после изменений → silent drop на сервере;
-//   3) QUIC encrypted + packet-number based → любая модификация = QUIC_NETWORK_IDLE_TIMEOUT.
+// buildFakeQUICPacket строит полный IP+UDP пакет с payload из quicPayload.
+//
+// Копирует IP и UDP заголовки из оригинального пакета (src/dst IP:port),
+// подставляет quicPayload как тело UDP, пересчитывает все длины и checksums.
+//
+// DPI видит fake QUIC Initial и теряет контекст перед реальным пакетом.
+// Реальный пакет реинжектируется без изменений после всех fake.
+//
+// Требования к quicPayload: содержимое quic_initial_*.bin — захваченный
+// QUIC Initial пакет (только QUIC payload, без IP/UDP заголовков).
+func buildFakeQUICPacket(original []byte, quicPayload []byte) []byte {
+	if len(original) < 28 || len(quicPayload) == 0 {
+		return nil
+	}
+	if original[9] != 17 { // not UDP
+		return nil
+	}
+
+	ipHdrLen := int(original[0]&0x0F) * 4
+	if len(original) < ipHdrLen+8 {
+		return nil
+	}
+
+	// Строим: IP header (ipHdrLen) + UDP header (8) + quicPayload
+	totalLen := ipHdrLen + 8 + len(quicPayload)
+	pkt := make([]byte, totalLen)
+
+	// IP заголовок из оригинала (src/dst IP, TTL и т.д.)
+	copy(pkt[:ipHdrLen], original[:ipHdrLen])
+	binary.BigEndian.PutUint16(pkt[2:4], uint16(totalLen))
+	// Новый IP ID чтобы не конфликтовать с оригиналом
+	pkt[4] = 0
+	pkt[5] = 0
+	// Сбросить DF бит
+	pkt[6] = original[6] &^ 0x40
+	pkt[7] = original[7]
+
+	// UDP заголовок: src/dst порты из оригинала
+	copy(pkt[ipHdrLen:ipHdrLen+4], original[ipHdrLen:ipHdrLen+4])
+	udpLen := uint16(8 + len(quicPayload))
+	binary.BigEndian.PutUint16(pkt[ipHdrLen+4:], udpLen)
+	pkt[ipHdrLen+6] = 0 // checksum placeholder
+	pkt[ipHdrLen+7] = 0
+
+	// QUIC payload
+	copy(pkt[ipHdrLen+8:], quicPayload)
+
+	// Пересчитываем checksums
+	recalculateIPChecksum(pkt)
+	fixUDPChecksum(pkt)
+
+	return pkt
+}
+
+// fixUDPChecksum пересчитывает UDP checksum (псевдозаголовок IPv4 + UDP).
+func fixUDPChecksum(packet []byte) {
+	if len(packet) < 28 {
+		return
+	}
+	ipHdrLen := int(packet[0]&0x0F) * 4
+	if len(packet) < ipHdrLen+8 {
+		return
+	}
+	udpOffset := ipHdrLen
+	packet[udpOffset+6] = 0
+	packet[udpOffset+7] = 0
+
+	udpLen := len(packet) - udpOffset
+	pseudo := make([]byte, 12)
+	copy(pseudo[0:4], packet[12:16])
+	copy(pseudo[4:8], packet[16:20])
+	pseudo[9] = 17
+	binary.BigEndian.PutUint16(pseudo[10:12], uint16(udpLen))
+
+	full := append(pseudo, packet[udpOffset:]...)
+	cs := calculateChecksum(full)
+	packet[udpOffset+6] = byte(cs >> 8)
+	packet[udpOffset+7] = byte(cs & 0xFF)
+}
 
 // Вспомогательная функция
 func getTCPSeq(pkt []byte) uint32 {
@@ -534,19 +628,18 @@ func getTCPSeq(pkt []byte) uint32 {
 	return binary.BigEndian.Uint32(pkt[ipLen+4:])
 }
 
-// sendPacket (фикс: удалён дубликат Send)
+// sendPacket отправляет пакет через sender.
 func (p *Pipeline) sendPacket(data []byte, addr []byte) bool {
 	if len(data) < 20 {
 		log.Printf("WARNING: Attempted to send packet too short (%d bytes)", len(data))
 		return false
 	}
 
-	if addr == nil || len(addr) == 0 {
-		if _, ok := p.sender.(*sender.RawSender); ok {
-			log.Printf("ERROR: WinDivert requires valid addr, skipping send")
-			return false
-		}
-		log.Printf("WARNING: addr is empty, sending without address")
+	// WinDivert требует валидный addr из WinDivertRecv.
+	// Если addr пустой — пакет не может быть реинжектирован корректно.
+	if len(addr) == 0 {
+		log.Printf("ERROR: addr is empty, WinDivert requires original WINDIVERT_ADDRESS — skipping send")
+		return false
 	}
 
 	if err := p.sender.Send(data, addr); err != nil {
