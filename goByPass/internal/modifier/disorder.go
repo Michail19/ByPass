@@ -98,10 +98,18 @@ func (pm *PacketModifier) ApplyDisorder(
 	return results, nil
 }
 
-// setIPTTL устанавливает TTL в IP-заголовке и пересчитывает IP checksum
+// setIPTTL устанавливает TTL в IP-заголовке и пересчитывает IP checksum.
+//
+// Если ttl <= 0 — используем безопасный default=6 (#BugTTL0):
+// ttl=0 → packet[8]=0 → первый же маршрутизатор дропает пакет с ICMP Time Exceeded
+// ещё до того как он достигает DPI → fake/decoy не имеет никакого эффекта.
+// Это касается всех стратегий с fake_ttl=0 или disorder_ttl=0 в JSON.
 func setIPTTL(packet []byte, ttl int) error {
 	if len(packet) < 20 || packet[0]>>4 != 4 {
 		return nil
+	}
+	if ttl <= 0 {
+		ttl = 6 // zapret default: достаточно чтобы дойти до DPI, умереть до сервера
 	}
 	packet[8] = byte(ttl)
 	recalculateIPChecksum(packet)

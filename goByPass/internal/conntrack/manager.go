@@ -137,7 +137,12 @@ func (m *Manager) createKey(
 
 // cleanupLoop периодически удаляет устаревшие потоки
 func (m *Manager) cleanupLoop() {
-	ticker := time.NewTicker(m.timeout / 10)
+	// Guard against timeout=0: time.NewTicker(0) паникует (#TimeoutZero).
+	interval := m.timeout / 10
+	if interval <= 0 {
+		interval = 5 * time.Second // безопасный дефолт
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -174,15 +179,21 @@ func (m *Manager) cleanup() {
 	m.stats.ActiveFlows = len(m.flows)
 }
 
-// evictOldest удаляет самый старый поток при переполнении
+// evictOldest удаляет самый старый поток при переполнении.
+// Вызывается только из GetOrCreate под m.mu.Lock() — доступ к m.flows безопасен.
+// flow.UpdatedAt читается под flow.Mu.RLock() чтобы избежать data race (#EvictRace):
+// cleanupLoop и worker goroutines могут обновлять UpdatedAt без m.mu.
 func (m *Manager) evictOldest() {
 	var oldestKey FlowKey
 	var oldestTime time.Time
 
 	for key, flow := range m.flows {
-		if oldestTime.IsZero() || flow.UpdatedAt.Before(oldestTime) {
+		flow.Mu.RLock()
+		updatedAt := flow.UpdatedAt
+		flow.Mu.RUnlock()
+		if oldestTime.IsZero() || updatedAt.Before(oldestTime) {
 			oldestKey = key
-			oldestTime = flow.UpdatedAt
+			oldestTime = updatedAt
 		}
 	}
 

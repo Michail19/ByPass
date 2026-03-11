@@ -138,7 +138,11 @@ func (p *Pipeline) Start() error {
 	p.wg.Add(1)
 	go p.resultProcessor()
 
-	// Передаем пакеты из капчера в канал
+	// Передаем пакеты из капчера в канал.
+	// ВАЖНО: добавляем в wg ДО запуска — Stop() вызывает wg.Wait() перед close(ch).
+	// Без этого Stop() может закрыть workerChans пока packetForwarder ещё пишет в них
+	// → panic: send on closed channel (#ForwarderWG).
+	p.wg.Add(1)
 	go p.packetForwarder()
 
 	log.Printf("Pipeline started with %d workers", p.workers)
@@ -169,6 +173,7 @@ func (p *Pipeline) Stop() {
 // Маршрутизация по hash(flow) % workers обеспечивает flow affinity:
 // один TCP-поток → один воркер → строгий порядок отправки.
 func (p *Pipeline) packetForwarder() {
+	defer p.wg.Done() // соответствует wg.Add(1) в Start() (#ForwarderWG)
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -526,11 +531,13 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		if len(result.ModifiedPackets) > 0 {
 			for i, modPkt := range result.ModifiedPackets {
 				if len(modPkt) >= 20 && (modPkt[0]>>4 == 4) {
-					// Checksums уже пересчитаны модификатором.
+					// Checksums уже пересчитаны в modifier.go (#1).
+					// НЕ пересчитываем здесь повторно — это сломает FakeBadSum:
+					// modifier намеренно портит TCP checksum (XOR 0xFF),
+					// повторный пересчёт восстановит правильное значение и
+					// сервер не дропнет fake → bypass теряет эффект.
 					// sendModifiedPacket сбрасывает offload флаги — иначе
-					// Windows перезапишет наш checksum (в т.ч. intentionally bad для FakeBadSum).
-					fixTCPChecksum(modPkt)
-					recalculateIPChecksum(modPkt)
+					// Windows тоже перезапишет наш checksum своим.
 					p.sendModifiedPacket(modPkt, pkt.Addr)
 					p.updateStats(func(stats *PipelineStats) {
 						stats.PacketsModified++
@@ -884,12 +891,11 @@ func setIPTTL(packet []byte, ttl int) error {
 	if len(packet) < 20 || (packet[0]>>4 != 4) {
 		return nil
 	}
-
+	if ttl <= 0 {
+		ttl = 6 // zapret default: достаточно до DPI, умирает до сервера (#BugTTL0)
+	}
 	packet[8] = byte(ttl)
-
-	// Пересчитываем контрольную сумму
 	recalculateIPChecksum(packet)
-
 	return nil
 }
 

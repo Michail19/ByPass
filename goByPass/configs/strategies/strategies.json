@@ -8,9 +8,8 @@
     "apply_to_tls": true,
     "apply_to_quic": true,
     "split_mode": 0,
-    "priority": 0
+    "priority": 999999
   },
-
   {
     "_comment": "=== QUIC / UDP 443 ===",
     "id": 30,
@@ -30,7 +29,6 @@
     "fake_quic_repeats": 11,
     "priority": 11
   },
-
   {
     "_comment": "=== Game UDP (fake-unknown-udp) ===",
     "id": 33,
@@ -62,7 +60,6 @@
     "cutoff": 3,
     "priority": 22
   },
-
   {
     "_comment": "=== MULTISPLIT (seqovl только) ===",
     "id": 40,
@@ -71,7 +68,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "priority": 30
@@ -83,7 +82,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 568,
     "seqovl_pattern_file": "tls_clienthello_4pda_to.bin",
     "priority": 31
@@ -95,7 +96,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [2],
+    "split_positions": [
+      2
+    ],
     "seqovl_len": 652,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "priority": 32
@@ -107,7 +110,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [2],
+    "split_positions": [
+      2
+    ],
     "split_pos_sniext": true,
     "seqovl_len": 679,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
@@ -120,12 +125,13 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 664,
     "seqovl_pattern_file": "tls_clienthello_max_ru.bin",
     "priority": 34
   },
-
   {
     "_comment": "=== MULTISPLIT + FAKE (seqovl + fake TLS файл) ===",
     "id": 45,
@@ -134,13 +140,18 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "fooling": 1,
     "fake_repeats": 8,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 40
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 40,
+    "fake_ttl": 6
   },
   {
     "id": 46,
@@ -149,14 +160,20 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 664,
     "seqovl_pattern_file": "tls_clienthello_max_ru.bin",
     "fooling": 1,
     "fake_repeats": 8,
-    "fake_tls_files": ["stun.bin", "tls_clienthello_max_ru.bin"],
+    "fake_tls_files": [
+      "stun.bin",
+      "tls_clienthello_max_ru.bin"
+    ],
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 41
+    "priority": 41,
+    "fake_ttl": 6
   },
   {
     "id": 47,
@@ -165,14 +182,19 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [2],
+    "split_positions": [
+      2
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "fooling": 8,
     "badseq_increment": 1000,
     "fake_repeats": 6,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 42
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 42,
+    "fake_ttl": 6
   },
   {
     "id": 48,
@@ -181,15 +203,21 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [2],
+    "split_positions": [
+      2
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "fooling": 8,
     "badseq_increment": 1000,
     "fake_repeats": 6,
-    "fake_tls_files": ["stun.bin", "tls_clienthello_www_google_com.bin"],
+    "fake_tls_files": [
+      "stun.bin",
+      "tls_clienthello_www_google_com.bin"
+    ],
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 43
+    "priority": 43,
+    "fake_ttl": 6
   },
   {
     "id": 49,
@@ -198,7 +226,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "fooling": 8,
@@ -207,7 +237,8 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 44
+    "priority": 44,
+    "fake_ttl": 6
   },
   {
     "id": 52,
@@ -216,7 +247,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "fooling": 8,
@@ -226,7 +259,8 @@
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 44
+    "priority": 44,
+    "fake_ttl": 6
   },
   {
     "id": 50,
@@ -235,7 +269,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "fooling": 1,
@@ -243,7 +279,8 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 45
+    "priority": 45,
+    "fake_ttl": 6
   },
   {
     "id": 51,
@@ -252,7 +289,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "fooling": 1,
@@ -261,9 +300,9 @@
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 46
+    "priority": 46,
+    "fake_ttl": 6
   },
-
   {
     "_comment": "=== FAKEDSPLIT (fake + split в позиции, pattern=0x00) ===",
     "id": 55,
@@ -277,8 +316,11 @@
     "faked_split_pattern": 0,
     "fooling": 1,
     "fake_repeats": 6,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 50
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 50,
+    "fake_ttl": 6
   },
   {
     "id": 56,
@@ -292,9 +334,13 @@
     "faked_split_pattern": 0,
     "fooling": 1,
     "fake_repeats": 6,
-    "fake_tls_files": ["stun.bin", "tls_clienthello_www_google_com.bin"],
+    "fake_tls_files": [
+      "stun.bin",
+      "tls_clienthello_www_google_com.bin"
+    ],
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 51
+    "priority": 51,
+    "fake_ttl": 6
   },
   {
     "id": 57,
@@ -312,7 +358,8 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 52
+    "priority": 52,
+    "fake_ttl": 6
   },
   {
     "id": 58,
@@ -331,9 +378,9 @@
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 53
+    "priority": 53,
+    "fake_ttl": 6
   },
-
   {
     "_comment": "=== SYNDATA / MULTIDISORDER ===",
     "id": 60,
@@ -343,7 +390,8 @@
     "apply_to_tls": true,
     "syn_data": true,
     "multi_disorder": true,
-    "priority": 60
+    "priority": 60,
+    "disorder_ttl": 4
   },
   {
     "id": 61,
@@ -355,7 +403,8 @@
     "multi_disorder": true,
     "any_protocol": true,
     "cutoff": 4,
-    "priority": 61
+    "priority": 61,
+    "disorder_ttl": 4
   },
   {
     "id": 62,
@@ -382,7 +431,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "multi_disorder": true,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "split_pos_midsld": true,
     "fooling": 8,
     "fake_repeats": 11,
@@ -391,7 +442,9 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 64
+    "priority": 64,
+    "fake_ttl": 6,
+    "disorder_ttl": 4
   },
   {
     "id": 65,
@@ -400,7 +453,9 @@
     "apply_to_http": true,
     "apply_to_tls": true,
     "multi_disorder": true,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "split_pos_midsld": true,
     "fooling": 8,
     "fake_repeats": 11,
@@ -410,9 +465,10 @@
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 65
+    "priority": 65,
+    "fake_ttl": 6,
+    "disorder_ttl": 4
   },
-
   {
     "_comment": "=== HOSTFAKESPLIT ===",
     "id": 70,
@@ -427,7 +483,8 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 70
+    "priority": 70,
+    "fake_ttl": 6
   },
   {
     "id": 71,
@@ -443,7 +500,8 @@
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "ya.ru",
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 71
+    "priority": 71,
+    "fake_ttl": 6
   },
   {
     "id": 72,
@@ -455,7 +513,8 @@
     "host_fake_split_host": "www.google.com",
     "fooling": 1,
     "fake_repeats": 4,
-    "priority": 72
+    "priority": 72,
+    "fake_ttl": 6
   },
   {
     "id": 73,
@@ -467,9 +526,9 @@
     "host_fake_split_host": "ozon.ru",
     "fooling": 3,
     "fake_repeats": 4,
-    "priority": 73
+    "priority": 73,
+    "fake_ttl": 6
   },
-
   {
     "_comment": "=== SIMPLE FAKE (только fake, без split) ===",
     "id": 80,
@@ -481,7 +540,8 @@
     "fooling": 8,
     "badseq_increment": 2,
     "fake_repeats": 6,
-    "priority": 80
+    "priority": 80,
+    "fake_ttl": 6
   },
   {
     "id": 81,
@@ -494,7 +554,8 @@
     "badseq_increment": 2,
     "fake_repeats": 6,
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 81
+    "priority": 81,
+    "fake_ttl": 6
   },
   {
     "id": 82,
@@ -505,8 +566,11 @@
     "fooling": 8,
     "badseq_increment": 2,
     "fake_repeats": 6,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 82
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 82,
+    "fake_ttl": 6
   },
   {
     "id": 83,
@@ -517,9 +581,13 @@
     "fooling": 8,
     "badseq_increment": 2,
     "fake_repeats": 6,
-    "fake_tls_files": ["stun.bin", "tls_clienthello_www_google_com.bin"],
+    "fake_tls_files": [
+      "stun.bin",
+      "tls_clienthello_www_google_com.bin"
+    ],
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 83
+    "priority": 83,
+    "fake_ttl": 6
   },
   {
     "id": 84,
@@ -529,8 +597,11 @@
     "apply_to_tls": true,
     "fooling": 1,
     "fake_repeats": 6,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 84
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 84,
+    "fake_ttl": 6
   },
   {
     "id": 85,
@@ -540,9 +611,13 @@
     "apply_to_tls": true,
     "fooling": 1,
     "fake_repeats": 6,
-    "fake_tls_files": ["stun.bin", "tls_clienthello_4pda_to.bin"],
+    "fake_tls_files": [
+      "stun.bin",
+      "tls_clienthello_4pda_to.bin"
+    ],
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 85
+    "priority": 85,
+    "fake_ttl": 6
   },
   {
     "id": 86,
@@ -552,9 +627,13 @@
     "apply_to_tls": true,
     "fooling": 1,
     "fake_repeats": 6,
-    "fake_tls_files": ["stun.bin", "tls_clienthello_www_google_com.bin"],
+    "fake_tls_files": [
+      "stun.bin",
+      "tls_clienthello_www_google_com.bin"
+    ],
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 86
+    "priority": 86,
+    "fake_ttl": 6
   },
   {
     "id": 87,
@@ -564,9 +643,13 @@
     "apply_to_tls": true,
     "fooling": 1,
     "fake_repeats": 6,
-    "fake_tls_files": ["stun.bin", "tls_clienthello_max_ru.bin"],
+    "fake_tls_files": [
+      "stun.bin",
+      "tls_clienthello_max_ru.bin"
+    ],
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 87
+    "priority": 87,
+    "fake_ttl": 6
   },
   {
     "id": 88,
@@ -577,8 +660,11 @@
     "ip_id_zero": true,
     "fooling": 1,
     "fake_repeats": 6,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 88
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 88,
+    "fake_ttl": 6
   },
   {
     "id": 89,
@@ -592,9 +678,9 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 89
+    "priority": 89,
+    "fake_ttl": 6
   },
-
   {
     "_comment": "=== DISCORD/CLOUDFLARE СПЕЦИФИЧНЫЕ (TCP 2053,2083,2087,2096,8443) ===",
     "id": 90,
@@ -603,13 +689,18 @@
     "apply_to_http": false,
     "apply_to_tls": true,
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
     "fooling": 1,
     "fake_repeats": 8,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 90
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 90,
+    "fake_ttl": 6
   },
   {
     "id": 91,
@@ -619,8 +710,11 @@
     "apply_to_tls": true,
     "fooling": 1,
     "fake_repeats": 6,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 91
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 91,
+    "fake_ttl": 6
   },
   {
     "id": 92,
@@ -631,8 +725,11 @@
     "fooling": 8,
     "badseq_increment": 2,
     "fake_repeats": 6,
-    "fake_tls_files": ["tls_clienthello_www_google_com.bin"],
-    "priority": 92
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+    "priority": 92,
+    "fake_ttl": 6
   },
   {
     "id": 93,
@@ -644,7 +741,8 @@
     "host_fake_split_host": "www.google.com",
     "fooling": 1,
     "fake_repeats": 4,
-    "priority": 93
+    "priority": 93,
+    "fake_ttl": 6
   },
   {
     "id": 94,
@@ -661,7 +759,8 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 94
+    "priority": 94,
+    "fake_ttl": 6
   },
   {
     "id": 95,
@@ -670,7 +769,9 @@
     "apply_to_http": false,
     "apply_to_tls": true,
     "multi_disorder": true,
-    "split_positions": [1],
+    "split_positions": [
+      1
+    ],
     "split_pos_midsld": true,
     "fooling": 8,
     "fake_repeats": 11,
@@ -679,6 +780,8 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 95
+    "priority": 95,
+    "fake_ttl": 6,
+    "disorder_ttl": 4
   }
 ]
