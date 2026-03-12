@@ -91,7 +91,7 @@ func (pm *PacketModifier) ApplySeqOvl(
 	copy(ovlPkt, packet[:payloadOffset])
 	binary.BigEndian.PutUint16(ovlPkt[2:4], uint16(len(ovlPkt)))
 	ovlSeq := originalSeq - uint32(ovlLenN)
-	ovlData = ovlData[:ovlLenN]
+	//ovlData = ovlData[:ovlLenN]
 	binary.BigEndian.PutUint32(ovlPkt[ipHdrLen+4:], ovlSeq)
 	copy(ovlPkt[payloadOffset:], ovlData)
 	// DF: сохраняем из оригинала (#6) — ovlPkt скопирован из packet[:payloadOffset],
