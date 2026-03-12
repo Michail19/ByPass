@@ -85,8 +85,7 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 			tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
 			payloadOffset := ipHeaderLen + tcpHeaderLen
 			if len(packet) > payloadOffset+2 &&
-				packet[payloadOffset] == 0x16 &&
-				packet[payloadOffset+1] == 0x03 {
+				packet[payloadOffset] >= 0x14 && packet[payloadOffset] <= 0x17 {
 				log.Printf("WARNING: Skipping IP fragmentation for TLS packet — use TCP split instead")
 				return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
 			}

@@ -23,7 +23,7 @@ func (pm *PacketModifier) ApplyDisorder(
 	badSeqIncrement int64,
 ) ([][]byte, error) {
 
-	if len(disorderPos) == 0 || ttl <= 0 {
+	if len(disorderPos) == 0 {
 		return nil, nil
 	}
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {

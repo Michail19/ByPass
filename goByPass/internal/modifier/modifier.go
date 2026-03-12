@@ -131,7 +131,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	}
 
 	// ── 2. Fake ───────────────────────────────────────────────────────────────
-	if hasFooling && (isClientHello || strat.AnyProtocol) {
+	if hasFooling && !strat.FakedSplit && (isClientHello || strat.AnyProtocol) {
 		for rep := 0; rep < fakeRepeats; rep++ {
 			fakePayload := pm.selectFakeTLSPayload(strat, rep, isClientHello, packet, ipHdrLenInt)
 			fakePkts, err := pm.ApplyFake(
@@ -327,7 +327,10 @@ func (pm *PacketModifier) selectFakeTLSPayload(
 		// 4 нулевых байта тривиально детектируются как не-TLS (#4).
 		// Пустой Handshake record структурно валиден — сервер дропнет без RST,
 		// DPI принимает как начало Handshake и теряет контекст.
-		return []byte{0x16, 0x03, 0x01, 0x00, 0x00}
+		return []byte{
+			0x16, 0x03, 0x01, 0x00, 0x05,
+			0x01, 0x00, 0x00, 0x01, 0x00,
+		}
 	}
 
 	if strat.FakeTLSPrevPacket {
@@ -451,14 +454,23 @@ func replaceHTTPHost(payload []byte, newHost string) []byte {
 // Relaxed логика: если первые 9 байт выглядят как TLS 1.x ClientHello —
 // считаем это ClientHello. Первый сегмент всегда начинается с record header.
 func isClientHelloPacket(packet []byte, payloadOffset, payloadLen int) bool {
-	if payloadLen < 9 {
-		return false
-	}
 	p := packet[payloadOffset:]
-	// ContentType: Handshake (0x16)
-	if p[0] != 0x16 {
+	// Первые байты похожи на TLS record header
+	if payloadLen < 5 {
 		return false
 	}
+
+	// ContentType: Handshake (0x16)
+	if p[0] != 0x16 || p[1] != 0x03 {
+		return false
+	}
+
+	if payloadLen < 9 {
+		return true
+	}
+	//if p[0] != 0x16 {
+	//	return false
+	//}
 	// Version: TLS 1.0–1.3 (major=0x03, minor=0x00..0x04)
 	// TLS 1.3 передаётся как 0x0303 с supported_versions extension
 	if p[1] != 0x03 || p[2] > 0x04 {

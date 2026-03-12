@@ -56,8 +56,12 @@ func (pm *PacketModifier) ApplyFake(
 		setIPTTL(fake, ttl)
 		recalculateIPChecksum(fake)
 		FixTCPChecksum(fake) // сначала считаем правильный
-		fake[tcpOffset+16] ^= 0xFF
-		fake[tcpOffset+17] ^= 0xFF
+
+		tcpHdr := ipHdrLen
+		checksum := tcpHdr + 16
+		fake[checksum] ^= 0xFF
+		fake[checksum+1] ^= 0xFF
+
 		// IP checksum уже правильный, TCP умышленно испорчен
 		return [][]byte{fake}, nil
 	}

@@ -77,6 +77,11 @@ func (pm *PacketModifier) ApplySeqOvl(
 
 	originalSeq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
 
+	ovlLenN := len(pattern)
+	if ovlLenN > ovlLen {
+		ovlLenN = ovlLen
+	}
+
 	// Обрезаем pattern до ovlLen если нужно
 	ovlData := pattern
 	if len(ovlData) > ovlLen {
@@ -89,7 +94,8 @@ func (pm *PacketModifier) ApplySeqOvl(
 	ovlPkt := make([]byte, ipHdrLen+tcpHdrLen+len(ovlData))
 	copy(ovlPkt, packet[:payloadOffset])
 	binary.BigEndian.PutUint16(ovlPkt[2:4], uint16(len(ovlPkt)))
-	ovlSeq := originalSeq - uint32(len(ovlData))
+	ovlSeq := originalSeq - uint32(ovlLenN)
+	ovlData = ovlData[:ovlLenN]
 	binary.BigEndian.PutUint32(ovlPkt[ipHdrLen+4:], ovlSeq)
 	copy(ovlPkt[payloadOffset:], ovlData)
 	// DF: сохраняем из оригинала (#6) — ovlPkt скопирован из packet[:payloadOffset],
@@ -98,9 +104,7 @@ func (pm *PacketModifier) ApplySeqOvl(
 	// SeqOvl TTL: ovl-пакет должен умереть до сервера — иначе TCP стек сервера
 	// получает пакет с seq < ISN, который вне TCP-окна → RST или retransmit (#SeqOvlTTL).
 	// Используем seqOvlTTL (обычно DisorderTTL или FakeTTL из стратегии, default 6).
-	if seqOvlTTL > 0 {
-		ovlPkt[8] = byte(seqOvlTTL)
-	}
+	setIPTTL(ovlPkt, seqOvlTTL)
 	recalculateIPChecksum(ovlPkt)
 	FixTCPChecksum(ovlPkt)
 	results = append(results, ovlPkt)
@@ -116,6 +120,9 @@ func (pm *PacketModifier) ApplySeqOvl(
 	sortInts(validPos)
 	validPos = dedupInts(validPos)
 
+	if len(validPos) == 0 {
+		validPos = []int{1}
+	}
 	realSegs := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
 	results = append(results, realSegs...)
 
@@ -224,6 +231,8 @@ func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte) ([][]byte
 // Если validPos пуст — возвращает packet как есть.
 // DF flag: копируется из оригинального packet[6] через copy(newPkt, packet[:payloadOffset]) (#6).
 func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, validPos []int) [][]byte {
+	const overlapBytes = 3
+
 	payloadLen := len(packet) - payloadOffset
 	if payloadLen <= 0 {
 		return [][]byte{packet}
@@ -238,18 +247,61 @@ func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, val
 	chunks = append(chunks, packet[payloadOffset+prev:])
 
 	seq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
+	overlap := overlapBytes
 	var results [][]byte
-	for _, seg := range chunks {
-		newPkt := make([]byte, ipHdrLen+tcpHdrLen+len(seg))
-		copy(newPkt, packet[:payloadOffset]) // копирует packet[6] включая DF бит
+	for i, seg := range chunks {
+		extra := 0
+		if i > 0 && overlap > 0 {
+			extra = overlap
+		}
+
+		newPkt := make([]byte, payloadOffset+len(seg)+extra)
+
+		copy(newPkt, packet[:payloadOffset])
+
+		flags := packet[ipHdrLen+13]
+
+		if i != len(chunks)-1 {
+			flags &= ^byte(0x01) // FIN
+			flags &= ^byte(0x08) // PSH
+		}
+
+		newPkt[ipHdrLen+13] = flags // копирует packet[6] включая DF бит
+
 		binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
 		binary.BigEndian.PutUint32(newPkt[ipHdrLen+4:], seq)
-		copy(newPkt[payloadOffset:], seg)
+		if i > 0 && overlap > 0 {
+
+			prev := chunks[i-1]
+
+			ov := overlap
+			if ov > len(prev) {
+				ov = len(prev)
+			}
+
+			overlapData := prev[len(prev)-ov:]
+
+			copy(newPkt[payloadOffset:], overlapData)
+			copy(newPkt[payloadOffset+ov:], seg)
+
+		} else {
+
+			copy(newPkt[payloadOffset:], seg)
+
+		}
 		// Не трогаем newPkt[6] — DF уже скопирован из оригинала (#6)
 		recalculateIPChecksum(newPkt)
 		FixTCPChecksum(newPkt)
 		results = append(results, newPkt)
-		seq += uint32(len(seg))
+		advance := len(seg)
+
+		if i > 0 && overlap > 0 {
+			if advance > overlap {
+				advance -= overlap
+			}
+		}
+
+		seq += uint32(advance)
 	}
 	return results
 }
