@@ -163,7 +163,7 @@ func (s *RawSender) sendInternal(packet []byte, addr []byte, clearChecksumFlags 
 	}
 	if len(addr) < 32 {
 		s.stats.PacketsFailed.Add(1)
-		return fmt.Errorf("addr is empty: WinDivertSend requires original WINDIVERT_ADDRESS from WinDivertRecv")
+		return fmt.Errorf("invalid WINDIVERT_ADDRESS (len=%d)", len(addr))
 	}
 
 	// Для модифицированных пакетов: сбросить offload флаги в копии addr.
@@ -233,11 +233,6 @@ func (s *RawSender) Close() error {
 		s.handle = 0
 	}
 
-	if s.dll != nil {
-		s.dll.Release()
-		s.dll = nil
-	}
-
 	s.sendProc = nil
 	s.closeProc = nil
 
@@ -249,6 +244,21 @@ func (s *RawSender) GetStats() SenderStatsSnapshot {
 	return s.stats.Snapshot()
 }
 
+// loadWinDivertDLL - загрузка DDL
+func loadWinDivertDLL() (*syscall.DLL, error) {
+	var err error
+
+	once.Do(func() {
+		winDivertDLL, err = syscall.LoadDLL("WinDivert.dll")
+	})
+
+	if winDivertDLL == nil {
+		return nil, err
+	}
+
+	return winDivertDLL, nil
+}
+
 // newWindowsSenderWithHandle создает с handle
 func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
 	if handle == 0 {
@@ -256,9 +266,7 @@ func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
 	}
 
 	// Загружаем DLL для отправки
-	once.Do(func() {
-		winDivertDLL, err = syscall.LoadDLL("WinDivert.dll")
-	})
+	dll, err := loadWinDivertDLL()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load WinDivert.dll: %v", err)
 	}
