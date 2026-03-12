@@ -179,9 +179,14 @@ func (c *DomainCache) Stop() {
 }
 
 // cleanupLoop периодически очищает кэш.
-// FIX #11: ticker interval = ttl/10, но ttl уже проверен в NewDomainCache (> 0).
+// FIX: ticker interval = ttl/10, но не менее minCleanupInterval (5s).
+// При малых TTL (например 10s) интервал ttl/10 = 1s создаёт лишнюю нагрузку.
 func (c *DomainCache) cleanupLoop() {
-	ticker := time.NewTicker(c.ttl / 10)
+	interval := c.ttl / 10
+	if interval < minCleanupInterval {
+		interval = minCleanupInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -234,7 +239,9 @@ func (c *DomainCache) GetStats() DomainCacheStats {
 	return stats
 }
 
-// Preload предзагружает список доменов (параллельно, до 5 одновременно)
+// Preload предзагружает список доменов (параллельно, до 5 одновременно).
+// Вызывается синхронно — горутины для каждого домена запускаются внутри.
+// НЕ оборачивать в отдельную go-рутину снаружи: это double goroutine spawn.
 func (c *DomainCache) Preload(domains []string) error {
 	semaphore := make(chan struct{}, 5)
 

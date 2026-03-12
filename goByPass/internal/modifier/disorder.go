@@ -57,11 +57,15 @@ func (pm *PacketModifier) ApplyDisorder(
 	switch mode {
 	case strategy.DisorderOutOfBand:
 		// OOB: пакет с заведомо неверным seq + low TTL.
-		// seq = originalSeq - 1: один байт "до" начала потока — вне TCP-окна у сервера,
-		// но не паляется как 0xFFFFFFFF который тривиально детектится DPI (#3).
+		// seq = originalSeq - 512: гарантированно вне TCP-окна сервера.
+		// Было -1: при начальном окне 64–256 KB seq-1 всё ещё внутри окна →
+		// сервер отвечал Duplicate ACK → out-of-order → slow start reset.
+		// Zapret использует смещение ~500–700 байт (ovl_len).
+		// -512 достаточно велико чтобы выйти за окно, но не является
+		// очевидным паттерном (0xFFFFFFFF) детектируемым DPI (#3).
 		oobPkt := make([]byte, len(packet))
 		copy(oobPkt, packet)
-		binary.BigEndian.PutUint32(oobPkt[ipHdrLen+4:], originalSeq-1)
+		binary.BigEndian.PutUint32(oobPkt[ipHdrLen+4:], originalSeq-512)
 		setIPTTL(oobPkt, ttl)
 		recalculateIPChecksum(oobPkt)
 		FixTCPChecksum(oobPkt)

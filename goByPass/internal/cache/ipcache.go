@@ -11,6 +11,11 @@ import (
 // FIX #10: time.NewTicker(0) паникует — нужен ненулевой интервал.
 const defaultCacheTTL = 30 * time.Minute
 
+// minCleanupInterval — нижний порог для ticker в cleanupLoop.
+// При TTL=10s интервал был бы 1s — слишком часто.
+// FIX: clamp снизу до 5 секунд.
+const minCleanupInterval = 5 * time.Second
+
 // IPCacheEntry запись в кэше IP (неизменяемая копия для внешнего использования)
 type IPCacheEntry struct {
 	IP           string
@@ -203,9 +208,14 @@ func (c *IPCache) UpdateLatency(ip string, latency time.Duration, loss float64) 
 }
 
 // cleanupLoop периодически удаляет устаревшие записи.
-// FIX #10: ticker interval = ttl/10, но ttl уже проверен в NewIPCache (> 0).
+// FIX #10: ticker interval = ttl/10, но не менее minCleanupInterval (5s).
+// При малых TTL (например 10s) интервал ttl/10 = 1s создаёт лишнюю нагрузку.
 func (c *IPCache) cleanupLoop() {
-	ticker := time.NewTicker(c.ttl / 10)
+	interval := c.ttl / 10
+	if interval < minCleanupInterval {
+		interval = minCleanupInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

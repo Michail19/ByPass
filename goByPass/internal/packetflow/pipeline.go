@@ -493,12 +493,27 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			pkt.Data[payloadOffset+1] == 0x03 && // TLS major version
 			pkt.Data[payloadOffset+5] == 0x01 // HandshakeType: ClientHello
 
-		applyMods := (isClientHello && strats.ApplyToTLS && !flow.IsHandshakeModified) ||
+		// applyMods определяет, нужно ли модифицировать этот пакет.
+		//
+		// ВАЖНО: !flow.IsHandshakeModified НАМЕРЕННО УБРАНО для ClientHello.
+		// Проблема (подтверждена захватом трафика):
+		//   1. ClientHello перехватывается → seqovl+split отправлен (IsHandshakeModified=true)
+		//   2. DPI всё равно блокирует → сервер не ACKает
+		//   3. Windows TCP stack ретрансмитит (тот же seq)
+		//   4. Ретрансмит: IsHandshakeModified==true → passthrough (баг!)
+		//   5. DPI видит чистый ClientHello → снова блокирует
+		//   6. ×7 повторов, 9 секунд, затем сервер присылает FIN
+		//
+		// Zapret применяет bypass к КАЖДОМУ пакету потока до cutoff — включая ретрансмиты.
+		// Каждый ретрансмит = новая попытка запутать DPI через seqovl/fake.
+		//
+		// IsHandshakeModified остаётся как tracking-флаг, но НЕ блокирует модификацию.
+		applyMods := (isClientHello && strats.ApplyToTLS) ||
 			(isData && !isClientHello && flow.DataPacketsModified < strats.ModifyFirstDataPackets)
 		if applyMods {
 			flow.Mu.Lock()
 			if isClientHello {
-				flow.IsHandshakeModified = true
+				flow.IsHandshakeModified = true // tracking only, не влияет на следующие пакеты
 			}
 			// Increment перенесён ниже, после успеха
 			flow.Mu.Unlock()

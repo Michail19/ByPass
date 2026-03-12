@@ -158,7 +158,9 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		cfg.Cache.DomainCache.MaxSize,
 	)
 	if len(cfg.Cache.DomainCache.Preload) > 0 {
-		go domainCache.Preload(cfg.Cache.DomainCache.Preload)
+		// Preload уже запускает горутины внутри (semaphore, до 5 одновременно).
+		// Вызываем без внешнего `go` — иначе double goroutine spawn.
+		domainCache.Preload(cfg.Cache.DomainCache.Preload)
 	}
 
 	connManager := conntrack.NewManager(
@@ -273,8 +275,6 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 			ProcessTimeout:  cfg.Pipeline.ProcessTimeout,
 		},
 	)
-
-	ipCache.Clear()
 
 	return &Components{
 		ipCache:     ipCache,
@@ -391,6 +391,14 @@ func (c *Components) cleanup() {
 	}
 	if c.capturer != nil {
 		c.capturer.Stop()
+	}
+	// FIX: остановить фоновые goroutine кэшей.
+	// Без Stop() cleanupLoop() работает вечно через time.NewTicker — goroutine leak.
+	if c.ipCache != nil {
+		c.ipCache.Stop()
+	}
+	if c.domainCache != nil {
+		c.domainCache.Stop()
 	}
 }
 

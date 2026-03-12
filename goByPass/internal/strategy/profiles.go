@@ -53,7 +53,7 @@ func (m *Manager) loadDefaultStrategies() {
 		SplitPositions:         []int{1, 5},
 		SplitSNIOffset:         true,
 		Fooling:                FoolingTS,
-		FakeTTL:                8,
+		FakeTTL:                6,
 		FakeRepeats:            1,
 		HTTPModMode:            HTTPModHostCase,
 		HostCase:               true,
@@ -92,7 +92,7 @@ func (m *Manager) loadDefaultStrategies() {
 		SplitPositions:         []int{1, 5},
 		SplitSNIOffset:         true,
 		Fooling:                FoolingTS,
-		FakeTTL:                8,
+		FakeTTL:                6,
 		FakeRepeats:            1,
 		HTTPModMode:            HTTPModHostCase,
 		HostCase:               true,
@@ -146,7 +146,7 @@ func (m *Manager) loadDefaultStrategies() {
 		SplitPositions: []int{1, 5},
 		SplitSNIOffset: true,
 		Fooling:        FoolingTS,
-		FakeTTL:        8,
+		FakeTTL:        6,
 		FakeRepeats:    6,
 		FakeTLSFiles:   []string{"tls_clienthello_www_google_com.bin"},
 		HTTPModMode:    HTTPModHostCase,
@@ -181,7 +181,12 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 
-		Priority: 1,
+		Priority:               1,
+		ModifyFirstDataPackets: 4, // применять bypass к первым 4 data-пакетам после handshake
+		// Аналог --dpi-desync-cutoff=n4 в zapret:
+		// DPI (особенно ТСПУ) инспектирует не только ClientHello, но и
+		// первые N TLS-записей после handshake. Без этого DPI определяет
+		// поток по application data и применяет throttling.
 	})
 
 	// ── 60. syndata+multidisorder — агрессивный режим ──────────────────────────
