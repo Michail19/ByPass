@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -508,11 +509,18 @@ func (m *Manager) findByName(nameHint string) *Strategy {
 	return best
 }
 
-// bestForProtocol выбирает лучшую (наименьший Priority) не-passthrough стратегию
-// для данного протокола. Вызывается под m.mu.RLock.
+// bestForProtocol выбирает лучшую не-passthrough стратегию для протокола.
+// При равном Priority побеждает стратегия с БОЛЬШИМ ID (новее).
+// Это устраняет рандомный выбор между стратегиями 20 и 25 (обе Priority=1).
 func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
-	var best *Strategy
-	bestPri := int(^uint(0) >> 1)
+	type candidate struct {
+		s   *Strategy
+		pri int
+		id  int
+	}
+
+	var cands []candidate
+
 	for _, s := range m.strategies {
 		if isPassthrough(s) {
 			continue
@@ -520,11 +528,27 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 		if !protocolMatches(s, protocol, port) {
 			continue
 		}
-		if s.Priority < bestPri {
-			best = s
-			bestPri = s.Priority
-		}
+		cands = append(cands, candidate{s: s, pri: s.Priority, id: s.ID})
 	}
+
+	if len(cands) == 0 {
+		return nil
+	}
+
+	// Сортировка:
+	// 1. Priority по возрастанию (меньше = лучше)
+	// 2. При равном Priority — ID по убыванию (25 > 20 → выбираем 25)
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].pri != cands[j].pri {
+			return cands[i].pri < cands[j].pri
+		}
+		return cands[i].id > cands[j].id
+	})
+
+	best := cands[0].s
+	log.Printf("[SELECT] bestForProtocol → strategy %d (%s) priority=%d (ID tie-breaker)",
+		best.ID, best.Name, best.Priority)
+
 	return best
 }
 
@@ -844,6 +868,30 @@ func (m *Manager) LoadFromFile(filename string) error {
 	}
 	m.stats.TotalStrategies = len(m.strategies)
 	log.Printf("[LoadFromFile] Merged %d strategies from %s (total: %d)", loaded, filename, len(m.strategies))
+	return nil
+}
+
+// После всех AddStrategy / LoadFromFile
+func (m *Manager) LoadPatternFiles(baseDir string) error {
+	for _, s := range m.strategies {
+		if s.SeqOvlPatternFile != "" {
+			data, err := os.ReadFile(filepath.Join(baseDir, s.SeqOvlPatternFile))
+			if err == nil {
+				s.SeqOvlPatternData = data
+				log.Printf("[PATTERNS] Loaded seqovl %s (%d bytes) for strategy %d", s.SeqOvlPatternFile, len(data), s.ID)
+			} else {
+				log.Printf("[PATTERNS] WARNING: missing %s for strategy %d", s.SeqOvlPatternFile, s.ID)
+			}
+		}
+		// то же самое для FakeTLSFiles, FakeQUICFile, FakeHTTPFile...
+		for _, f := range s.FakeTLSFiles {
+			data, _ := os.ReadFile(filepath.Join(baseDir, f))
+			if len(data) > 0 {
+				s.FakeTLSFilesData = append(s.FakeTLSFilesData, data)
+			}
+		}
+		// FakeQUICFileData, FakeHTTPFileData и т.д.
+	}
 	return nil
 }
 

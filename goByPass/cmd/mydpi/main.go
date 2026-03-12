@@ -172,6 +172,11 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	// Менеджер стратегий: сначала встроенные, затем из файла (если задан).
 	// LoadFromFile добавляет/обновляет стратегии по ID — встроенные не удаляются.
 	strategyMgr := strategy.NewManager()
+
+	if err := strategyMgr.LoadPatternFiles("patterns"); err != nil { // или куда у тебя .bin лежат
+		log.Printf("Warning: %v", err)
+	}
+
 	if cfg.Strategy.StrategyFile != "" {
 		if err := strategyMgr.LoadFromFile(cfg.Strategy.StrategyFile); err != nil {
 			log.Printf("Warning: failed to load strategies from %s: %v",
