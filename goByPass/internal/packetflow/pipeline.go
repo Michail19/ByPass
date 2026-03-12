@@ -153,6 +153,7 @@ func (p *Pipeline) Start() error {
 // Stop останавливает конвейер
 func (p *Pipeline) Stop() {
 	p.cancel()
+	p.capturer.Stop()
 	p.wg.Wait()
 
 	if err := p.capturer.Stop(); err != nil {
@@ -179,7 +180,11 @@ func (p *Pipeline) packetForwarder() {
 		case <-p.ctx.Done():
 			return
 
-		case packet := <-p.capturer.Packets():
+		case packet, ok := <-p.capturer.Packets():
+			if !ok {
+				return
+			}
+
 			p.updateStats(func(stats *PipelineStats) {
 				stats.PacketsReceived++
 				stats.LastPacketTime = time.Now()
@@ -236,6 +241,9 @@ func isHandshakePacket(data []byte) bool {
 		return false
 	}
 	flags := data[ihl+13]
+	if len(data) < ihl+20 {
+		return false
+	}
 	if flags&0x02 != 0 { // SYN
 		return true
 	}
@@ -259,6 +267,7 @@ func (p *Pipeline) hashPacketToWorker(data []byte) int {
 	var h uint32
 	h = uint32(data[12])<<24 | uint32(data[13])<<16 | uint32(data[14])<<8 | uint32(data[15])  // srcIP
 	h ^= uint32(data[16])<<24 | uint32(data[17])<<16 | uint32(data[18])<<8 | uint32(data[19]) // dstIP
+	h ^= uint32(data[9]) << 24
 
 	ihl := int(data[0]&0x0F) * 4
 	if len(data) >= ihl+4 {
@@ -636,6 +645,11 @@ func fixTCPChecksum(packet []byte) {
 		sum = (sum & 0xFFFF) + (sum >> 16)
 	}
 	cs := ^uint16(sum)
+
+	if cs == 0 {
+		cs = 0xFFFF
+	}
+
 	packet[tcpOffset+16] = byte(cs >> 8)
 	packet[tcpOffset+17] = byte(cs)
 }
