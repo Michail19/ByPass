@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -17,6 +18,11 @@ const (
 	IPPROTO_RAW = 255
 	IP_HDRINCL  = 2
 	SOCK_RAW    = 3
+)
+
+var (
+	winDivertDLL *syscall.DLL
+	once         sync.Once
 )
 
 // WinDivertHandle для работы с WinDivert
@@ -95,7 +101,7 @@ func openWinDivertWithDLL(dll *syscall.DLL) (WinDivertHandle, error) {
 	}
 
 	// WinDivertOpen(filter, layer, priority, flags)
-	handle, _, _ := openProc.Call(
+	handle, _, err := openProc.Call(
 		uintptr(unsafe.Pointer(filterPtr)),
 		0, // WINDIVERT_LAYER_NETWORK
 		0, // priority
@@ -103,7 +109,7 @@ func openWinDivertWithDLL(dll *syscall.DLL) (WinDivertHandle, error) {
 	)
 
 	if handle == 0 {
-		return 0, fmt.Errorf("failed to open WinDivert")
+		return 0, fmt.Errorf("WinDivertOpen failed: %v", err)
 	}
 
 	return WinDivertHandle(handle), nil
@@ -155,7 +161,7 @@ func (s *RawSender) sendInternal(packet []byte, addr []byte, clearChecksumFlags 
 		s.stats.PacketsFailed.Add(1)
 		return fmt.Errorf("%w: packet too short: %d bytes", ErrInvalidPacket, len(packet))
 	}
-	if len(addr) == 0 {
+	if len(addr) < 32 {
 		s.stats.PacketsFailed.Add(1)
 		return fmt.Errorf("addr is empty: WinDivertSend requires original WINDIVERT_ADDRESS from WinDivertRecv")
 	}
@@ -195,8 +201,10 @@ func (s *RawSender) sendInternal(packet []byte, addr []byte, clearChecksumFlags 
 
 // SendWithDelay отправляет с задержкой
 func (s *RawSender) SendWithDelay(packet []byte, addr []byte, delay time.Duration) error {
-	time.Sleep(delay)
-	return s.Send(packet, addr)
+	time.AfterFunc(delay, func() {
+		s.Send(packet, addr)
+	})
+	return nil
 }
 
 // SendBatch отправляет несколько пакетов последовательно.
@@ -248,7 +256,9 @@ func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
 	}
 
 	// Загружаем DLL для отправки
-	dll, err := syscall.LoadDLL("WinDivert.dll")
+	once.Do(func() {
+		winDivertDLL, err = syscall.LoadDLL("WinDivert.dll")
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load WinDivert.dll: %v", err)
 	}
@@ -282,7 +292,8 @@ func recalculateIPChecksum(packet []byte) {
 	packet[10] = 0
 	packet[11] = 0
 	var sum uint32
-	for i := 0; i < 20; i += 2 {
+	ihl := int(packet[0]&0x0F) * 4
+	for i := 0; i < ihl; i += 2 {
 		sum += uint32(binary.BigEndian.Uint16(packet[i:]))
 	}
 	for sum>>16 > 0 {
@@ -332,7 +343,10 @@ func fixUDPChecksum(packet []byte) {
 	binary.BigEndian.PutUint16(pseudo[10:12], uint16(udpLen))
 
 	udpData := packet[udpOffset:]
-	fullData := append(pseudo, udpData...)
+	fullData := make([]byte, 12+len(udpData))
+	copy(fullData, pseudo)
+	copy(fullData[12:], udpData)
+
 	checksum := calculateChecksum(fullData)
 	packet[udpOffset+6] = byte(checksum >> 8)
 	packet[udpOffset+7] = byte(checksum & 0xFF)
@@ -360,9 +374,13 @@ func fixTCPChecksum(packet []byte) {
 	binary.BigEndian.PutUint16(pseudo[10:12], uint16(len(packet)-tcpOffset))
 
 	tcpData := packet[tcpOffset:]
-	fullData := append(pseudo, tcpData...)
+	//fullData := append(pseudo, tcpData...)
 
-	checksum := calculateChecksum(fullData)
+	full := make([]byte, 12+len(tcpData))
+	copy(full, pseudo)
+	copy(full[12:], tcpData)
+
+	checksum := calculateChecksum(full)
 	packet[tcpOffset+16] = byte(checksum >> 8)
 	packet[tcpOffset+17] = byte(checksum & 0xFF)
 }

@@ -706,7 +706,7 @@ func buildFakeQUICPacket(original []byte, quicPayload []byte, fakeTTL int) []byt
 
 	// Строим: IP header (ipHdrLen) + UDP header (8) + quicPayload
 	totalLen := ipHdrLen + 8 + len(quicPayload)
-	pkt := make([]byte, totalLen)
+	pkt := make([]byte, ipHdrLen+8+len(quicPayload))
 
 	// IP заголовок из оригинала (src/dst IP, TTL и т.д.)
 	copy(pkt[:ipHdrLen], original[:ipHdrLen])

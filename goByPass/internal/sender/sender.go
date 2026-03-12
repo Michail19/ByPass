@@ -20,6 +20,7 @@ type Sender interface {
 
 	SendWithDelay(packet []byte, addr []byte, delay time.Duration) error
 	SendBatch(packets [][]byte, addr []byte) error
+	GetStats() SenderStatsSnapshot
 	Close() error
 }
 
