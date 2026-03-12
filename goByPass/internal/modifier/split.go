@@ -82,11 +82,7 @@ func (pm *PacketModifier) ApplySeqOvl(
 		ovlLenN = ovlLen
 	}
 
-	// Обрезаем pattern до ovlLen если нужно
-	ovlData := pattern
-	if len(ovlData) > ovlLen {
-		ovlData = ovlData[:ovlLen]
-	}
+	ovlData := pattern[:ovlLenN]
 
 	var results [][]byte
 
@@ -247,12 +243,19 @@ func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, val
 	chunks = append(chunks, packet[payloadOffset+prev:])
 
 	seq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
-	overlap := overlapBytes
+	overlap := 0
+	if isClientHelloPacket(packet, payloadOffset, payloadLen) {
+		overlap = overlapBytes
+	}
 	var results [][]byte
 	for i, seg := range chunks {
 		extra := 0
 		if i > 0 && overlap > 0 {
-			extra = overlap
+			ov := overlap
+			if ov > len(chunks[i-1]) {
+				ov = len(chunks[i-1])
+			}
+			extra = ov
 		}
 
 		newPkt := make([]byte, payloadOffset+len(seg)+extra)
@@ -271,7 +274,6 @@ func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, val
 		binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
 		binary.BigEndian.PutUint32(newPkt[ipHdrLen+4:], seq)
 		if i > 0 && overlap > 0 {
-
 			prev := chunks[i-1]
 
 			ov := overlap
@@ -283,11 +285,8 @@ func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, val
 
 			copy(newPkt[payloadOffset:], overlapData)
 			copy(newPkt[payloadOffset+ov:], seg)
-
 		} else {
-
 			copy(newPkt[payloadOffset:], seg)
-
 		}
 		// Не трогаем newPkt[6] — DF уже скопирован из оригинала (#6)
 		recalculateIPChecksum(newPkt)
@@ -296,8 +295,15 @@ func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, val
 		advance := len(seg)
 
 		if i > 0 && overlap > 0 {
-			if advance > overlap {
-				advance -= overlap
+			ov := overlap
+			if ov > len(chunks[i-1]) {
+				ov = len(chunks[i-1])
+			}
+
+			if advance > ov {
+				advance -= ov
+			} else {
+				advance = 0
 			}
 		}
 
