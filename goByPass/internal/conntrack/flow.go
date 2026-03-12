@@ -156,8 +156,9 @@ func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
 	f.Mu.Lock()
 	defer f.Mu.Unlock()
 
-	f.UpdatedAt = time.Now()
-	f.LastPacket = time.Now()
+	now := time.Now()
+	f.UpdatedAt = now
+	f.LastPacket = now
 
 	if isClient {
 		f.SeqClient = seq

@@ -22,12 +22,13 @@ type DomainCacheEntry struct {
 
 // DomainCache кэширует результаты DNS-запросов
 type DomainCache struct {
-	entries map[string]*DomainCacheEntry
-	mu      sync.RWMutex
-	ttl     time.Duration
-	maxSize int
-	stats   DomainCacheStats
-	stopCh  chan struct{}
+	entries  map[string]*DomainCacheEntry
+	mu       sync.RWMutex
+	ttl      time.Duration
+	maxSize  int
+	stats    DomainCacheStats
+	stopCh   chan struct{}
+	resolver *net.Resolver
 }
 
 // DomainCacheStats статистика кэша доменов
@@ -51,10 +52,11 @@ func NewDomainCache(ttl time.Duration, maxSize int) *DomainCache {
 	}
 
 	c := &DomainCache{
-		entries: make(map[string]*DomainCacheEntry),
-		ttl:     ttl,
-		maxSize: maxSize,
-		stopCh:  make(chan struct{}),
+		entries:  make(map[string]*DomainCacheEntry),
+		ttl:      ttl,
+		maxSize:  maxSize,
+		stopCh:   make(chan struct{}),
+		resolver: net.DefaultResolver,
 	}
 
 	go c.cleanupLoop()
@@ -75,7 +77,8 @@ func (c *DomainCache) Get(domain string) (*DomainCacheEntry, bool) {
 		return nil, false
 	}
 
-	if time.Now().After(entry.ExpireAt) {
+	now := time.Now()
+	if now.After(entry.ExpireAt) {
 		c.Delete(domain)
 		c.mu.Lock()
 		c.stats.Misses++
@@ -88,7 +91,16 @@ func (c *DomainCache) Get(domain string) (*DomainCacheEntry, bool) {
 	c.stats.Hits++
 	c.mu.Unlock()
 
-	return entry, true
+	return &DomainCacheEntry{
+		Domain:      entry.Domain,
+		IPs:         append([]net.IP(nil), entry.IPs...),
+		CNAME:       entry.CNAME,
+		FirstSeen:   entry.FirstSeen,
+		LastSeen:    entry.LastSeen,
+		ExpireAt:    entry.ExpireAt,
+		ResolveTime: entry.ResolveTime,
+		TTL:         entry.TTL,
+	}, true
 }
 
 // Resolve разрешает домен в IP (с кэшированием и таймаутом)
@@ -100,10 +112,9 @@ func (c *DomainCache) Resolve(domain string) ([]net.IP, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resolver := &net.Resolver{}
 	start := time.Now()
 
-	ips, err := resolver.LookupIPAddr(ctx, domain)
+	ips, err := c.resolver.LookupIPAddr(ctx, domain)
 	resolveTime := time.Since(start)
 
 	c.mu.Lock()
@@ -139,7 +150,7 @@ func (c *DomainCache) Put(domain string, ips []net.IP, cname string, resolveTime
 
 	c.entries[domain] = &DomainCacheEntry{
 		Domain:      domain,
-		IPs:         ips,
+		IPs:         append([]net.IP(nil), ips...),
 		CNAME:       cname,
 		FirstSeen:   now,
 		LastSeen:    now,
@@ -157,7 +168,7 @@ func (c *DomainCache) PutWithTTL(domain string, ips []net.IP, cname string, ttl 
 
 	c.entries[domain] = &DomainCacheEntry{
 		Domain:    domain,
-		IPs:       ips,
+		IPs:       append([]net.IP(nil), ips...),
 		CNAME:     cname,
 		FirstSeen: now,
 		LastSeen:  now,
@@ -245,14 +256,19 @@ func (c *DomainCache) GetStats() DomainCacheStats {
 func (c *DomainCache) Preload(domains []string) error {
 	semaphore := make(chan struct{}, 5)
 
+	var wg sync.WaitGroup
+
 	for _, domain := range domains {
+		wg.Add(1)
 		semaphore <- struct{}{}
+
 		go func(d string) {
+			defer wg.Done()
 			defer func() { <-semaphore }()
-			if _, err := c.Resolve(d); err != nil {
-				log.Printf("Failed to preload domain %s: %v", d, err)
-			}
+			c.Resolve(d)
 		}(domain)
 	}
+
+	wg.Wait()
 	return nil
 }
