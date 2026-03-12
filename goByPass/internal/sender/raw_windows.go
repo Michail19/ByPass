@@ -21,8 +21,9 @@ const (
 )
 
 var (
-	winDivertDLL *syscall.DLL
-	once         sync.Once
+	winDivertDLL    *syscall.DLL
+	winDivertDLLErr error
+	once            sync.Once
 )
 
 // WinDivertHandle для работы с WinDivert
@@ -249,14 +250,14 @@ func loadWinDivertDLL() (*syscall.DLL, error) {
 	var err error
 
 	once.Do(func() {
-		winDivertDLL, err = syscall.LoadDLL("WinDivert.dll")
+		winDivertDLL, winDivertDLLErr = syscall.LoadDLL("WinDivert.dll")
 	})
 
 	if winDivertDLL == nil {
 		return nil, err
 	}
 
-	return winDivertDLL, nil
+	return winDivertDLL, winDivertDLLErr
 }
 
 // newWindowsSenderWithHandle создает с handle
@@ -273,13 +274,11 @@ func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
 
 	sendProc, err := dll.FindProc("WinDivertSend")
 	if err != nil {
-		dll.Release()
 		return nil, fmt.Errorf("failed to find WinDivertSend: %v", err)
 	}
 
 	closeProc, err := dll.FindProc("WinDivertClose")
 	if err != nil {
-		dll.Release()
 		return nil, fmt.Errorf("failed to find WinDivertClose: %v", err)
 	}
 

@@ -5,8 +5,10 @@ import (
 	"ByPass/internal/conntrack"
 	"ByPass/internal/protocol"
 	"ByPass/internal/strategy"
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sync/atomic"
 )
 
 // PacketModifier реализует модификацию пакетов
@@ -16,7 +18,20 @@ type PacketModifier struct {
 	stats           ModifierStats
 }
 
+// ModifierStats — статистика модификатора.
+// Все поля atomic.Uint64: ModifyPacket вызывается из нескольких воркеров
+// одновременно, обычный uint64++ — data race (#4 в review).
 type ModifierStats struct {
+	PacketsProcessed atomic.Uint64
+	PacketsModified  atomic.Uint64
+	SplitCount       atomic.Uint64
+	DisorderCount    atomic.Uint64
+	FakeCount        atomic.Uint64
+	Errors           atomic.Uint64
+}
+
+// ModifierStatsSnapshot — иммутабельный снимок для логирования/UI.
+type ModifierStatsSnapshot struct {
 	PacketsProcessed uint64
 	PacketsModified  uint64
 	SplitCount       uint64
@@ -51,7 +66,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
 		return &ModifyResult{SendOriginal: true}, nil
 	}
-	pm.stats.PacketsProcessed++
+	pm.stats.PacketsProcessed.Add(1)
 
 	ipHdrLen := int(packet[0]&0x0F) * 4
 	tcpHdrLen := int(packet[ipHdrLen+12]>>4) * 4
@@ -107,8 +122,8 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		synPkts, err := pm.ApplySynData(packet, synFakeData)
 		if err == nil && len(synPkts) > 0 {
 			// synPkts уже включает оригинальный SYN как последний элемент
-			pm.stats.DisorderCount += uint64(len(synPkts))
-			pm.stats.PacketsModified += uint64(len(synPkts))
+			pm.stats.DisorderCount.Add(uint64(len(synPkts)))
+			pm.stats.PacketsModified.Add(uint64(len(synPkts)))
 			return &ModifyResult{
 				StrategyID:      strat.ID,
 				ModifiedPackets: synPkts,
@@ -139,7 +154,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 			)
 			if err == nil {
 				packets = append(packets, fakePkts...)
-				pm.stats.FakeCount += uint64(len(fakePkts))
+				pm.stats.FakeCount.Add(uint64(len(fakePkts)))
 			}
 		}
 	}
@@ -179,7 +194,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		)
 		if err == nil && len(seqPkts) > 0 {
 			packets = append(packets, seqPkts...)
-			pm.stats.SplitCount += uint64(len(seqPkts))
+			pm.stats.SplitCount.Add(uint64(len(seqPkts)))
 			originalReplaced = true // seqPkts содержит реальные сегменты
 			goto finalize
 		}
@@ -204,7 +219,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 			// FakedSplit уже включает fake-пакеты, не дублируем из шага 2
 			// Заменяем packets (fake из шага 2 уже внутри ApplyFakedSplit)
 			packets = fsPkts
-			pm.stats.SplitCount += uint64(len(fsPkts))
+			pm.stats.SplitCount.Add(uint64(len(fsPkts)))
 			originalReplaced = true // fsPkts содержит реальные сегменты
 			goto finalize
 		}
@@ -225,7 +240,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		)
 		if err == nil && len(dPkts) > 0 {
 			packets = append(packets, dPkts...)
-			pm.stats.DisorderCount += uint64(len(dPkts))
+			pm.stats.DisorderCount.Add(uint64(len(dPkts)))
 			originalReplaced = true // dPkts содержит реальные сегменты после decoy
 			goto finalize
 		}
@@ -236,7 +251,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		hfPkts, err := pm.ApplyHostFakeSplit(packet, strat)
 		if err == nil && len(hfPkts) > 0 {
 			packets = append(packets, hfPkts...)
-			pm.stats.SplitCount += uint64(len(hfPkts))
+			pm.stats.SplitCount.Add(uint64(len(hfPkts)))
 			originalReplaced = true
 			goto finalize
 		}
@@ -247,7 +262,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		splitPkts, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
 		if err == nil && len(splitPkts) > 0 {
 			packets = append(packets, splitPkts...)
-			pm.stats.SplitCount += uint64(len(splitPkts))
+			pm.stats.SplitCount.Add(uint64(len(splitPkts)))
 			originalReplaced = true // splitPkts — полная замена original
 			goto finalize
 		}
@@ -294,7 +309,7 @@ finalize:
 		return &ModifyResult{SendOriginal: true}, nil
 	}
 
-	pm.stats.PacketsModified += uint64(len(packets))
+	pm.stats.PacketsModified.Add(uint64(len(packets)))
 	return &ModifyResult{
 		StrategyID:      strat.ID,
 		ModifiedPackets: packets,
@@ -390,54 +405,158 @@ func (pm *PacketModifier) ApplyHostFakeSplit(packet []byte, strat *strategy.Stra
 }
 
 // modifyClientHelloSNI заменяет SNI в TLS ClientHello.
-// Возвращает nil если не удалось распарсить.
+//
+// Стратегия: ищем позицию SNI через protocol.FindSNI, затем заменяем
+// содержимое name in-place (если длина совпадает) или перестраиваем пакет
+// (если новый SNI короче/длиннее — обновляем все вложенные length-поля).
+//
+// Возвращает nil если payload не является TLS ClientHello или SNI не найден.
 func modifyClientHelloSNI(payload []byte, newSNI string) []byte {
 	if len(payload) < 9 || payload[0] != 0x16 || payload[1] != 0x03 {
 		return nil
 	}
-	// Находим существующий SNI и заменяем его
-	// Если новый SNI короче/длиннее — нужна перестройка заголовков.
-	// Упрощённый вариант: если длины совпадают — заменяем in-place.
-	sniBytes := []byte(newSNI)
-	modified := make([]byte, len(payload))
-	copy(modified, payload)
 
-	// Ищем SNI extension (0x00 0x00) в extensions
-	// Используем FindSNI из tls.go через protocol.FindSNI
-	// (здесь дублируем минимальный поиск чтобы не импортировать protocol)
-	// Реальная реализация должна использовать protocol.FindSNI
-	_ = sniBytes
-	return modified // TODO: полная реализация замены SNI
+	sniPos, err := protocol.FindSNI(payload)
+	if err != nil {
+		return nil
+	}
+
+	// sniPos указывает на первый байт имени SNI (после nameType и nameLen).
+	// Читаем текущую длину имени из двух байт перед sniPos.
+	if sniPos < 5 || sniPos+0 > len(payload) {
+		return nil
+	}
+	// nameLen находится в payload[sniPos-2 : sniPos]
+	oldNameLen := int(binary.BigEndian.Uint16(payload[sniPos-2 : sniPos]))
+	if sniPos+oldNameLen > len(payload) {
+		return nil
+	}
+
+	newSNIBytes := []byte(newSNI)
+	newNameLen := len(newSNIBytes)
+	delta := newNameLen - oldNameLen
+
+	// Строим новый payload:
+	//   payload[:sniPos-2]              — всё до nameLen
+	//   newNameLen (2 bytes BE)         — обновлённая длина имени
+	//   newSNIBytes                     — новое имя
+	//   payload[sniPos+oldNameLen:]     — остаток
+	result := make([]byte, len(payload)+delta)
+	copy(result, payload[:sniPos-2])
+	binary.BigEndian.PutUint16(result[sniPos-2:], uint16(newNameLen))
+	copy(result[sniPos:], newSNIBytes)
+	copy(result[sniPos+newNameLen:], payload[sniPos+oldNameLen:])
+
+	if delta == 0 {
+		// Длина не изменилась — length-поля выше не нужно трогать
+		return result
+	}
+
+	// Обновляем все вложенные length-поля которые охватывают SNI:
+	//
+	// Структура TLS ClientHello (смещения от начала payload):
+	//   [0]     ContentType (1)
+	//   [1:3]   RecordVersion (2)
+	//   [3:5]   RecordLength (2)          ← обновить
+	//   [5]     HandshakeType (1)
+	//   [6:9]   HandshakeLength (3)       ← обновить
+	//   ...extensions...
+	//     ExtType(2) + ExtLen(2)          ← обновить SNI extension length
+	//       SNI list length (2)           ← обновить
+	//         nameType(1) + nameLen(2)    ← уже обновлено выше
+	//
+	// TLS record length: bytes [3:5]
+	if len(result) >= 5 {
+		oldRecordLen := int(binary.BigEndian.Uint16(result[3:5]))
+		binary.BigEndian.PutUint16(result[3:5], uint16(oldRecordLen+delta))
+	}
+
+	// Handshake length: 3-byte BE at bytes [6:9]
+	if len(result) >= 9 {
+		oldHsLen := int(result[6])<<16 | int(result[7])<<8 | int(result[8])
+		newHsLen := oldHsLen + delta
+		result[6] = byte(newHsLen >> 16)
+		result[7] = byte(newHsLen >> 8)
+		result[8] = byte(newHsLen)
+	}
+
+	// Ищем SNI extension (type=0x0000) чтобы обновить его ExtLen и SNI list length.
+	// Парсим extension list заново из result (после изменения длин выше).
+	updateSNIExtensionLengths(result, sniPos, delta)
+
+	return result
 }
 
-// replaceHTTPHost заменяет Host: заголовок в HTTP payload
-func replaceHTTPHost(payload []byte, newHost string) []byte {
-	hostPrefix := []byte("Host: ")
-	idx := -1
-	for i := 0; i < len(payload)-len(hostPrefix); i++ {
-		match := true
-		for j, b := range hostPrefix {
-			if payload[i+j] != b && payload[i+j] != b+32 { // case-insensitive
-				match = false
-				break
-			}
-		}
-		if match {
-			idx = i
-			break
-		}
+// updateSNIExtensionLengths обновляет ExtLen и SNI list length в уже модифицированном
+// ClientHello. sniPos — позиция первого байта имени SNI (после nameLen).
+func updateSNIExtensionLengths(data []byte, sniPos int, delta int) {
+	// Пропускаем record header(5) + handshake header(4) + version(2) + random(32)
+	pos := 5 + 4 + 2 + 32
+	if pos >= len(data) {
+		return
 	}
+	// session ID
+	sessionLen := int(data[pos])
+	pos += 1 + sessionLen
+	// cipher suites
+	if pos+2 > len(data) {
+		return
+	}
+	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2 + cipherLen
+	// compression methods
+	if pos >= len(data) {
+		return
+	}
+	compLen := int(data[pos])
+	pos += 1 + compLen
+	// extensions length field
+	if pos+2 > len(data) {
+		return
+	}
+	extTotalLenOff := pos
+	extTotalLen := int(binary.BigEndian.Uint16(data[pos:]))
+	binary.BigEndian.PutUint16(data[extTotalLenOff:], uint16(extTotalLen+delta))
+	pos += 2
+
+	end := pos + extTotalLen + delta
+	if end > len(data) {
+		end = len(data)
+	}
+	for pos+4 <= end {
+		extType := binary.BigEndian.Uint16(data[pos : pos+2])
+		extLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
+		if extType == 0x0000 { // server_name extension
+			// Обновляем ExtLen
+			binary.BigEndian.PutUint16(data[pos+2:pos+4], uint16(extLen+delta))
+			// Обновляем SNI list length (2 bytes после pos+4)
+			if pos+6 <= len(data) {
+				listLen := int(binary.BigEndian.Uint16(data[pos+4 : pos+6]))
+				binary.BigEndian.PutUint16(data[pos+4:pos+6], uint16(listLen+delta))
+			}
+			return
+		}
+		pos += 4 + extLen
+	}
+}
+
+// replaceHTTPHost заменяет Host: заголовок в HTTP payload.
+// Поиск регистронезависимый через bytes.ToLower (#6 в review).
+func replaceHTTPHost(payload []byte, newHost string) []byte {
+	lower := bytes.ToLower(payload)
+	hostPrefix := []byte("host: ")
+	idx := bytes.Index(lower, hostPrefix)
 	if idx < 0 {
 		return nil
 	}
 
-	// Находим конец строки Host:
+	// Ищем конец строки заголовка
 	end := idx + len(hostPrefix)
 	for end < len(payload) && payload[end] != '\r' && payload[end] != '\n' {
 		end++
 	}
 
-	result := make([]byte, 0, len(payload))
+	result := make([]byte, 0, len(payload)+len(newHost))
 	result = append(result, payload[:idx]...)
 	result = append(result, []byte("Host: "+newHost)...)
 	result = append(result, payload[end:]...)
@@ -492,8 +611,16 @@ func isClientHelloPacket(packet []byte, payloadOffset, payloadLen int) bool {
 	return true
 }
 
-func (pm *PacketModifier) GetStats() ModifierStats {
-	return pm.stats
+// GetStats возвращает иммутабельный снимок статистики.
+func (pm *PacketModifier) GetStats() ModifierStatsSnapshot {
+	return ModifierStatsSnapshot{
+		PacketsProcessed: pm.stats.PacketsProcessed.Load(),
+		PacketsModified:  pm.stats.PacketsModified.Load(),
+		SplitCount:       pm.stats.SplitCount.Load(),
+		DisorderCount:    pm.stats.DisorderCount.Load(),
+		FakeCount:        pm.stats.FakeCount.Load(),
+		Errors:           pm.stats.Errors.Load(),
+	}
 }
 
 func validatePacket(packet []byte) error {

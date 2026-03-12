@@ -392,18 +392,23 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		return
 	}
 
-	if !flow.IsAnalyzed {
+	// Быстрое чтение IsAnalyzed под RLock — flow.Mu защищает все поля Flow,
+	// включая IsAnalyzed. Без блокировки Go race detector фиксирует data race
+	// с cleanupLoop и другими читателями (#5 в review).
+	flow.Mu.RLock()
+	isAnalyzed := flow.IsAnalyzed
+	flow.Mu.RUnlock()
+
+	if !isAnalyzed {
 		info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
 		if err == nil && info != nil {
 			if info.SNI != "" {
 				flow.SetHostname(info.SNI)
+				// Объединяем два последовательных Lock/Unlock в один (#7 в review).
+				// ВАЖНО: обнуляем DataPacketsModified — он использовался как
+				// analysis-attempt counter; теперь будет считать модифицированные пакеты.
 				flow.Mu.Lock()
 				flow.IsAnalyzed = true
-				flow.Mu.Unlock()
-				// ВАЖНО: обнуляем счётчик — он использовался как analysis-attempt counter,
-				// а теперь будет использоваться для подсчёта модифицированных data-пакетов.
-				// Без сброса стратегия решит, что уже N пакетов модифицировано.
-				flow.Mu.Lock()
 				flow.DataPacketsModified = 0
 				flow.Mu.Unlock()
 			} else if info.Host != "" {
@@ -421,17 +426,16 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			}
 		}
 		// Отказываемся от анализа после 4 пакетов без результата.
-		// Используем отдельный lock-секции чтобы не смешивать счётчики.
+		// Читаем IsAnalyzed под Lock (уже могло стать true выше).
+		flow.Mu.Lock()
 		if !flow.IsAnalyzed {
-			flow.Mu.Lock()
 			flow.DataPacketsModified++ // временно: счётчик попыток анализа
-			giveUp := flow.DataPacketsModified >= 4
-			if giveUp {
+			if flow.DataPacketsModified >= 4 {
 				flow.IsAnalyzed = true
 				flow.DataPacketsModified = 0 // сброс для реального использования ниже
 			}
-			flow.Mu.Unlock()
 		}
+		flow.Mu.Unlock()
 	}
 
 	// Проверяем кэш

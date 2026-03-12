@@ -25,36 +25,44 @@ type googleIPList struct {
 	Prefixes     []ipRange `json:"prefixes"`
 }
 
+// strategyRuntimeStats хранит изменяемую статистику стратегии отдельно от
+// конфига (Strategy). Strategy-указатель, возвращаемый SelectStrategy, становится
+// иммутабельным после AddStrategy — вызывающий код может читать поля без блокировки.
+// SuccessCount/FailCount/AvgResponseMs/LastUsed изменяются только через UpdateStrategy
+// под statsMap[id].mu, а не через поля самой Strategy.
+type strategyRuntimeStats struct {
+	mu            sync.Mutex
+	successCount  int
+	failCount     int
+	avgResponseMs int64
+	lastUsed      time.Time
+}
+
 // Manager управляет стратегиями
 type Manager struct {
-	strategies   map[int]*Strategy
-	defaultID    int
-	activeID     int
-	filters      map[string]*StrategyFilter
-	stats        ManagerStats
-	mu           sync.RWMutex
-	updateChan   chan *StrategyResult
-	closeChan    chan struct{}
-	googleRanges []*net.IPNet
-	// cidrIndex — индекс по первому октету для быстрого отсева.
-	// Большинство проверок отклоняется на первом октете без перебора всего списка.
+	strategies     map[int]*Strategy
+	defaultID      int
+	activeID       int
+	filters        map[string]*StrategyFilter
+	stats          ManagerStats
+	mu             sync.RWMutex
+	updateChan     chan *StrategyResult
+	closeChan      chan struct{}
+	googleRanges   []*net.IPNet
 	cidrIndex      map[byte][]*net.IPNet
 	rangesMu       sync.RWMutex
 	lastUpdateTime time.Time
 	updateErr      error
 
-	// hostnameRules — статические правила hostname→strategy.
-	// Загружаются один раз при старте через SetHostnameRules().
-	// Имеют приоритет над testOverrides, IP-кэшем и дефолтным fallback.
-	// FIX #1/#2: тип *hostnameRules (не var), инициализируется в NewManager.
 	hostnameRules *hostnameRules
 
-	// testOverrides используется только Discovery для временного форсирования
-	// конкретной стратегии при тестовом соединении к домену.
-	// SelectStrategy проверяет его ПОСЛЕ hostnameRules — ДО IP и hostname fallback.
-	// Ключ: hostname в нижнем регистре. Значение: ID стратегии.
 	testOverrides   map[string]int
 	testOverridesMu sync.RWMutex
+
+	// statsMap хранит изменяемую статистику отдельно от конфига Strategy.
+	// Ключ совпадает с Strategy.ID. Запись создаётся в AddStrategy.
+	statsMap map[int]*strategyRuntimeStats
+	statsMu  sync.RWMutex
 }
 
 // ManagerStats статистика менеджера
@@ -76,25 +84,24 @@ func NewManager() *Manager {
 		googleRanges:  make([]*net.IPNet, 0),
 		cidrIndex:     make(map[byte][]*net.IPNet),
 		testOverrides: make(map[string]int),
+		statsMap:      make(map[int]*strategyRuntimeStats),
 	}
 
 	// FIX #2: hostnameRules — pointer, необходима явная инициализация.
-	// Было: m.hostnameRules.byExact = make(...) → nil ptr dereference panic.
 	m.hostnameRules = &hostnameRules{
 		byExact: make(map[string]int),
 	}
 
-	// Загружаем стратегии по умолчанию
 	m.loadDefaultStrategies()
 
-	// Запускаем обработчик результатов
 	go m.processResults()
 
-	// Запускаем авто-обновление Google IP ranges
 	go m.startGoogleIPUpdater()
 
-	// Первичная загрузка при старте
-	m.updateGoogleIPRanges()
+	// FIX #6: первичная загрузка в горутине, не блокируем конструктор.
+	// Было: m.updateGoogleIPRanges() синхронно — 3 retry × 20s = до 60с блокировки.
+	// Fallback-список применяется немедленно если HTTP недоступен.
+	go m.updateGoogleIPRanges()
 
 	return m
 }
@@ -328,13 +335,20 @@ func (m *Manager) Stop() {
 	close(m.closeChan)
 }
 
-// AddStrategy добавляет стратегию
+// AddStrategy добавляет стратегию.
+// FIX auto-ID: ищем первый свободный ID вместо len()+1 — устраняет коллизии
+// при наличии стратегий с явными ID (например 1,2,3,60 → len=4, но ID 4 может быть занят).
 func (m *Manager) AddStrategy(strategy *Strategy) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if strategy.ID == 0 {
-		strategy.ID = len(m.strategies) + 1
+		for id := 1; ; id++ {
+			if _, exists := m.strategies[id]; !exists {
+				strategy.ID = id
+				break
+			}
+		}
 	}
 
 	if _, exists := m.strategies[strategy.ID]; exists {
@@ -343,6 +357,12 @@ func (m *Manager) AddStrategy(strategy *Strategy) error {
 
 	m.strategies[strategy.ID] = strategy
 	m.stats.TotalStrategies++
+
+	// Инициализируем запись в statsMap — изолируем изменяемую статистику
+	// от иммутабельного конфига Strategy (#3 в review).
+	m.statsMu.Lock()
+	m.statsMap[strategy.ID] = &strategyRuntimeStats{}
+	m.statsMu.Unlock()
 
 	return nil
 }
@@ -512,26 +532,36 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 //
 // Порядок приоритетов:
 //  0. HostnameRules (SetHostnameRules) — статические правила, абсолютный приоритет
+//     FIX #4: для QUIC (hostname="") ищем hostname через builtinHostnameMappings по IP
 //  1. testOverrides — форсирование от Discovery (hostname или IP)
-//  2. Google IP диапазоны → стратегия по nameHint "google"/"quic"
+//  2. Google IP диапазоны → стратегия по nameHint
+//     FIX #2: hint для UDP = "youtube" (было "quic" — ни одна стратегия не совпадала)
 //  3. builtinHostnameMappings — hostname содержит известную подстроку
 //  4. Fallback: лучшая по Priority не-passthrough стратегия для данного протокола
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
 	log.Printf("[SELECT] IP=%s:%d hostname='%s' proto=%s", ip, port, hostname, protocol)
 
 	// ── 0. Hostname Rules (абсолютный приоритет) ─────────────────────────────
-	// Статические правила из SetHostnameRules: youtube.com → yt-discord-2026-zapret, etc.
-	// Проверяются ДО discovery overrides — гарантируют стабильную стратегию.
 	if hostname != "" {
 		if s := m.hostnameRuleStrategy(hostname); s != nil {
 			log.Printf("[SELECT] HostnameRule '%s' → strategy %d (%s)", hostname, s.ID, s.Name)
 			return s
 		}
+	} else if protocol == "udp" {
+		// FIX #4: QUIC-пакеты не содержат SNI — hostname пуст.
+		// Пробуем найти hostname через builtinHostnameMappings по IP
+		// (Google IP → "youtube.com"), затем проверяем HostnameRules.
+		// Без этого HostnameRules игнорировались для всего QUIC-трафика.
+		if inferredHostname := m.inferHostnameForIP(ip); inferredHostname != "" {
+			if s := m.hostnameRuleStrategy(inferredHostname); s != nil {
+				log.Printf("[SELECT] HostnameRule (QUIC inferred) '%s' → strategy %d (%s)",
+					inferredHostname, s.ID, s.Name)
+				return s
+			}
+		}
 	}
 
 	// ── 1. Test override — форсированная стратегия от Discovery ──────────────
-	// (a) По hostname — основной путь (TCP с извлечённым SNI)
-	// (b) По IP — fallback для QUIC/UDP где SNI недоступен
 	m.testOverridesMu.RLock()
 	var overrideStratID int
 	var hasOverride bool
@@ -559,23 +589,22 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// ── 2. Google IP — надёжный признак для YouTube/CDN ─────────────────────
+	// ── 2. Google IP ──────────────────────────────────────────────────────────
 	if m.isGoogleIP(ip) {
-		hint := "google"
-		if protocol == "udp" {
-			hint = "quic"
-		}
+		// FIX #2: для UDP hint был "quic" — ни одна стратегия не содержит "quic" в имени.
+		// "youtube" совпадает с "youtube-2026" и "yt-discord-2026-zapret".
+		hint := "youtube"
 		if s := m.selectByNameHint(hint, protocol, port); s != nil {
 			log.Printf("[SELECT] Google IP %s → strategy %d (%s)", ip, s.ID, s.Name)
 			return s
 		}
 		if s := m.bestForProtocol(protocol, port); s != nil {
-			log.Printf("[SELECT] Google IP %s (no google strat) → strategy %d (%s)", ip, s.ID, s.Name)
+			log.Printf("[SELECT] Google IP %s (no youtube strat) → strategy %d (%s)", ip, s.ID, s.Name)
 			return s
 		}
 	}
 
-	// ── 3. builtinHostnameMappings — hostname match ───────────────────────────
+	// ── 3. builtinHostnameMappings ────────────────────────────────────────────
 	if hostname != "" {
 		lower := strings.ToLower(hostname)
 		for _, rule := range builtinHostnameMappings {
@@ -588,7 +617,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// ── 4. Fallback: лучшая для протокола ────────────────────────────────────
+	// ── 4. Fallback ───────────────────────────────────────────────────────────
 	if s := m.bestForProtocol(protocol, port); s != nil {
 		log.Printf("[SELECT] Fallback → strategy %d (%s) priority=%d", s.ID, s.Name, s.Priority)
 		return s
@@ -596,6 +625,16 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 
 	log.Printf("[SELECT] No strategy for %s:%d (hostname='%s')", ip, port, hostname)
 	return nil
+}
+
+// inferHostnameForIP возвращает каноническое hostname для IP по builtinHostnameMappings.
+// Используется для QUIC-пакетов где SNI отсутствует: Google IP → "youtube.com".
+// Не выполняет reverse DNS — только проверяет Google-диапазоны.
+func (m *Manager) inferHostnameForIP(ip string) string {
+	if m.isGoogleIP(ip) {
+		return "youtube.com"
+	}
+	return ""
 }
 
 // SetDefault устанавливает стратегию по умолчанию
@@ -637,32 +676,63 @@ func (m *Manager) GetActive() *Strategy {
 	return nil
 }
 
-// UpdateStrategy обновляет статистику стратегии
+// UpdateStrategy обновляет статистику стратегии.
+// FIX #3: пишем в statsMap[id] а не в Strategy напрямую.
+// Strategy-указатель после AddStrategy иммутабелен — SelectStrategy может
+// возвращать его вызывающим горутинам без риска data race.
 func (m *Manager) UpdateStrategy(id int, success bool, responseTime time.Duration) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	strat, exists := m.strategies[id]
+	m.mu.RLock()
+	_, exists := m.strategies[id]
+	m.mu.RUnlock()
 	if !exists {
 		return
 	}
 
-	strat.LastUsed = time.Now()
+	m.statsMu.RLock()
+	st, ok := m.statsMap[id]
+	m.statsMu.RUnlock()
+	if !ok {
+		return
+	}
 
+	st.mu.Lock()
+	st.lastUsed = time.Now()
 	if success {
-		strat.SuccessCount++
+		st.successCount++
+		m.mu.Lock()
 		m.stats.SuccessfulAttempts++
-
-		if strat.AvgResponseMs == 0 {
-			strat.AvgResponseMs = responseTime.Milliseconds()
+		m.mu.Unlock()
+		if st.avgResponseMs == 0 {
+			st.avgResponseMs = responseTime.Milliseconds()
 		} else {
-			strat.AvgResponseMs = (strat.AvgResponseMs*int64(strat.SuccessCount-1) +
-				responseTime.Milliseconds()) / int64(strat.SuccessCount)
+			st.avgResponseMs = (st.avgResponseMs*int64(st.successCount-1) +
+				responseTime.Milliseconds()) / int64(st.successCount)
 		}
 	} else {
-		strat.FailCount++
+		st.failCount++
+		m.mu.Lock()
 		m.stats.FailedAttempts++
+		m.mu.Unlock()
 	}
+	st.mu.Unlock()
+}
+
+// GetStrategyStats возвращает снимок статистики для стратегии.
+// Отдельно от Strategy чтобы не раскрывать изменяемые поля напрямую.
+func (m *Manager) GetStrategyStats(id int) (successCount, failCount int, avgResponseMs int64, lastUsed time.Time, ok bool) {
+	m.statsMu.RLock()
+	st, exists := m.statsMap[id]
+	m.statsMu.RUnlock()
+	if !exists {
+		return 0, 0, 0, time.Time{}, false
+	}
+	st.mu.Lock()
+	successCount = st.successCount
+	failCount = st.failCount
+	avgResponseMs = st.avgResponseMs
+	lastUsed = st.lastUsed
+	st.mu.Unlock()
+	return successCount, failCount, avgResponseMs, lastUsed, true
 }
 
 // ReportResult сообщает о результате применения стратегии
@@ -741,6 +811,11 @@ func (m *Manager) LoadFromFile(filename string) error {
 				continue
 			}
 			m.strategies[s.ID] = s
+			m.statsMu.Lock()
+			if _, exists := m.statsMap[s.ID]; !exists {
+				m.statsMap[s.ID] = &strategyRuntimeStats{}
+			}
+			m.statsMu.Unlock()
 			loaded++
 		}
 		m.stats.TotalStrategies = len(m.strategies)
@@ -760,6 +835,11 @@ func (m *Manager) LoadFromFile(filename string) error {
 	loaded := 0
 	for id, s := range strategiesMap {
 		m.strategies[id] = s
+		m.statsMu.Lock()
+		if _, exists := m.statsMap[id]; !exists {
+			m.statsMap[id] = &strategyRuntimeStats{}
+		}
+		m.statsMu.Unlock()
 		loaded++
 	}
 	m.stats.TotalStrategies = len(m.strategies)

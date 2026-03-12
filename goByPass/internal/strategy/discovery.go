@@ -84,14 +84,18 @@ func NewDiscovery(manager *Manager, config DiscoveryConfig) *Discovery {
 	}
 }
 
-// Start запускает автоподбор
+// Start запускает автоподбор.
+// FIX: d.running читается и пишется под d.mu.Lock() — устраняет data race
+// с Stop() и горутиной runDiscovery(), которые тоже пишут это поле.
 func (d *Discovery) Start() error {
+	d.mu.Lock()
 	if d.running {
+		d.mu.Unlock()
 		return fmt.Errorf("discovery already running")
 	}
-
 	d.running = true
 	d.progress.StartTime = time.Now()
+	d.mu.Unlock()
 
 	go d.runDiscovery()
 
@@ -100,11 +104,13 @@ func (d *Discovery) Start() error {
 
 // Stop останавливает автоподбор.
 // FIX #9: безопасен для многократного вызова благодаря sync.Once.
-// Было: close(d.stopChan) напрямую → panic при двойном вызове.
+// FIX race: d.running = false под d.mu.Lock() — синхронизировано с Start().
 func (d *Discovery) Stop() {
 	d.stopOnce.Do(func() {
 		close(d.stopChan)
+		d.mu.Lock()
 		d.running = false
+		d.mu.Unlock()
 	})
 }
 
@@ -145,7 +151,9 @@ func (d *Discovery) runDiscovery() {
 	}
 
 	wg.Wait()
+	d.mu.Lock()
 	d.running = false
+	d.mu.Unlock()
 }
 
 // testStrategy тестирует стратегию на одном домене.
@@ -184,6 +192,13 @@ func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 
 	log.Printf("[DISCOVERY] Testing strategy %d (%s) on %s:%d (QUIC IPs: %v)",
 		strat.ID, strat.Name, domain, port, resolvedIPs)
+
+	// FIX: обновляем CurrentDomain/Port для GetProgress() (#7 в review).
+	// Было: поля никогда не записывались → GetProgress() всегда возвращал пустые значения.
+	d.mu.Lock()
+	d.progress.CurrentDomain = domain
+	d.progress.CurrentPort = port
+	d.mu.Unlock()
 
 	for i := 0; i < d.config.SamplesPerTest; i++ {
 		time.Sleep(d.config.TestInterval)
