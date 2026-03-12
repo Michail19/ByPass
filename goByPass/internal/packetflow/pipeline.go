@@ -153,12 +153,12 @@ func (p *Pipeline) Start() error {
 // Stop останавливает конвейер
 func (p *Pipeline) Stop() {
 	p.cancel()
-	p.capturer.Stop()
-	p.wg.Wait()
 
 	if err := p.capturer.Stop(); err != nil {
 		log.Printf("Error stopping capturer: %v", err)
 	}
+
+	p.wg.Wait()
 
 	if err := p.sender.Close(); err != nil {
 		log.Printf("Error closing sender: %v", err)
@@ -203,13 +203,16 @@ func (p *Pipeline) packetForwarder() {
 				// 2ms достаточно чтобы воркер разгрузился; превышение означает перегрузку системы.
 				select {
 				case ch <- packet:
-				case <-time.After(2 * time.Millisecond):
+					//case <-time.After(2 * time.Millisecond):
+				default:
 					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
 					log.Printf("WARNING: Worker %d queue full, dropping handshake packet after 2ms", workerIdx)
 				}
 			} else {
 				select {
 				case ch <- packet:
+				case <-p.ctx.Done():
+					return
 				default:
 					// data-пакеты дропаем немедленно — TCP retransmit восстановит.
 					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
@@ -241,9 +244,6 @@ func isHandshakePacket(data []byte) bool {
 		return false
 	}
 	flags := data[ihl+13]
-	if len(data) < ihl+20 {
-		return false
-	}
 	if flags&0x02 != 0 { // SYN
 		return true
 	}
@@ -270,6 +270,9 @@ func (p *Pipeline) hashPacketToWorker(data []byte) int {
 	h ^= uint32(data[9]) << 24
 
 	ihl := int(data[0]&0x0F) * 4
+	if ihl < 20 || len(data) < ihl {
+		return int(h % uint32(p.workers))
+	}
 	if len(data) >= ihl+4 {
 		h ^= uint32(data[ihl])<<8 | uint32(data[ihl+1])   // srcPort
 		h ^= uint32(data[ihl+2])<<8 | uint32(data[ihl+3]) // dstPort
@@ -394,7 +397,9 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		if err == nil && info != nil {
 			if info.SNI != "" {
 				flow.SetHostname(info.SNI)
+				flow.Mu.Lock()
 				flow.IsAnalyzed = true
+				flow.Mu.Unlock()
 				// ВАЖНО: обнуляем счётчик — он использовался как analysis-attempt counter,
 				// а теперь будет использоваться для подсчёта модифицированных data-пакетов.
 				// Без сброса стратегия решит, что уже N пакетов модифицировано.
@@ -403,8 +408,8 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 				flow.Mu.Unlock()
 			} else if info.Host != "" {
 				flow.SetHostname(info.Host)
-				flow.IsAnalyzed = true
 				flow.Mu.Lock()
+				flow.IsAnalyzed = true
 				flow.DataPacketsModified = 0
 				flow.Mu.Unlock()
 			}
@@ -490,6 +495,12 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		// Определить тип пакета (уже есть)
 		ipHeaderLen := int(pkt.Data[0]&0x0F) * 4
 		tcpOffset := ipHeaderLen
+
+		if len(pkt.Data) < tcpOffset+14 {
+			p.sendPacket(pkt.Data, pkt.Addr)
+			return
+		}
+
 		flags := pkt.Data[tcpOffset+13]
 		isSYN := (flags & 0x02) != 0
 		isACK := (flags & 0x10) != 0
@@ -767,6 +778,11 @@ func fixUDPChecksum(packet []byte) {
 		sum = (sum & 0xFFFF) + (sum >> 16)
 	}
 	cs := ^uint16(sum)
+
+	if cs == 0 {
+		cs = 0xFFFF
+	}
+
 	packet[udpOffset+6] = byte(cs >> 8)
 	packet[udpOffset+7] = byte(cs)
 }
@@ -822,7 +838,11 @@ func (p *Pipeline) resultProcessor() {
 		select {
 		case <-p.ctx.Done():
 			return
-		case result := <-p.resultChan:
+		case result, ok := <-p.resultChan:
+			if !ok {
+				return
+			}
+
 			// Отправляем результат в менеджер стратегий для статистики
 			if p.strategyMgr != nil {
 				// Determine success before building the result struct
@@ -858,10 +878,8 @@ func (p *Pipeline) extractIPs(packet []byte) (srcIP, dstIP net.IP, err error) {
 
 	version := packet[0] >> 4
 	if version == 4 {
-		src := make(net.IP, 4)
-		dst := make(net.IP, 4)
-		copy(src, packet[12:16])
-		copy(dst, packet[16:20])
+		src := net.IPv4(packet[12], packet[13], packet[14], packet[15])
+		dst := net.IPv4(packet[16], packet[17], packet[18], packet[19])
 		return src, dst, nil
 	}
 
