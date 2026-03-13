@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -103,11 +104,14 @@ func main() {
 	}
 	defer components.cleanup()
 
-	if err := setupFirewall(cfg); err != nil {
+	// Firewall теперь в components
+	if err := components.firewall.AddRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction); err != nil {
 		log.Fatalf("Failed to setup firewall: %v", err)
 	}
 
 	if err := components.pipeline.Start(); err != nil {
+		// Rollback firewall при ошибке старта
+		components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
 		log.Fatalf("Failed to start pipeline: %v", err)
 	}
 
@@ -118,9 +122,10 @@ func main() {
 		go runDiscovery(components.strategyMgr, cfg)
 	}
 
-	go runStatsMonitor(components)
+	go runStatsMonitor(ctx, components)
 
 	waitForShutdown()
+	cancel()
 
 	log.Println("Shutting down...")
 	components.pipeline.Stop()
@@ -128,7 +133,7 @@ func main() {
 	components.strategyMgr.Stop()
 
 	if cfg.Firewall.CleanupOnExit {
-		cleanupFirewall(cfg)
+		components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
 	}
 
 	log.Println("Shutdown complete")
@@ -145,6 +150,11 @@ type Components struct {
 	sender      sender.Sender
 	capturer    capture.Capturer
 	pipeline    *packetflow.Pipeline
+	firewall    firewall.Manager
+	logFile     *os.File
+	queueNum    int
+	ports       []int
+	direction   string
 }
 
 // initializeComponents создает все необходимые компоненты
@@ -239,6 +249,19 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		return nil, fmt.Errorf("failed to start capturer: %v", err)
 	}
 
+	fw, err := firewall.NewManager(firewall.Config{
+		Backend:       cfg.Firewall.Backend,
+		QueueNum:      cfg.Capture.QueueNum,
+		Ports:         cfg.Firewall.Ports,
+		Direction:     cfg.Firewall.Direction,
+		ExcludeIPs:    cfg.Firewall.ExcludeIPs,
+		ExcludePorts:  cfg.Firewall.ExcludePorts,
+		CleanupOnExit: cfg.Firewall.CleanupOnExit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create firewall manager: %v", err)
+	}
+
 	handle := capturer.GetHandle()
 	log.Printf("DEBUG: Got handle from capturer after Start: %v", handle)
 
@@ -251,6 +274,9 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 				SendTimeout: cfg.Sender.SendTimeout,
 				BatchSize:   cfg.Sender.BatchSize,
 			})
+			//if err := s.Close(); err != nil {
+			//	log.Printf("sender close error: %v", err)
+			//}
 			if err != nil {
 				capturer.Stop()
 				return nil, fmt.Errorf("failed to create sender with shared handle: %v", err)
@@ -286,6 +312,11 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		sender:      s,
 		capturer:    capturer,
 		pipeline:    pipeline,
+		firewall:    fw,
+		logFile:     nil,
+		queueNum:    cfg.Capture.QueueNum,
+		ports:       cfg.Firewall.Ports,
+		direction:   cfg.Firewall.Direction,
 	}, nil
 }
 
@@ -393,6 +424,9 @@ func defaultHostnameRules() []strategy.HostnameRule {
 
 // cleanup освобождает ресурсы
 func (c *Components) cleanup() {
+	if c.logFile != nil {
+		c.logFile.Close()
+	}
 	if c.sender != nil {
 		c.sender.Close()
 	}
@@ -407,38 +441,9 @@ func (c *Components) cleanup() {
 	if c.domainCache != nil {
 		c.domainCache.Stop()
 	}
-}
 
-// setupFirewall настраивает правила файрвола
-func setupFirewall(cfg *config.Config) error {
-	fw, err := firewall.NewManager(firewall.Config{
-		Backend:       cfg.Firewall.Backend,
-		QueueNum:      cfg.Capture.QueueNum,
-		Ports:         cfg.Firewall.Ports,
-		Direction:     cfg.Firewall.Direction,
-		ExcludeIPs:    cfg.Firewall.ExcludeIPs,
-		ExcludePorts:  cfg.Firewall.ExcludePorts,
-		CleanupOnExit: cfg.Firewall.CleanupOnExit,
-	})
-	if err != nil {
-		return err
-	}
-	return fw.AddRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
-}
-
-// cleanupFirewall удаляет правила файрвола
-func cleanupFirewall(cfg *config.Config) {
-	fw, err := firewall.NewManager(firewall.Config{
-		Backend:  cfg.Firewall.Backend,
-		QueueNum: cfg.Capture.QueueNum,
-		Ports:    cfg.Firewall.Ports,
-	})
-	if err != nil {
-		log.Printf("Failed to create firewall manager for cleanup: %v", err)
-		return
-	}
-	if err := fw.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction); err != nil {
-		log.Printf("Failed to cleanup firewall rules: %v", err)
+	if c.firewall != nil {
+		_ = c.firewall.RemoveRule(c.queueNum, c.ports, c.direction)
 	}
 }
 
@@ -464,123 +469,87 @@ func setupLogging(cfg config.LoggingConfig) {
 //   - Обновляем hostname rule для тестируемого домена (если он там есть)
 //   - Продолжаем мониторинг — пересматриваем каждые 5 минут
 func runDiscovery(strategyMgr *strategy.Manager, cfg *config.Config) {
-	disc := strategy.NewDiscovery(strategyMgr, strategy.DiscoveryConfig{
-		TestDomains:    cfg.Strategy.AutoDiscovery.TestDomains,
-		TestPorts:      cfg.Strategy.AutoDiscovery.TestPorts,
-		TestTimeout:    5 * time.Second,
-		TestInterval:   time.Duration(cfg.Strategy.AutoDiscovery.TestInterval) * time.Second,
-		SamplesPerTest: 5,
-		MinSuccessRate: cfg.Strategy.AutoDiscovery.MinSuccessRate,
-	})
-
-	log.Printf("[Discovery] Starting auto-discovery for domains: %v", cfg.Strategy.AutoDiscovery.TestDomains)
-	if err := disc.Start(); err != nil {
-		log.Printf("[Discovery] Start error: %v", err)
-		return
+	var disc *strategy.Discovery
+	restart := func() {
+		if disc != nil {
+			disc.Stop()
+			time.Sleep(100 * time.Millisecond) // даём Stop() завершить wg
+		}
+		disc = strategy.NewDiscovery(strategyMgr, strategy.DiscoveryConfig{
+			TestDomains:    cfg.Strategy.AutoDiscovery.TestDomains,
+			TestPorts:      cfg.Strategy.AutoDiscovery.TestPorts,
+			TestTimeout:    5 * time.Second,
+			TestInterval:   time.Duration(cfg.Strategy.AutoDiscovery.TestInterval) * time.Second,
+			SamplesPerTest: 5,
+			MinSuccessRate: cfg.Strategy.AutoDiscovery.MinSuccessRate,
+		})
+		if err := disc.Start(); err != nil {
+			log.Printf("[Discovery] Start error: %v", err)
+		}
 	}
 
-	// Ждём завершения первого прогона (~SamplesPerTest × TestInterval × стратегий)
-	// Тикер проверяет прогресс каждые 15 секунд.
-	checkTicker := time.NewTicker(15 * time.Second)
-	defer checkTicker.Stop()
+	restart()
 
-	// Перезапуск discovery каждые 5 минут — реакция на смену условий сети.
 	restartTicker := time.NewTicker(5 * time.Minute)
 	defer restartTicker.Stop()
 
-	applied := false // нашли хорошую стратегию хотя бы раз
-
-	for {
-		select {
-		case <-checkTicker.C:
-			results := disc.GetResults()
-			if len(results) == 0 {
-				continue
-			}
-
-			progress := disc.GetProgress()
-			pct := float64(0)
-			if progress.TotalTests > 0 {
-				pct = float64(progress.CompletedTests) / float64(progress.TotalTests) * 100
-			}
-			log.Printf("[Discovery] Progress: %.0f%% (%d/%d tests), best so far: id=%d rate=%.0f%%",
-				pct,
-				progress.CompletedTests,
-				progress.TotalTests,
-				results[0].StrategyID,
-				results[0].SuccessRate*100,
-			)
-
-			best := disc.GetBestStrategy()
-			if best != nil && best.SuccessRate >= cfg.Strategy.AutoDiscovery.MinSuccessRate {
-				if err := disc.ApplyBestStrategy(); err == nil {
-					if !applied {
-						log.Printf("[Discovery] Applied best strategy: id=%d, rate=%.0f%%, avg=%v",
-							best.StrategyID, best.SuccessRate*100, best.AvgResponse)
-						applied = true
-					}
-				}
-			}
-
-		case <-restartTicker.C:
-			// Перезапускаем — условия сети могли измениться
-			disc.Stop()
-			applied = false
-			log.Printf("[Discovery] Restarting discovery cycle...")
-			disc = strategy.NewDiscovery(strategyMgr, strategy.DiscoveryConfig{
-				TestDomains:    cfg.Strategy.AutoDiscovery.TestDomains,
-				TestPorts:      cfg.Strategy.AutoDiscovery.TestPorts,
-				TestTimeout:    5 * time.Second,
-				TestInterval:   time.Duration(cfg.Strategy.AutoDiscovery.TestInterval) * time.Second,
-				SamplesPerTest: 5,
-				MinSuccessRate: cfg.Strategy.AutoDiscovery.MinSuccessRate,
-			})
-			if err := disc.Start(); err != nil {
-				log.Printf("[Discovery] Restart error: %v", err)
-			}
-		}
+	for range restartTicker.C {
+		log.Printf("[Discovery] Restarting cycle...")
+		restart()
 	}
 }
 
 // runStatsMonitor выводит статистику работы
-func runStatsMonitor(components *Components) {
+func runStatsMonitor(ctx context.Context, components *Components) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		pipelineStats := components.pipeline.GetStats()
-		connStats := components.conntrack.GetStats()
-		ipCacheStats := components.ipCache.GetStats()
-		domainCacheStats := components.domainCache.GetStats()
+	for {
+		select {
+		case <-ticker.C:
+			pipelineStats := components.pipeline.GetStats()
+			connStats := components.conntrack.GetStats()
+			ipCacheStats := components.ipCache.GetStats()
+			domainCacheStats := components.domainCache.GetStats()
 
-		modRate := float64(0)
-		if pipelineStats.PacketsProcessed > 0 {
-			modRate = float64(pipelineStats.PacketsModified) / float64(pipelineStats.PacketsProcessed) * 100
+			modRate := float64(0)
+			if pipelineStats.PacketsProcessed > 0 {
+				modRate = float64(pipelineStats.PacketsModified) / float64(pipelineStats.PacketsProcessed) * 100
+			}
+
+			log.Printf("[Stats] pkts: recv=%d proc=%d mod=%d(%.0f%%) sent=%d drop=%d | flows: active=%d total=%d | cache: ip=%d dom=%d hits=%d miss=%d",
+				pipelineStats.PacketsReceived,
+				pipelineStats.PacketsProcessed,
+				pipelineStats.PacketsModified,
+				modRate,
+				pipelineStats.PacketsSent,
+				pipelineStats.PacketsDropped,
+				connStats.ActiveFlows,
+				connStats.CreatedFlows,
+				ipCacheStats.Size,
+				domainCacheStats.Size,
+				pipelineStats.CacheHits,
+				pipelineStats.CacheMisses,
+			)
+		case <-ctx.Done():
+			return
 		}
-
-		log.Printf("[Stats] pkts: recv=%d proc=%d mod=%d(%.0f%%) sent=%d drop=%d | flows: active=%d total=%d | cache: ip=%d dom=%d hits=%d miss=%d",
-			pipelineStats.PacketsReceived,
-			pipelineStats.PacketsProcessed,
-			pipelineStats.PacketsModified,
-			modRate,
-			pipelineStats.PacketsSent,
-			pipelineStats.PacketsDropped,
-			connStats.ActiveFlows,
-			connStats.CreatedFlows,
-			ipCacheStats.Size,
-			domainCacheStats.Size,
-			pipelineStats.CacheHits,
-			pipelineStats.CacheMisses,
-		)
 	}
 }
 
 // waitForShutdown ожидает сигнала завершения
 func waitForShutdown() {
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigChan
-	log.Printf("Received signal: %v", sig)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for sig := range sigChan {
+		if sig == syscall.SIGHUP {
+			log.Println("SIGHUP received — config reload not yet implemented")
+			// TODO: full reload
+			continue
+		}
+		log.Printf("Received signal: %v", sig)
+		return
+	}
 }
 
 // parsePorts парсит строку с портами
@@ -590,8 +559,7 @@ func parsePorts(portsStr string) []int {
 	}
 	var ports []int
 	for _, p := range strings.Split(portsStr, ",") {
-		var port int
-		if _, err := fmt.Sscanf(strings.TrimSpace(p), "%d", &port); err == nil && port > 0 && port < 65536 {
+		if port, err := strconv.Atoi(strings.TrimSpace(p)); err == nil && port > 0 && port < 65536 {
 			ports = append(ports, port)
 		}
 	}
