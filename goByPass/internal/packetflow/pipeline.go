@@ -532,8 +532,18 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		// Каждый ретрансмит = новая попытка запутать DPI через seqovl/fake.
 		//
 		// IsHandshakeModified остаётся как tracking-флаг, но НЕ блокирует модификацию.
-		applyMods := (isClientHello && strats.ApplyToTLS) ||
-			(isData && !isClientHello && flow.DataPacketsModified < strats.ModifyFirstDataPackets)
+		//
+		// FIX #1 — SYN + SynData:
+		// Было: isSYN никогда не учитывался → стратегии с SynData (ALT5) никогда
+		// не применялись к SYN-пакетам → syndata+multidisorder не работал совсем.
+		//
+		// FIX #2 — ModifyFirstDataPackets == 0:
+		// Было: flow.DataPacketsModified < 0 → всегда false → data-пакеты не
+		// модифицировались у стратегий без лимита (например yt-syndata-2026).
+		// ModifyFirstDataPackets == 0 означает "без ограничений" (весь поток).
+		applyMods := (isSYN && strats.SynData) ||
+			(isClientHello && strats.ApplyToTLS) ||
+			(isData && !isClientHello && (strats.ModifyFirstDataPackets == 0 || flow.DataPacketsModified < strats.ModifyFirstDataPackets))
 		if applyMods {
 			flow.Mu.Lock()
 			if isClientHello {

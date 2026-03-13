@@ -172,11 +172,6 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	// Менеджер стратегий: сначала встроенные, затем из файла (если задан).
 	// LoadFromFile добавляет/обновляет стратегии по ID — встроенные не удаляются.
 	strategyMgr := strategy.NewManager()
-
-	if err := strategyMgr.LoadPatternFiles("patterns"); err != nil { // или куда у тебя .bin лежат
-		log.Printf("Warning: %v", err)
-	}
-
 	if cfg.Strategy.StrategyFile != "" {
 		if err := strategyMgr.LoadFromFile(cfg.Strategy.StrategyFile); err != nil {
 			log.Printf("Warning: failed to load strategies from %s: %v",
@@ -313,29 +308,32 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 func defaultHostnameRules() []strategy.HostnameRule {
 	return []strategy.HostnameRule{
 		// ── YouTube и Google Video ────────────────────────────────────────────
-		{Pattern: "*.youtube.com", StrategyName: "yt-discord-2026-zapret",
-			Comment: "YouTube основной домен"},
-		{Pattern: "youtube.com", StrategyName: "yt-discord-2026-zapret",
+		// FIX: были "yt-discord-2026-zapret" (seqovl+fake) — ISP (ТСПУ) тихо дропал эти
+		// пакеты (подтверждено pcap: 0 ответов сервера, 0 RST для всех YouTube потоков).
+		// Теперь: "yt-syndata-2026" = ALT5 (syndata+multidisorder), которая проходит через ТСПУ.
+		{Pattern: "*.youtube.com", StrategyName: "yt-syndata-2026",
+			Comment: "YouTube основной домен (ALT5: syndata+multidisorder)"},
+		{Pattern: "youtube.com", StrategyName: "yt-syndata-2026",
 			Comment: "YouTube bare domain"},
-		{Pattern: "*.ytimg.com", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.ytimg.com", StrategyName: "yt-syndata-2026",
 			Comment: "YouTube thumbnails/images"},
-		{Pattern: "*.ggpht.com", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.ggpht.com", StrategyName: "yt-syndata-2026",
 			Comment: "YouTube аватары/фото"},
-		{Pattern: "*.googlevideo.com", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.googlevideo.com", StrategyName: "yt-syndata-2026",
 			Comment: "YouTube видеопоток"},
-		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-syndata-2026",
 			Comment: "YouTube embed"},
 
 		// ── Google (остальные) ────────────────────────────────────────────────
-		{Pattern: "*.googleapis.com", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.googleapis.com", StrategyName: "yt-syndata-2026",
 			Comment: "Google APIs (используются YouTube)"},
-		{Pattern: "*.gstatic.com", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.gstatic.com", StrategyName: "yt-syndata-2026",
 			Comment: "Google static (шрифты, ресурсы)"},
-		{Pattern: "*.doubleclick.net", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.doubleclick.net", StrategyName: "yt-syndata-2026",
 			Comment: "Google Ads (наш захват показал 9 подключений)"},
-		{Pattern: "*.google.com", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.google.com", StrategyName: "yt-syndata-2026",
 			Comment: "Google основной"},
-		{Pattern: "*.googleusercontent.com", StrategyName: "yt-discord-2026-zapret",
+		{Pattern: "*.googleusercontent.com", StrategyName: "yt-syndata-2026",
 			Comment: "Google User Content"},
 
 		// ── Discord ───────────────────────────────────────────────────────────

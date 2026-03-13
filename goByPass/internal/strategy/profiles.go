@@ -103,6 +103,12 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	// ── 20. YouTube 2026 — multisplit seqovl=681 + fake TS + disorder OOB ─────
+	//
+	// FIX #priority: было Priority=1, конфликтовало с id=25 (тоже Priority=1).
+	// Итерация по Go map нестабильна → разные воркеры получали разные стратегии
+	// для одного IP → ipcache осциллировал 20↔25 каждые ~100ms (видно в логах).
+	// Теперь: id=20 Priority=5, id=25 Priority=4.
+	// Используется как fallback для Google IP без явного hostname rule.
 	mustAdd(&Strategy{
 		ID:          20,
 		Name:        "youtube-2026",
@@ -131,7 +137,7 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICRepeats: 6,
 
 		ApplyToPacketTypes:     []string{"handshake", "ack"},
-		Priority:               1,
+		Priority:               5, // FIX: было 1
 		ModifyFirstDataPackets: 4,
 	})
 
@@ -156,7 +162,10 @@ func (m *Manager) loadDefaultStrategies() {
 		Priority:       2,
 	})
 
-	// ── 25. yt-discord-2026-zapret — основной рабочий пресет 2026 ─────────────
+	// ── 25. yt-discord-2026-zapret — основной zapret-пресет 2026 ──────────────
+	//
+	// FIX #priority: было Priority=1, конфликтовало с id=20.
+	// Используется как fallback для Discord и других Google IP-адресов без hostname rule.
 	mustAdd(&Strategy{
 		ID:          25,
 		Name:        "yt-discord-2026-zapret",
@@ -181,12 +190,51 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 
+		Priority:               4, // FIX: было 1
+		ModifyFirstDataPackets: 4,
+	})
+
+	// ── 26. yt-syndata-2026 — ALT5: syndata+multidisorder для YouTube TCP ──────
+	//
+	// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: анализ pcap (newcapture.pcapng) показал что ISP
+	// (ТСПУ) тихо дропает seqovl+fake (0 ответов сервера, 0 RST для YouTube),
+	// но пропускает syndata+multidisorder (ALT5 bat file).
+	//
+	// ALT5 bat file (TCP 80/443):
+	//   --dpi-desync=syndata,multidisorder --dpi-desync-ttl=4
+	// ALT5 bat file (UDP 443 / QUIC):
+	//   --dpi-desync=fake --dpi-desync-fake-quic=quic_initial_www_google_com.bin
+	//
+	// Механика:
+	//   TCP SYN:       SynData  → inject fake SYN с payload (DPI теряет начало потока)
+	//   ClientHello+:  MultiDisorder → пакеты-decoy с DisorderTTL=4 (умирают до сервера)
+	//   UDP/QUIC:      fake QUIC Initial x6 (TTL=6, как в ALT5)
+	//
+	// DisorderTTL=4: достаточно мало чтобы умереть до сервера (~6-10 hop от клиента),
+	// но доходит до ТСПУ (обычно 1-3 hop).
+	//
+	// ModifyFirstDataPackets=0: 0 = без ограничений. multidisorder применяется
+	// ко всему потоку как в оригинальном ALT5 (без --dpi-desync-cutoff).
+	mustAdd(&Strategy{
+		ID:          26,
+		Name:        "yt-syndata-2026",
+		Description: "YouTube 2026 ALT5: syndata+multidisorder TCP + QUIC fake (РЕКОМЕНДУЕТСЯ для ТСПУ)",
+		ApplyToHTTP: false,
+		ApplyToTLS:  true,
+		ApplyToQUIC: true,
+
+		// TCP: ALT5 syndata+multidisorder
+		SynData:       true,
+		MultiDisorder: true,
+		DisorderTTL:   4,
+
+		// QUIC: ALT5 fake Initial
+		FakeQUICFile:    "quic_initial_www_google_com.bin",
+		FakeQUICRepeats: 6,
+		FakeTTL:         6,
+
 		Priority:               1,
-		ModifyFirstDataPackets: 4, // применять bypass к первым 4 data-пакетам после handshake
-		// Аналог --dpi-desync-cutoff=n4 в zapret:
-		// DPI (особенно ТСПУ) инспектирует не только ClientHello, но и
-		// первые N TLS-записей после handshake. Без этого DPI определяет
-		// поток по application data и применяет throttling.
+		ModifyFirstDataPackets: 0, // без ограничений (весь поток)
 	})
 
 	// ── 60. syndata+multidisorder — агрессивный режим ──────────────────────────

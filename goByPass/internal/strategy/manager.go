@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -419,16 +418,16 @@ var builtinHostnameMappings = []struct {
 	hostnameContains string // подстрока в hostname (lowercase)
 	stratNameHint    string // подстрока в имени стратегии
 }{
-	{"youtube.com", "google"},
-	{"googlevideo.com", "google"},
-	{"googleapis.com", "google"},
-	{"gstatic.com", "google"},
-	{"ggpht.com", "google"},
-	{"ytimg.com", "google"},
-	{"youtu.be", "google"},
-	{"googleusercontent.com", "google"},
-	{"google.com", "google"},
-	{"gmail.com", "google"},
+	{"youtube.com", "youtube"},
+	{"googlevideo.com", "youtube"},
+	{"googleapis.com", "youtube"},
+	{"gstatic.com", "youtube"},
+	{"ggpht.com", "youtube"},
+	{"ytimg.com", "youtube"},
+	{"youtu.be", "youtube"},
+	{"googleusercontent.com", "youtube"},
+	{"google.com", "youtube"},
+	{"gmail.com", "youtube"},
 	{"discord.com", "discord"},
 	{"discord.gg", "discord"},
 	{"discordapp.com", "discord"},
@@ -465,6 +464,11 @@ func isPassthrough(s *Strategy) bool {
 
 // selectByNameHint ищет стратегию с наименьшим Priority среди тех, чьё имя
 // содержит nameHint и чей протокол соответствует protocol/port.
+//
+// FIX: при одинаковом Priority выбираем стратегию с меньшим ID.
+// Итерация по Go map нестабильна — без тай-брейкера разные воркеры получают
+// разные стратегии для одного IP → ipcache осциллирует (видно в логах: 20↔25).
+//
 // Вызывается под m.mu.RLock.
 func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strategy {
 	var best *Strategy
@@ -479,7 +483,8 @@ func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strateg
 		if !protocolMatches(s, protocol, port) {
 			continue
 		}
-		if s.Priority < bestPri {
+		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
+		if s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
 			best = s
 			bestPri = s.Priority
 		}
@@ -490,6 +495,8 @@ func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strateg
 // findByName ищет стратегию по подстроке имени без фильтрации по протоколу.
 // Используется hostname_rules.go при компиляции правил (SetHostnameRules),
 // когда protocol/port ещё неизвестны.
+//
+// FIX: тай-брейкер по ID.
 // Вызывается под m.mu.RLock.
 func (m *Manager) findByName(nameHint string) *Strategy {
 	var best *Strategy
@@ -501,7 +508,8 @@ func (m *Manager) findByName(nameHint string) *Strategy {
 		if !strings.Contains(s.Name, nameHint) {
 			continue
 		}
-		if s.Priority < bestPri {
+		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
+		if s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
 			best = s
 			bestPri = s.Priority
 		}
@@ -509,18 +517,14 @@ func (m *Manager) findByName(nameHint string) *Strategy {
 	return best
 }
 
-// bestForProtocol выбирает лучшую не-passthrough стратегию для протокола.
-// При равном Priority побеждает стратегия с БОЛЬШИМ ID (новее).
-// Это устраняет рандомный выбор между стратегиями 20 и 25 (обе Priority=1).
+// bestForProtocol выбирает лучшую (наименьший Priority) не-passthrough стратегию
+// для данного протокола.
+//
+// FIX: тай-брейкер по ID.
+// Вызывается под m.mu.RLock.
 func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
-	type candidate struct {
-		s   *Strategy
-		pri int
-		id  int
-	}
-
-	var cands []candidate
-
+	var best *Strategy
+	bestPri := int(^uint(0) >> 1)
 	for _, s := range m.strategies {
 		if isPassthrough(s) {
 			continue
@@ -528,27 +532,12 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 		if !protocolMatches(s, protocol, port) {
 			continue
 		}
-		cands = append(cands, candidate{s: s, pri: s.Priority, id: s.ID})
-	}
-
-	if len(cands) == 0 {
-		return nil
-	}
-
-	// Сортировка:
-	// 1. Priority по возрастанию (меньше = лучше)
-	// 2. При равном Priority — ID по убыванию (25 > 20 → выбираем 25)
-	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].pri != cands[j].pri {
-			return cands[i].pri < cands[j].pri
+		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
+		if s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
+			best = s
+			bestPri = s.Priority
 		}
-		return cands[i].id > cands[j].id
-	})
-
-	best := cands[0].s
-	log.Printf("[SELECT] bestForProtocol → strategy %d (%s) priority=%d (ID tie-breaker)",
-		best.ID, best.Name, best.Priority)
-
+	}
 	return best
 }
 
@@ -616,7 +605,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	// ── 2. Google IP ──────────────────────────────────────────────────────────
 	if m.isGoogleIP(ip) {
 		// FIX #2: для UDP hint был "quic" — ни одна стратегия не содержит "quic" в имени.
-		// "youtube" совпадает с "youtube-2026" и "yt-discord-2026-zapret".
+		// "youtube" совпадает с "yt-syndata-2026" и "youtube-2026".
 		hint := "youtube"
 		if s := m.selectByNameHint(hint, protocol, port); s != nil {
 			log.Printf("[SELECT] Google IP %s → strategy %d (%s)", ip, s.ID, s.Name)
@@ -701,9 +690,16 @@ func (m *Manager) GetActive() *Strategy {
 }
 
 // UpdateStrategy обновляет статистику стратегии.
+//
 // FIX #3: пишем в statsMap[id] а не в Strategy напрямую.
 // Strategy-указатель после AddStrategy иммутабелен — SelectStrategy может
 // возвращать его вызывающим горутинам без риска data race.
+//
+// FIX lock order: ранее m.mu.Lock() захватывался ВНУТРИ st.mu.Lock() →
+// потенциальный дедлок если другая горутина держит m.mu и ждёт st.mu.
+// Теперь: сначала обновляем st под st.mu, затем глобальный счётчик под m.mu.
+// Эти два обновления некритичны к атомарности — небольшая рассинхронизация счётчиков
+// допустима для статистики.
 func (m *Manager) UpdateStrategy(id int, success bool, responseTime time.Duration) {
 	m.mu.RLock()
 	_, exists := m.strategies[id]
@@ -719,13 +715,11 @@ func (m *Manager) UpdateStrategy(id int, success bool, responseTime time.Duratio
 		return
 	}
 
+	// Обновляем статистику стратегии под st.mu
 	st.mu.Lock()
 	st.lastUsed = time.Now()
 	if success {
 		st.successCount++
-		m.mu.Lock()
-		m.stats.SuccessfulAttempts++
-		m.mu.Unlock()
 		if st.avgResponseMs == 0 {
 			st.avgResponseMs = responseTime.Milliseconds()
 		} else {
@@ -734,11 +728,18 @@ func (m *Manager) UpdateStrategy(id int, success bool, responseTime time.Duratio
 		}
 	} else {
 		st.failCount++
-		m.mu.Lock()
-		m.stats.FailedAttempts++
-		m.mu.Unlock()
 	}
 	st.mu.Unlock()
+
+	// FIX: обновляем глобальные счётчики ПОСЛЕ release st.mu — устраняем lock order violation.
+	// Было: m.mu.Lock() внутри st.mu.Lock() → потенциальный дедлок.
+	m.mu.Lock()
+	if success {
+		m.stats.SuccessfulAttempts++
+	} else {
+		m.stats.FailedAttempts++
+	}
+	m.mu.Unlock()
 }
 
 // GetStrategyStats возвращает снимок статистики для стратегии.
@@ -868,30 +869,6 @@ func (m *Manager) LoadFromFile(filename string) error {
 	}
 	m.stats.TotalStrategies = len(m.strategies)
 	log.Printf("[LoadFromFile] Merged %d strategies from %s (total: %d)", loaded, filename, len(m.strategies))
-	return nil
-}
-
-// После всех AddStrategy / LoadFromFile
-func (m *Manager) LoadPatternFiles(baseDir string) error {
-	for _, s := range m.strategies {
-		if s.SeqOvlPatternFile != "" {
-			data, err := os.ReadFile(filepath.Join(baseDir, s.SeqOvlPatternFile))
-			if err == nil {
-				s.SeqOvlPatternData = data
-				log.Printf("[PATTERNS] Loaded seqovl %s (%d bytes) for strategy %d", s.SeqOvlPatternFile, len(data), s.ID)
-			} else {
-				log.Printf("[PATTERNS] WARNING: missing %s for strategy %d", s.SeqOvlPatternFile, s.ID)
-			}
-		}
-		// то же самое для FakeTLSFiles, FakeQUICFile, FakeHTTPFile...
-		for _, f := range s.FakeTLSFiles {
-			data, _ := os.ReadFile(filepath.Join(baseDir, f))
-			if len(data) > 0 {
-				s.FakeTLSFilesData = append(s.FakeTLSFilesData, data)
-			}
-		}
-		// FakeQUICFileData, FakeHTTPFileData и т.д.
-	}
 	return nil
 }
 
