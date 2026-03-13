@@ -73,9 +73,9 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	payloadOffset := ipHdrLen + tcpHdrLen
 	payloadLen := len(packet) - payloadOffset
 
-	if payloadLen <= 0 {
-		return &ModifyResult{SendOriginal: true}, nil
-	}
+	flags := packet[ipHdrLen+13]
+	isSYN := (flags & 0x02) != 0
+	isACK := (flags & 0x10) != 0
 
 	strat := pm.strategyManager.SelectStrategy(
 		flow.GetDstIP(), flow.Hostname, int(flow.GetDstPort()), "tcp",
@@ -84,32 +84,20 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		return &ModifyResult{SendOriginal: true}, nil
 	}
 
-	// Cutoff: после N data-пакетов прекращаем модификацию
-	if strat.Cutoff > 0 {
-		flow.Mu.RLock()
-		modified := flow.DataPacketsModified
-		flow.Mu.RUnlock()
-		if modified >= strat.Cutoff {
-			return &ModifyResult{SendOriginal: true}, nil
-		}
-	}
-
-	ipHdrLenInt := ipHdrLen
-
 	// IPIDZero (для Google/Cloudflare)
 	if strat.IPIDZero {
 		packet[4] = 0
 		packet[5] = 0
 	}
 
-	flags := packet[ipHdrLen+13]
-	isSYN := (flags & 0x02) != 0
-	isACK := (flags & 0x10) != 0
 	isClientHello := isClientHelloPacket(packet, payloadOffset, payloadLen)
 
 	var packets [][]byte
 
 	// ── 1. SynData ────────────────────────────────────────────────────────────
+	// ВАЖНО: этот блок ДОЛЖЕН быть до проверки payloadLen <= 0.
+	// SYN-пакеты имеют payloadLen=0 — проверка ниже вернула бы {SendOriginal:true}
+	// до достижения этого кода, и SynData никогда бы не сработал (#BugSynData).
 	if strat.SynData && isSYN && !isACK {
 		// Определяем fake payload для SYN
 		var synFakeData []byte
@@ -119,7 +107,13 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 		if synFakeData == nil && strat.FakeHTTPFileData != nil {
 			synFakeData = strat.FakeHTTPFileData
 		}
-		synPkts, err := pm.ApplySynData(packet, synFakeData)
+		// Fake SYN должен умереть до сервера (DPI 2-3 hop, сервер 6+ hop).
+		// Используем DisorderTTL (ALT5: 4), иначе FakeTTL, иначе default=4.
+		synTTL := strat.DisorderTTL
+		if synTTL <= 0 {
+			synTTL = strat.FakeTTL
+		}
+		synPkts, err := pm.ApplySynData(packet, synFakeData, synTTL)
 		if err == nil && len(synPkts) > 0 {
 			// synPkts уже включает оригинальный SYN как последний элемент
 			pm.stats.DisorderCount.Add(uint64(len(synPkts)))
@@ -127,9 +121,14 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 			return &ModifyResult{
 				StrategyID:      strat.ID,
 				ModifiedPackets: synPkts,
-				SendOriginal:    false, // SYN уже включён в synPkts
+				SendOriginal:    false,
 			}, nil
 		}
+		return &ModifyResult{SendOriginal: true}, nil
+	}
+
+	// Все остальные техники требуют payload
+	if payloadLen <= 0 {
 		return &ModifyResult{SendOriginal: true}, nil
 	}
 
@@ -148,7 +147,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	// ── 2. Fake ───────────────────────────────────────────────────────────────
 	if hasFooling && !strat.FakedSplit && (isClientHello || strat.AnyProtocol) {
 		for rep := 0; rep < fakeRepeats; rep++ {
-			fakePayload := pm.selectFakeTLSPayload(strat, rep, isClientHello, packet, ipHdrLenInt)
+			fakePayload := pm.selectFakeTLSPayload(strat, rep, isClientHello, packet, ipHdrLen)
 			fakePkts, err := pm.ApplyFake(
 				packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload,
 			)

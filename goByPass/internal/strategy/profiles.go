@@ -62,6 +62,10 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	// ── 4. Hard — split + disorder OOB + fake TS ──────────────────────────────
+	//
+	// FIX: DisorderTTL=1 и FakeTTL=1 → decoy/fake умирают на первом hop'е,
+	// до DPI ТСПУ (2-3 hop) не доходят совсем → bypass не работает.
+	// TTL=4 доходит до DPI и умирает до сервера (6+ hop по pcap).
 	mustAdd(&Strategy{
 		ID:                     4,
 		Name:                   "hard",
@@ -73,9 +77,9 @@ func (m *Manager) loadDefaultStrategies() {
 		SplitSNIOffset:         true,
 		DisorderMode:           DisorderOutOfBand,
 		DisorderPos:            []int{1},
-		DisorderTTL:            1,
+		DisorderTTL:            4, // FIX: было 1 → умирал на первом hop'е до DPI
 		Fooling:                FoolingTS,
-		FakeTTL:                1,
+		FakeTTL:                4, // FIX: было 1
 		FakeRepeats:            1,
 		Priority:               30,
 		ModifyFirstDataPackets: 4,
@@ -109,6 +113,11 @@ func (m *Manager) loadDefaultStrategies() {
 	// для одного IP → ipcache осциллировал 20↔25 каждые ~100ms (видно в логах).
 	// Теперь: id=20 Priority=5, id=25 Priority=4.
 	// Используется как fallback для Google IP без явного hostname rule.
+	//
+	// FIX DisorderTTL: было DisorderTTL=1 → OOB-decoy умирал на первом роутере
+	// (TTL=1 → ICMP Time Exceeded от первого hop'а, DPI не видит decoy совсем).
+	// DPI ТСПУ находится на 2-3 hop'е. TTL=4 гарантирует что decoy дойдёт до DPI,
+	// но умрёт до сервера (6 hop'ов от клиента по pcap capture817).
 	mustAdd(&Strategy{
 		ID:          20,
 		Name:        "youtube-2026",
@@ -124,7 +133,7 @@ func (m *Manager) loadDefaultStrategies() {
 
 		DisorderMode: DisorderOutOfBand,
 		DisorderPos:  []int{1},
-		DisorderTTL:  1,
+		DisorderTTL:  4, // FIX: было 1 → умирало на первом роутере, не доходило до DPI
 
 		Fooling:     FoolingTS,
 		FakeTTL:     6,
@@ -205,13 +214,13 @@ func (m *Manager) loadDefaultStrategies() {
 	// ALT5 bat file (UDP 443 / QUIC):
 	//   --dpi-desync=fake --dpi-desync-fake-quic=quic_initial_www_google_com.bin
 	//
-	// Механика:
-	//   TCP SYN:       SynData  → inject fake SYN с payload (DPI теряет начало потока)
-	//   ClientHello+:  MultiDisorder → пакеты-decoy с DisorderTTL=4 (умирают до сервера)
-	//   UDP/QUIC:      fake QUIC Initial x6 (TTL=6, как в ALT5)
-	//
-	// DisorderTTL=4: достаточно мало чтобы умереть до сервера (~6-10 hop от клиента),
-	// но доходит до ТСПУ (обычно 1-3 hop).
+	// FIX Priority=99 (было 1):
+	// Priority=1 побеждал в fallback-цикле bestForProtocol → стратегия 26
+	// применялась ко ВСЕМ неизвестным хостам (87.250.250.119 Yandex,
+	// 46.229.243.178, 47.246.2.228 и др.) → multidisorder ломал их TLS.
+	// Стратегия 26 должна применяться ТОЛЬКО через HostnameRules (*.youtube.com
+	// и т.д.), а не через fallback. Priority=99 гарантирует что fallback
+	// выбирает "medium" (Priority=20), а не multidisorder.
 	//
 	// ModifyFirstDataPackets=0: 0 = без ограничений. multidisorder применяется
 	// ко всему потоку как в оригинальном ALT5 (без --dpi-desync-cutoff).
@@ -233,8 +242,8 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICRepeats: 6,
 		FakeTTL:         6,
 
-		Priority:               1,
-		ModifyFirstDataPackets: 0, // без ограничений (весь поток)
+		Priority:               99, // FIX: было 1 → применялась ко всем хостам через fallback
+		ModifyFirstDataPackets: 0,  // без ограничений (весь поток)
 	})
 
 	// ── 60. syndata+multidisorder — агрессивный режим ──────────────────────────

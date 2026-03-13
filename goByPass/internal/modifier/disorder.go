@@ -78,26 +78,42 @@ func (pm *PacketModifier) ApplyDisorder(
 
 	default:
 		// TTLZero / MultiDisorder / default:
-		// Decoy = первый сегмент с TTL=disorder_ttl
-		// DPI видит начало ClientHello, думает что поток начался,
-		// пакет не доходит до сервера (TTL истекает).
-		firstSegEnd := payloadOffset + validPos[0]
-		decoy := make([]byte, firstSegEnd)
-		copy(decoy, packet[:payloadOffset])
-		binary.BigEndian.PutUint16(decoy[2:4], uint16(firstSegEnd))
-		binary.BigEndian.PutUint32(decoy[ipHdrLen+4:], originalSeq)
-		copy(decoy[payloadOffset:], packet[payloadOffset:firstSegEnd])
-		// DF: сохраняем из оригинала (#6) — decoy скопирован из packet[:payloadOffset],
-		// packet[6] уже содержит оригинальные Flags+FragOffset.
-		setIPTTL(decoy, ttl)
-		recalculateIPChecksum(decoy)
-		FixTCPChecksum(decoy)
-		results = append(results, decoy)
+		//
+		// ALT5 zapret --dpi-desync=syndata,multidisorder --dpi-desync-ttl=4:
+		//   Отправляем decoy-сегменты (каждый = кусок ClientHello с низким TTL),
+		//   умирают до сервера. DPI видит частичные записи и не может корректно
+		//   распознать TLS. После decoy-ов — ПОЛНЫЙ оригинальный пакет (нормальный TTL).
+		//
+		// ВАЖНО (FIX): ранее вместо полного пакета вызывался buildTCPSegments,
+		// который добавлял 3 overlap-байта — это РАСШИРЯЛО поток: server получал
+		// 518 байт вместо 517, TLS-запись начиналась с 0x16 0x16 0x03... (невалидно),
+		// handshake падал → ERR_CONNECTION_CLOSED.
+		// Теперь: decoy(ы) + полный оригинальный пакет. Сервер гарантированно
+		// получает корректный ClientHello.
+		for _, pos := range validPos {
+			segEnd := payloadOffset + pos
+			if segEnd > len(packet) {
+				segEnd = len(packet)
+			}
+			decoy := make([]byte, segEnd)
+			copy(decoy, packet[:payloadOffset])
+			binary.BigEndian.PutUint16(decoy[2:4], uint16(segEnd))
+			binary.BigEndian.PutUint32(decoy[ipHdrLen+4:], originalSeq)
+			copy(decoy[payloadOffset:], packet[payloadOffset:segEnd])
+			// DF: сохраняем из оригинала — decoy скопирован из packet[:payloadOffset]
+			setIPTTL(decoy, ttl)
+			recalculateIPChecksum(decoy)
+			FixTCPChecksum(decoy)
+			results = append(results, decoy)
+		}
 	}
 
-	// Реальные сегменты в прямом порядке
-	realSegs := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
-	results = append(results, realSegs...)
+	// Реальный пакет — ПОЛНЫЙ оригинал с нормальным TTL.
+	// buildTCPSegments здесь не используется: split с overlap-байтами расширяет
+	// TCP-поток и ломает TLS-парсинг на сервере.
+	realPkt := make([]byte, len(packet))
+	copy(realPkt, packet)
+	results = append(results, realPkt)
 
 	return results, nil
 }

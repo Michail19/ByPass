@@ -484,7 +484,7 @@ func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strateg
 			continue
 		}
 		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
-		if s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
+		if best == nil || s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
 			best = s
 			bestPri = s.Priority
 		}
@@ -509,7 +509,7 @@ func (m *Manager) findByName(nameHint string) *Strategy {
 			continue
 		}
 		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
-		if s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
+		if best == nil || s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
 			best = s
 			bestPri = s.Priority
 		}
@@ -533,7 +533,7 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 			continue
 		}
 		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
-		if s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
+		if best == nil || s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
 			best = s
 			bestPri = s.Priority
 		}
@@ -552,12 +552,9 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 //  3. builtinHostnameMappings — hostname содержит известную подстроку
 //  4. Fallback: лучшая по Priority не-passthrough стратегия для данного протокола
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
-	log.Printf("[SELECT] IP=%s:%d hostname='%s' proto=%s", ip, port, hostname, protocol)
-
 	// ── 0. Hostname Rules (абсолютный приоритет) ─────────────────────────────
 	if hostname != "" {
 		if s := m.hostnameRuleStrategy(hostname); s != nil {
-			log.Printf("[SELECT] HostnameRule '%s' → strategy %d (%s)", hostname, s.ID, s.Name)
 			return s
 		}
 	} else if protocol == "udp" {
@@ -567,8 +564,6 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		// Без этого HostnameRules игнорировались для всего QUIC-трафика.
 		if inferredHostname := m.inferHostnameForIP(ip); inferredHostname != "" {
 			if s := m.hostnameRuleStrategy(inferredHostname); s != nil {
-				log.Printf("[SELECT] HostnameRule (QUIC inferred) '%s' → strategy %d (%s)",
-					inferredHostname, s.ID, s.Name)
 				return s
 			}
 		}
@@ -608,11 +603,9 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		// "youtube" совпадает с "yt-syndata-2026" и "youtube-2026".
 		hint := "youtube"
 		if s := m.selectByNameHint(hint, protocol, port); s != nil {
-			log.Printf("[SELECT] Google IP %s → strategy %d (%s)", ip, s.ID, s.Name)
 			return s
 		}
 		if s := m.bestForProtocol(protocol, port); s != nil {
-			log.Printf("[SELECT] Google IP %s (no youtube strat) → strategy %d (%s)", ip, s.ID, s.Name)
 			return s
 		}
 	}
@@ -623,7 +616,6 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		for _, rule := range builtinHostnameMappings {
 			if strings.Contains(lower, rule.hostnameContains) {
 				if s := m.selectByNameHint(rule.stratNameHint, protocol, port); s != nil {
-					log.Printf("[SELECT] Hostname '%s' → strategy %d (%s)", lower, s.ID, s.Name)
 					return s
 				}
 			}

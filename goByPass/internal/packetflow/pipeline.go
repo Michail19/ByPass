@@ -199,14 +199,16 @@ func (p *Pipeline) packetForwarder() {
 			// SYN и ClientHello дропать нельзя: браузер ждёт retransmit timeout (1-3 сек)
 			// прежде чем повторить — это видимый пользователю фриз при каждом открытии страницы.
 			if isHandshakePacket(packet.Data) {
-				// Блокирующий send с небольшим timeout для handshake пакетов.
-				// 2ms достаточно чтобы воркер разгрузился; превышение означает перегрузку системы.
+				// Блокирующий send с таймаутом 2ms для handshake пакетов (SYN, ClientHello).
+				// Дропать handshake нельзя: браузер ждёт TCP retransmit (1-3с) → видимый фриз.
+				// 2ms = достаточно чтобы воркер разгрузился при временной нагрузке.
+				// BUG FIX: было закомментировано → немедленный дроп при полной очереди →
+				// ClientHello дропались → TLS handshake не завершался → сайты не грузились.
 				select {
 				case ch <- packet:
-					//case <-time.After(2 * time.Millisecond):
-				default:
+				case <-time.After(2 * time.Millisecond):
 					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
-					log.Printf("WARNING: Worker %d queue full, dropping handshake packet after 2ms", workerIdx)
+					log.Printf("WARNING: Worker %d queue full, dropping handshake packet", workerIdx)
 				}
 			} else {
 				select {
@@ -450,8 +452,6 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		shouldBypass = cached.ShouldBypass
 		strategyID = cached.StrategyID
 		p.updateStats(func(stats *PipelineStats) { stats.CacheHits++ })
-		log.Printf("[STRATEGY] Cache hit for %s:%d: bypass=%v, cached strategy=%d (hostname in cache: %s)",
-			dstIP.String(), dstPort, shouldBypass, strategyID, cached.Hostname)
 	}
 
 	// Always trust the fresh strategy selection — hostname-based routing takes priority over cache
@@ -463,9 +463,6 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	)
 
 	if strat != nil {
-		log.Printf("[STRATEGY] Fresh select → strategy %d (%s) (hostname: %s)",
-			strat.ID, strat.Name, flow.Hostname)
-
 		strats = strat
 		strategyID = strat.ID
 		// Only bypass if strategy is not the passthrough (id=1)
@@ -473,7 +470,6 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 		// Update cache if strategy changed or wasn't set
 		if strat.ID != cachedStratID {
-			log.Printf("[STRATEGY] Updating to fresh strategy %d (was %d)", strat.ID, cachedStratID)
 			p.ipCache.PutByIP(dstIP, flow.Hostname, shouldBypass, strategyID)
 		}
 	} else if cachedStratID != 0 && cachedStratID != 1 && cached != nil {
@@ -486,14 +482,9 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	//    нет подходящей стратегии для этого IP/hostname/порта.
 	//    Просто реинжектируем пакет без модификаций (passthrough).
 	if strats == nil {
-		log.Printf("[STRATEGY] No strategy for %s:%d (hostname: '%s') — passthrough",
-			dstIP.String(), dstPort, flow.Hostname)
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
 	}
-
-	log.Printf("[STRATEGY] Final decision for %s:%d (hostname: %s): strategy %d (%s), bypass=%v",
-		dstIP.String(), dstPort, flow.Hostname, strategyID, strats.Name, shouldBypass)
 
 	if shouldBypass {
 		// Определить тип пакета (уже есть)
@@ -507,7 +498,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 		flags := pkt.Data[tcpOffset+13]
 		isSYN := (flags & 0x02) != 0
-		isACK := (flags & 0x10) != 0
+		//isACK := (flags & 0x10) != 0
 		tcpHeaderLen := int(pkt.Data[tcpOffset+12]>>4) * 4
 		payloadOffset := tcpOffset + tcpHeaderLen
 		isData := len(pkt.Data) > payloadOffset
@@ -558,9 +549,6 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			p.sendPacket(pkt.Data, pkt.Addr)
 			return
 		}
-
-		log.Printf("[STRATEGY] Applying modifications with strategy %d (%s) for %s (SYN=%v ACK=%v ClientHello=%v Data=%v)",
-			strategyID, strats.Name, dstIP.String(), isSYN, isACK, isClientHello, isData)
 
 		// Только здесь применяем модификации
 		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)

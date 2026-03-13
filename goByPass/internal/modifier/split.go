@@ -187,7 +187,22 @@ func (pm *PacketModifier) ApplyFakedSplit(
 //
 // Замечание (#5): SYN+data отклоняется некоторыми middlebox'ами (Cloudflare, корп. firewall).
 // Включать только для провайдеров где это явно работает.
-func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte) ([][]byte, error) {
+// ApplySynData реализует технику syndata (zapret ALT5):
+// отправляет fake SYN с payload ДО реального SYN.
+//
+// Цель: DPI запоминает ISN = fakeSynSeq = realISN - len(fakeData).
+// Когда приходит реальный ClientHello (с realISN+1), DPI не может правильно
+// определить смещение внутри TLS-потока → не может разобрать ClientHello → bypass.
+//
+// ВАЖНО: fake SYN должен иметь TTL = disorderTTL (обычно 4):
+//   - Fake SYN с TTL=128 ДОХОДИТ до сервера (6 hop'ов)
+//   - Сервер отвечает SYN-ACK на fake ISN
+//   - Windows видит неизвестный SYN-ACK → шлёт RST
+//   - Сервер видит RST → закрывает все последующие соединения с этого IP
+//   - Это убивает bypass полностью
+//
+// Правильный TTL: fake SYN умирает до сервера, DPI его видит (DPI ~2-3 hop).
+func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte, ttl int) ([][]byte, error) {
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
 		return nil, nil
 	}
@@ -202,11 +217,27 @@ func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte) ([][]byte
 	if !isSYN || isACK {
 		return nil, nil
 	}
+
+	// FIX: если fakeData не загружен из файла, генерируем синтетический payload.
+	// zapret ALT5 использует --dpi-desync-fake-syndata или просто --dpi-desync=syndata
+	// без явного файла — в этом случае zapret генерирует 1 байт \x00 (TLS alert).
+	// Мы используем минимальный TLS-Alert (10 байт), который выглядит как валидный
+	// TLS-пакет для DPI, но является мусором для сервера → сервер игнорирует SYN+data.
 	if len(fakeData) == 0 {
-		return nil, nil
+		// Minimal fake: TLS Alert (2,0) record — 10 bytes
+		// ContentType=21(Alert), Version=3.1, Length=2, Level=1, Desc=0
+		fakeData = []byte{0x15, 0x03, 0x01, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00}
+	}
+
+	// TTL sanity: если 0 или не задан, используем zapret default
+	if ttl <= 0 {
+		ttl = 4 // ALT5 default: --dpi-desync-ttl=4
 	}
 
 	originalSeq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
+	// Fake SYN seq: originalSeq - len(fakeData).
+	// DPI запоминает ISN = fakeSynSeq. Когда приходит реальный CH (с ISN+1 = fakeSynSeq+len+1),
+	// DPI ищет TLS-запись с неправильным смещением → не может разобрать SNI → bypass.
 	synDataSeq := originalSeq - uint32(len(fakeData))
 
 	synPkt := make([]byte, ipHdrLen+tcpHdrLen+len(fakeData))
@@ -217,6 +248,10 @@ func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte) ([][]byte
 	// packet[6] уже содержит оригинальные Flags+FragOffset.
 	synPkt[ipHdrLen+13] = flags & 0x02 // оставить только SYN
 	copy(synPkt[ipHdrLen+tcpHdrLen:], fakeData)
+
+	// КРИТИЧНО: устанавливаем низкий TTL на fake SYN
+	// Fake SYN должен умереть до сервера (DPI ~2-3 hop, сервер ~6 hop → TTL=4 оптимально)
+	setIPTTL(synPkt, ttl)
 	recalculateIPChecksum(synPkt)
 	FixTCPChecksum(synPkt)
 
