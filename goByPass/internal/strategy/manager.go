@@ -605,9 +605,6 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		if s := m.selectByNameHint(hint, protocol, port); s != nil {
 			return s
 		}
-		if s := m.bestForProtocol(protocol, port); s != nil {
-			return s
-		}
 	}
 
 	// ── 3. builtinHostnameMappings ────────────────────────────────────────────
@@ -623,6 +620,13 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	}
 
 	// ── 4. Fallback ───────────────────────────────────────────────────────────
+	if protocol == "udp" {
+		// Для неизвестного QUIC (не YouTube/Google) — безопасный passthrough.
+		// Все агрессивные QUIC-стратегии теперь срабатывают ТОЛЬКО через хинты выше.
+		log.Printf("[SELECT] Safe passthrough for unknown QUIC %s:%d (hostname='%s')", ip, port, hostname)
+		return nil
+	}
+
 	if s := m.bestForProtocol(protocol, port); s != nil {
 		log.Printf("[SELECT] Fallback → strategy %d (%s) priority=%d", s.ID, s.Name, s.Priority)
 		return s
@@ -637,6 +641,10 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 // Не выполняет reverse DNS — только проверяет Google-диапазоны.
 func (m *Manager) inferHostnameForIP(ip string) string {
 	if m.isGoogleIP(ip) {
+		// Approximate inference для поддержки HostnameRules на QUIC.
+		// Все Google-диапазоны считаются youtube.com.
+		// GCP VMs / другие сервисы Google могут попасть под youtube-стратегию —
+		// это приемлемая цена для основного сценария (YouTube bypass).
 		return "youtube.com"
 	}
 	return ""

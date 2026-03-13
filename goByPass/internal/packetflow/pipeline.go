@@ -377,7 +377,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 						fakeTTL = strat.FakeTTL
 					}
 					if fakeTTL <= 0 {
-						fakeTTL = 6 // zapret default: TTL=6
+						fakeTTL = 10 // zapret default: TTL=6
 					}
 					for i := 0; i < repeats; i++ {
 						fakePkt := buildFakeQUICPacket(pkt.Data, strat.FakeQUICFileData, fakeTTL)
@@ -504,9 +504,9 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		isData := len(pkt.Data) > payloadOffset
 		isClientHello := isData &&
 			len(pkt.Data) >= payloadOffset+6 && // need indices [+0..+5]
-			pkt.Data[payloadOffset] == 0x16 && // ContentType: Handshake
-			pkt.Data[payloadOffset+1] == 0x03 && // TLS major version
-			pkt.Data[payloadOffset+5] == 0x01 // HandshakeType: ClientHello
+			pkt.Data[payloadOffset] == 0x16 // ContentType: Handshake
+		//pkt.Data[payloadOffset+1] == 0x03 && // TLS major version
+		//pkt.Data[payloadOffset+5] == 0x01 // HandshakeType: ClientHello
 
 		// applyMods определяет, нужно ли модифицировать этот пакет.
 		//
@@ -941,7 +941,7 @@ func setIPTTL(packet []byte, ttl int) error {
 		return nil
 	}
 	if ttl <= 0 {
-		ttl = 6 // zapret default: достаточно до DPI, умирает до сервера (#BugTTL0)
+		ttl = 10 // zapret default: достаточно до DPI, умирает до сервера (#BugTTL0)
 	}
 	packet[8] = byte(ttl)
 	recalculateIPChecksum(packet)

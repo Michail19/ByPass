@@ -76,9 +76,9 @@ func (pm *PacketModifier) ApplyFake(
 		binary.BigEndian.PutUint32(fake[tcpOffset+4:], seq)
 	}
 
-	if fooling&strategy.FoolingDataNoAck != 0 {
-		fake[tcpOffset+13] &^= 0x10 // clear ACK
-	}
+	//if fooling&strategy.FoolingDataNoAck != 0 {
+	//	fake[tcpOffset+13] &^= 0x10 // clear ACK
+	//}
 
 	if fooling&strategy.FoolingTS != 0 {
 		zeroTCPTimestamp(fake, ipHdrLen)

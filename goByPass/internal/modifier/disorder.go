@@ -98,7 +98,7 @@ func (pm *PacketModifier) ApplyDisorder(
 			decoy := make([]byte, segEnd)
 			copy(decoy, packet[:payloadOffset])
 			binary.BigEndian.PutUint16(decoy[2:4], uint16(segEnd))
-			binary.BigEndian.PutUint32(decoy[ipHdrLen+4:], originalSeq)
+			binary.BigEndian.PutUint32(decoy[ipHdrLen+4:], originalSeq-32)
 			copy(decoy[payloadOffset:], packet[payloadOffset:segEnd])
 			// DF: сохраняем из оригинала — decoy скопирован из packet[:payloadOffset]
 			setIPTTL(decoy, ttl)
@@ -113,7 +113,8 @@ func (pm *PacketModifier) ApplyDisorder(
 	// TCP-поток и ломает TLS-парсинг на сервере.
 	realPkt := make([]byte, len(packet))
 	copy(realPkt, packet)
-	results = append(results, realPkt)
+	realSegs := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
+	results = append(results, realSegs...)
 
 	return results, nil
 }
@@ -129,7 +130,7 @@ func setIPTTL(packet []byte, ttl int) error {
 		return nil
 	}
 	if ttl <= 0 {
-		ttl = 6 // zapret default: достаточно чтобы дойти до DPI, умереть до сервера
+		ttl = 10 // zapret default: достаточно чтобы дойти до DPI, умереть до сервера
 	}
 	packet[8] = byte(ttl)
 	recalculateIPChecksum(packet)

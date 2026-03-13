@@ -202,8 +202,14 @@ func (s *RawSender) sendInternal(packet []byte, addr []byte, clearChecksumFlags 
 
 // SendWithDelay отправляет с задержкой
 func (s *RawSender) SendWithDelay(packet []byte, addr []byte, delay time.Duration) error {
+	pkt := make([]byte, len(packet))
+	copy(pkt, packet)
+
+	addrCopy := make([]byte, len(addr))
+	copy(addrCopy, addr)
+
 	time.AfterFunc(delay, func() {
-		s.Send(packet, addr)
+		s.SendModified(pkt, addrCopy)
 	})
 	return nil
 }
@@ -216,7 +222,7 @@ func (s *RawSender) SendWithDelay(packet []byte, addr []byte, delay time.Duratio
 // Используем цикл — overhead минимален, пакеты уходят без лишних аллокаций.
 func (s *RawSender) SendBatch(packets [][]byte, addr []byte) error {
 	for _, pkt := range packets {
-		if err := s.Send(pkt, addr); err != nil {
+		if err := s.SendModified(pkt, addr); err != nil {
 			return err
 		}
 	}
@@ -355,6 +361,9 @@ func fixUDPChecksum(packet []byte) {
 	copy(fullData[12:], udpData)
 
 	checksum := calculateChecksum(fullData)
+	if checksum == 0 {
+		checksum = 0xFFFF
+	}
 	packet[udpOffset+6] = byte(checksum >> 8)
 	packet[udpOffset+7] = byte(checksum & 0xFF)
 }

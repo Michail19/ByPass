@@ -23,7 +23,7 @@ func (m *Manager) loadDefaultStrategies() {
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 		SplitMode:   SplitNone,
-		Priority:    999999,
+		Priority:    20,
 	})
 
 	// ── 2. Light — split pos=1 + hostcase ─────────────────────────────────────
@@ -102,7 +102,7 @@ func (m *Manager) loadDefaultStrategies() {
 		HostCase:               true,
 		TLSRecordSplit:         true,
 		TLSRecordSize:          128,
-		Priority:               3,
+		Priority:               25,
 		ModifyFirstDataPackets: 2,
 	})
 
@@ -146,7 +146,7 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICRepeats: 6,
 
 		ApplyToPacketTypes:     []string{"handshake", "ack"},
-		Priority:               5, // FIX: было 1
+		Priority:               25, // FIX: было 1
 		ModifyFirstDataPackets: 4,
 	})
 
@@ -168,7 +168,7 @@ func (m *Manager) loadDefaultStrategies() {
 		HostCase:       true,
 		TLSRecordSplit: true,
 		TLSRecordSize:  128,
-		Priority:       2,
+		Priority:       25,
 	})
 
 	// ── 25. yt-discord-2026-zapret — основной zapret-пресет 2026 ──────────────
@@ -199,7 +199,7 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 
-		Priority:               4, // FIX: было 1
+		Priority:               25, // FIX: было 1
 		ModifyFirstDataPackets: 4,
 	})
 
@@ -242,7 +242,7 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICRepeats: 6,
 		FakeTTL:         6,
 
-		Priority:               99, // FIX: было 1 → применялась ко всем хостам через fallback
+		Priority:               40, // FIX: было 1 → применялась ко всем хостам через fallback
 		ModifyFirstDataPackets: 0,  // без ограничений (весь поток)
 	})
 
