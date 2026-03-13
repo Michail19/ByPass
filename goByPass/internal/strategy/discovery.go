@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"sort"
 	"sync"
@@ -76,6 +77,9 @@ func NewDiscovery(manager *Manager, config DiscoveryConfig) *Discovery {
 		config.SamplesPerTest = 10
 	}
 
+	// Инициализируем рандом для jitter
+	rand.Seed(time.Now().UnixNano())
+
 	return &Discovery{
 		manager:  manager,
 		config:   config,
@@ -94,6 +98,7 @@ func (d *Discovery) Start() error {
 		return fmt.Errorf("discovery already running")
 	}
 	d.running = true
+	d.manager.SetDiscoveryRunning(true)
 	d.progress.StartTime = time.Now()
 	d.mu.Unlock()
 
@@ -110,6 +115,7 @@ func (d *Discovery) Stop() {
 		close(d.stopChan)
 		d.mu.Lock()
 		d.running = false
+		d.manager.SetDiscoveryRunning(false)
 		d.mu.Unlock()
 	})
 }
@@ -200,8 +206,14 @@ func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 	d.progress.CurrentPort = port
 	d.mu.Unlock()
 
+	// ── Warmup sample (не входит в статистику) ─────────────────────────────
+	_ = d.testConnection(domain, port) // просто прогреваем DNS/TCP/TLS
+
+	// ── Основные SamplesPerTest с jitter ───────────────────────────────────
 	for i := 0; i < d.config.SamplesPerTest; i++ {
-		time.Sleep(d.config.TestInterval)
+		// Jitter 0..50ms чтобы DPI не детектил паттерн
+		jitter := time.Duration(rand.Intn(51)) * time.Millisecond
+		time.Sleep(d.config.TestInterval + jitter)
 
 		select {
 		case <-d.stopChan:
@@ -234,8 +246,15 @@ func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 		strat.ID, strat.Name, domain,
 		result.SuccessRate*100, result.SuccessSamples, result.Samples, result.AvgResponse)
 
+	// Сохраняем только лучший результат для этой стратегии
 	d.mu.Lock()
-	d.results[strat.ID] = result
+	if existing, ok := d.results[strat.ID]; ok {
+		if result.SuccessRate > existing.SuccessRate {
+			d.results[strat.ID] = result
+		}
+	} else {
+		d.results[strat.ID] = result
+	}
 	d.mu.Unlock()
 
 	atomic.AddInt64(&d.progress.CompletedTests, 1)
@@ -248,7 +267,8 @@ func (d *Discovery) testConnection(domain string, port int) error {
 
 	if port == 443 {
 		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // intentional for discovery
+			ServerName:         domain, // правильный SNI
+			InsecureSkipVerify: true,   // nolint:gosec // intentional for discovery
 		})
 		if err != nil {
 			return err
@@ -263,7 +283,7 @@ func (d *Discovery) testConnection(domain string, port int) error {
 	}
 	defer conn.Close()
 
-	request := []byte("GET / HTTP/1.1\r\nHost: " + domain + "\r\n\r\n")
+	request := []byte("GET / HTTP/1.1\r\nHost: " + domain + "\r\nConnection: close\r\n\r\n")
 
 	conn.SetWriteDeadline(time.Now().Add(d.config.TestTimeout))
 	if _, err := conn.Write(request); err != nil {
@@ -330,8 +350,9 @@ func (d *Discovery) GetProgress() DiscoveryProgress {
 
 	if progress.TotalTests > 0 && completed > 0 {
 		elapsed := time.Since(progress.StartTime)
-		progress.EstimatedTime = time.Duration(float64(elapsed) *
-			float64(progress.TotalTests) / float64(completed))
+		avgPerTest := elapsed / time.Duration(completed)
+		remainingTests := progress.TotalTests - int(completed)
+		progress.EstimatedTime = time.Duration(remainingTests) * avgPerTest
 	}
 
 	return progress

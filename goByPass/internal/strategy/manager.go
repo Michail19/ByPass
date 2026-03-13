@@ -59,6 +59,9 @@ type Manager struct {
 	testOverrides   map[string]int
 	testOverridesMu sync.RWMutex
 
+	discoveryRunning bool       // защищает от глобального ломания трафика
+	updateMu         sync.Mutex // предотвращает параллельные обновления Google IP
+
 	// statsMap хранит изменяемую статистику отдельно от конфига Strategy.
 	// Ключ совпадает с Strategy.ID. Запись создаётся в AddStrategy.
 	statsMap map[int]*strategyRuntimeStats
@@ -77,14 +80,15 @@ type ManagerStats struct {
 // NewManager создает новый менеджер стратегий
 func NewManager() *Manager {
 	m := &Manager{
-		strategies:    make(map[int]*Strategy),
-		filters:       make(map[string]*StrategyFilter),
-		updateChan:    make(chan *StrategyResult, 1000),
-		closeChan:     make(chan struct{}),
-		googleRanges:  make([]*net.IPNet, 0),
-		cidrIndex:     make(map[byte][]*net.IPNet),
-		testOverrides: make(map[string]int),
-		statsMap:      make(map[int]*strategyRuntimeStats),
+		strategies:       make(map[int]*Strategy),
+		filters:          make(map[string]*StrategyFilter),
+		updateChan:       make(chan *StrategyResult, 1000),
+		closeChan:        make(chan struct{}),
+		googleRanges:     make([]*net.IPNet, 0),
+		cidrIndex:        make(map[byte][]*net.IPNet),
+		testOverrides:    make(map[string]int),
+		statsMap:         make(map[int]*strategyRuntimeStats),
+		discoveryRunning: false,
 	}
 
 	// FIX #2: hostnameRules — pointer, необходима явная инициализация.
@@ -104,6 +108,13 @@ func NewManager() *Manager {
 	go m.updateGoogleIPRanges()
 
 	return m
+}
+
+// SetDiscoveryRunning вызывается из Discovery.Start/Stop
+func (m *Manager) SetDiscoveryRunning(running bool) {
+	m.mu.Lock()
+	m.discoveryRunning = running
+	m.mu.Unlock()
 }
 
 // startGoogleIPUpdater запускает периодическое обновление диапазонов Google
@@ -191,6 +202,9 @@ var fallbackRanges = []string{
 
 // updateGoogleIPRanges — полный rewrite с диагностикой и retry
 func (m *Manager) updateGoogleIPRanges() {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+
 	urls := []string{
 		"https://www.gstatic.com/ipranges/goog.json",
 		"https://www.gstatic.com/ipranges/cloud.json",
@@ -551,6 +565,8 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 //     FIX #2: hint для UDP = "youtube" (было "quic" — ни одна стратегия не совпадала)
 //  3. builtinHostnameMappings — hostname содержит известную подстроку
 //  4. Fallback: лучшая по Priority не-passthrough стратегия для данного протокола
+//
+// SelectStrategy — финальная безопасная версия
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
 	// ── 0. Hostname Rules (абсолютный приоритет) ─────────────────────────────
 	if hostname != "" {
@@ -569,7 +585,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// ── 1. Test override — форсированная стратегия от Discovery ──────────────
+	// ── 1. Test override — ВСЕГДА применяется (Discovery теперь работает)
 	m.testOverridesMu.RLock()
 	var overrideStratID int
 	var hasOverride bool
@@ -585,11 +601,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		s, exists := m.strategies[overrideStratID]
 		m.mu.RUnlock()
 		if exists {
-			label := "IP='" + ip + "'"
-			if hostname != "" {
-				label = "hostname='" + strings.ToLower(hostname) + "'"
-			}
-			log.Printf("[SELECT] TestOverride %s → strategy %d (%s)", label, s.ID, s.Name)
+			log.Printf("[SELECT] TestOverride %s → strategy %d (%s)", labelFrom(ip, hostname), s.ID, s.Name)
 			return s
 		}
 	}
@@ -597,17 +609,29 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// ── 2. Google IP ──────────────────────────────────────────────────────────
+	// ── 2. Google IP (неагрессивный) ────────────────────────────────────────
 	if m.isGoogleIP(ip) {
-		// FIX #2: для UDP hint был "quic" — ни одна стратегия не содержит "quic" в имени.
-		// "youtube" совпадает с "yt-syndata-2026" и "youtube-2026".
-		hint := "youtube"
-		if s := m.selectByNameHint(hint, protocol, port); s != nil {
-			return s
+		applyYoutube := false
+		if hostname != "" {
+			lower := strings.ToLower(hostname)
+			for _, rule := range builtinHostnameMappings {
+				if rule.stratNameHint == "youtube" && strings.Contains(lower, rule.hostnameContains) {
+					applyYoutube = true
+					break
+				}
+			}
+		} else if protocol == "udp" {
+			applyYoutube = true // QUIC YouTube CDN
+		}
+
+		if applyYoutube {
+			if s := m.selectByNameHint("youtube", protocol, port); s != nil {
+				return s
+			}
 		}
 	}
 
-	// ── 3. builtinHostnameMappings ────────────────────────────────────────────
+	// ── 3. builtinHostnameMappings ───────────────────────────────────────────
 	if hostname != "" {
 		lower := strings.ToLower(hostname)
 		for _, rule := range builtinHostnameMappings {
@@ -619,11 +643,9 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// ── 4. Fallback ───────────────────────────────────────────────────────────
+	// ── 4. Fallback — безопасный ─────────────────────────────────────────────
 	if protocol == "udp" {
-		// Для неизвестного QUIC (не YouTube/Google) — безопасный passthrough.
-		// Все агрессивные QUIC-стратегии теперь срабатывают ТОЛЬКО через хинты выше.
-		log.Printf("[SELECT] Safe passthrough for unknown QUIC %s:%d (hostname='%s')", ip, port, hostname)
+		log.Printf("[SELECT] Safe passthrough for unknown QUIC %s:%d", ip, port)
 		return nil
 	}
 
@@ -634,6 +656,20 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 
 	log.Printf("[SELECT] No strategy for %s:%d (hostname='%s')", ip, port, hostname)
 	return nil
+}
+
+// Вспомогательные функции
+func (m *Manager) isDiscoveryRunning() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.discoveryRunning
+}
+
+func labelFrom(ip, hostname string) string {
+	if hostname != "" {
+		return "hostname='" + strings.ToLower(hostname) + "'"
+	}
+	return "IP='" + ip + "'"
 }
 
 // inferHostnameForIP возвращает каноническое hostname для IP по builtinHostnameMappings.
