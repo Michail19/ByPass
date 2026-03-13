@@ -25,6 +25,7 @@ type WinDivert struct {
 	dll      *syscall.DLL
 	recvProc *syscall.Proc
 	wg       sync.WaitGroup
+	stopOnce sync.Once
 }
 
 // NewWinDivert создает новый захватчик для Windows
@@ -62,7 +63,8 @@ func (w *WinDivert) Start(ctx context.Context) error {
 	}
 
 	// Проверяем, что фильтр корректен
-	filter := "tcp.DstPort == 443 or tcp.DstPort == 80"
+	const winDivertFilter = "outbound and !loopback and (tcp.DstPort == 80 or tcp.DstPort == 443 or udp.DstPort == 443)"
+	filter := winDivertFilter
 	filterPtr, err := syscall.BytePtrFromString(filter)
 	if err != nil {
 		return fmt.Errorf("failed to create filter: %v", err)
@@ -124,24 +126,31 @@ func (w *WinDivert) GetHandle() uintptr {
 
 // Stop останавливает захват
 func (w *WinDivert) Stop() error {
-	close(w.stopChan)
-
-	// Close the WinDivert handle first — this unblocks WinDivertRecv
-	if w.handle != 0 && w.dll != nil {
-		closeProc, _ := w.dll.FindProc("WinDivertClose")
-		closeProc.Call(uintptr(w.handle))
-		w.handle = 0
+	if w == nil {
+		return nil
 	}
 
-	// Wait for processPackets to exit before closing the channel
-	w.wg.Wait()
+	w.stopOnce.Do(func() {
+		close(w.stopChan)
 
-	if w.dll != nil {
-		w.dll.Release()
-		w.dll = nil
-	}
+		// Сначала закрываем handle — это разблокирует WinDivertRecv.
+		if w.handle != 0 && w.dll != nil {
+			if closeProc, err := w.dll.FindProc("WinDivertClose"); err == nil {
+				closeProc.Call(uintptr(w.handle))
+			}
+			w.handle = 0
+		}
 
-	close(w.packets)
+		w.wg.Wait()
+
+		if w.dll != nil {
+			w.dll.Release()
+			w.dll = nil
+		}
+
+		close(w.packets)
+	})
+
 	return nil
 }
 

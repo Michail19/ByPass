@@ -422,38 +422,49 @@ func (m *Manager) ClearTestOverrideByIP(ip string) {
 	m.testOverridesMu.Unlock()
 }
 
-// FIX #1: переименовали package-level var с hostnameRules → builtinHostnameMappings,
-// чтобы устранить конфликт имён с типом hostnameRules (hostname_rules.go).
-// Было: var hostnameRules = []struct{...}  ← compile error: redeclared in this block.
-//
-// builtinHostnameMappings — таблица «содержит подстроку → nameHint для стратегии».
-// Используется в SelectStrategy шаг 2 (после hostnameRules и testOverrides).
+// builtinHostnameMappings — узкие встроенные правила для известных сервисов.
+// ВАЖНО:
+//   - не тащим сюда общий Google (google.com, gmail.com, gstatic.com и т.п.),
+//     чтобы не применять YouTube-bypass к обычным сайтам;
+//   - используем набор hints, а не один "youtube", чтобы находить стратегии
+//     вроде "yt-syndata-2026" и "quic-fake-6".
 var builtinHostnameMappings = []struct {
-	hostnameContains string // подстрока в hostname (lowercase)
-	stratNameHint    string // подстрока в имени стратегии
+	hostnameContains string   // подстрока в hostname (lowercase)
+	strategyHints    []string // подстрока в имени стратегии
 }{
-	{"youtube.com", "youtube"},
-	{"googlevideo.com", "youtube"},
-	{"googleapis.com", "youtube"},
-	{"gstatic.com", "youtube"},
-	{"ggpht.com", "youtube"},
-	{"ytimg.com", "youtube"},
-	{"youtu.be", "youtube"},
-	{"googleusercontent.com", "youtube"},
-	{"google.com", "youtube"},
-	{"gmail.com", "youtube"},
-	{"discord.com", "discord"},
-	{"discord.gg", "discord"},
-	{"discordapp.com", "discord"},
-	{"discordapp.net", "discord"},
-	{"discord.media", "discord"},
-	{"telegram.org", "telegram"},
-	{"telegram.me", "telegram"},
-	{".t.me", "telegram"},
+	// YouTube / CDN only
+	{"youtube.com", []string{"yt-syndata", "youtube", "quic-fake"}},
+	{"youtube-nocookie.com", []string{"yt-syndata", "youtube", "quic-fake"}},
+	{"googlevideo.com", []string{"yt-syndata", "youtube", "quic-fake"}},
+	{"youtubei.googleapis.com", []string{"yt-syndata", "youtube", "quic-fake"}},
+	{"ytimg.com", []string{"yt-syndata", "youtube"}},
+	{"ggpht.com", []string{"yt-syndata", "youtube"}},
+	{"gvt1.com", []string{"yt-syndata", "youtube", "quic-fake"}},
+	{"gvt2.com", []string{"yt-syndata", "youtube", "quic-fake"}},
+	{"youtu.be", []string{"yt-syndata", "youtube"}},
+
+	// Discord
+	{"discord.com", []string{"discord"}},
+	{"discord.gg", []string{"discord"}},
+	{"discordapp.com", []string{"discord"}},
+	{"discordapp.net", []string{"discord"}},
+	{"discord.media", []string{"discord"}},
+
+	// Telegram
+	{"telegram.org", []string{"telegram"}},
+	{"telegram.me", []string{"telegram"}},
+	{".t.me", []string{"telegram"}},
 }
 
 // protocolMatches проверяет применимость стратегии к протоколу/порту.
 func protocolMatches(s *Strategy, protocol string, port int) bool {
+	if s == nil {
+		return false
+	}
+	if s.AnyProtocol {
+		return true
+	}
+
 	switch protocol {
 	case "tcp":
 		return s.ApplyToTLS || s.ApplyToHTTP
@@ -476,28 +487,46 @@ func isPassthrough(s *Strategy) bool {
 		s.FakeQUICFile == ""
 }
 
-// selectByNameHint ищет стратегию с наименьшим Priority среди тех, чьё имя
-// содержит nameHint и чей протокол соответствует protocol/port.
-//
-// FIX: при одинаковом Priority выбираем стратегию с меньшим ID.
-// Итерация по Go map нестабильна — без тай-брейкера разные воркеры получают
-// разные стратегии для одного IP → ipcache осциллирует (видно в логах: 20↔25).
+// passthroughStrategy возвращает strategy 1.
+// Вызывается под m.mu.RLock.
+func (m *Manager) passthroughStrategy() *Strategy {
+	return m.strategies[1]
+}
+
+// selectByHints ищет лучшую (минимальный Priority, потом минимальный ID)
+// НЕ-passthrough стратегию, имя которой содержит любой из hints и которая
+// подходит для protocol/port.
 //
 // Вызывается под m.mu.RLock.
-func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strategy {
+func (m *Manager) selectByHints(hints []string, protocol string, port int) *Strategy {
+	if len(hints) == 0 {
+		return nil
+	}
+
 	var best *Strategy
 	bestPri := int(^uint(0) >> 1)
+
 	for _, s := range m.strategies {
 		if isPassthrough(s) {
-			continue
-		}
-		if !strings.Contains(s.Name, nameHint) {
 			continue
 		}
 		if !protocolMatches(s, protocol, port) {
 			continue
 		}
-		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
+
+		name := strings.ToLower(s.Name)
+		matched := false
+		for _, hint := range hints {
+			hint = strings.ToLower(strings.TrimSpace(hint))
+			if hint != "" && strings.Contains(name, hint) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+
 		if best == nil || s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
 			best = s
 			bestPri = s.Priority
@@ -506,23 +535,32 @@ func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strateg
 	return best
 }
 
+// selectByNameHint оставляем как thin-wrapper для совместимости.
+func (m *Manager) selectByNameHint(nameHint, protocol string, port int) *Strategy {
+	return m.selectByHints([]string{nameHint}, protocol, port)
+}
+
 // findByName ищет стратегию по подстроке имени без фильтрации по протоколу.
 // Используется hostname_rules.go при компиляции правил (SetHostnameRules),
 // когда protocol/port ещё неизвестны.
 //
-// FIX: тай-брейкер по ID.
+// В отличие от selectByHints, passthrough тут НЕ исключаем:
+// это позволяет явно задать hostname rule на strategy 1.
+//
 // Вызывается под m.mu.RLock.
 func (m *Manager) findByName(nameHint string) *Strategy {
+	hint := strings.ToLower(strings.TrimSpace(nameHint))
+	if hint == "" {
+		return nil
+	}
+
 	var best *Strategy
 	bestPri := int(^uint(0) >> 1)
+
 	for _, s := range m.strategies {
-		if isPassthrough(s) {
+		if !strings.Contains(strings.ToLower(s.Name), hint) {
 			continue
 		}
-		if !strings.Contains(s.Name, nameHint) {
-			continue
-		}
-		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
 		if best == nil || s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
 			best = s
 			bestPri = s.Priority
@@ -533,8 +571,9 @@ func (m *Manager) findByName(nameHint string) *Strategy {
 
 // bestForProtocol выбирает лучшую (наименьший Priority) не-passthrough стратегию
 // для данного протокола.
+// Оставлен как утилита, но SelectStrategy для неизвестных сайтов его больше
+// не использует — unknown host должен идти direct, а не в forced bypass.
 //
-// FIX: тай-брейкер по ID.
 // Вызывается под m.mu.RLock.
 func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 	var best *Strategy
@@ -546,7 +585,6 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 		if !protocolMatches(s, protocol, port) {
 			continue
 		}
-		// FIX: тай-брейкер по ID — детерминированный выбор при равном приоритете
 		if best == nil || s.Priority < bestPri || (s.Priority == bestPri && s.ID < best.ID) {
 			best = s
 			bestPri = s.Priority
@@ -557,27 +595,24 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 
 // SelectStrategy выбирает стратегию для пакета.
 //
-// Порядок приоритетов:
-//  0. HostnameRules (SetHostnameRules) — статические правила, абсолютный приоритет
-//     FIX #4: для QUIC (hostname="") ищем hostname через builtinHostnameMappings по IP
-//  1. testOverrides — форсирование от Discovery (hostname или IP)
-//  2. Google IP диапазоны → стратегия по nameHint
-//     FIX #2: hint для UDP = "youtube" (было "quic" — ни одна стратегия не совпадала)
-//  3. builtinHostnameMappings — hostname содержит известную подстроку
-//  4. Fallback: лучшая по Priority не-passthrough стратегия для данного протокола
+// Новый порядок:
+//  0. HostnameRules — абсолютный приоритет
+//  1. testOverrides — форсирование от Discovery
+//  2. builtinHostnameMappings — только для узко известных сервисов
+//  3. Google IP special-case для hostname-less QUIC YouTube CDN
+//  4. Всё неизвестное — passthrough (strategy 1)
 //
-// SelectStrategy — финальная безопасная версия
+// Идея: direct-by-default.
+// Неизвестный сайт НЕ должен получать light/medium/hard автоматически.
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
-	// ── 0. Hostname Rules (абсолютный приоритет) ─────────────────────────────
+	// ── 0. Hostname Rules ────────────────────────────────────────────────────
 	if hostname != "" {
 		if s := m.hostnameRuleStrategy(hostname); s != nil {
 			return s
 		}
 	} else if protocol == "udp" {
-		// FIX #4: QUIC-пакеты не содержат SNI — hostname пуст.
-		// Пробуем найти hostname через builtinHostnameMappings по IP
-		// (Google IP → "youtube.com"), затем проверяем HostnameRules.
-		// Без этого HostnameRules игнорировались для всего QUIC-трафика.
+		// QUIC без SNI: пробуем inferred hostname только для поддержки
+		// статических HostnameRules.
 		if inferredHostname := m.inferHostnameForIP(ip); inferredHostname != "" {
 			if s := m.hostnameRuleStrategy(inferredHostname); s != nil {
 				return s
@@ -585,7 +620,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// ── 1. Test override — ВСЕГДА применяется (Discovery теперь работает)
+	// ── 1. Test override ─────────────────────────────────────────────────────
 	m.testOverridesMu.RLock()
 	var overrideStratID int
 	var hasOverride bool
@@ -609,52 +644,41 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// ── 2. Google IP (неагрессивный) ────────────────────────────────────────
-	if m.isGoogleIP(ip) {
-		applyYoutube := false
-		if hostname != "" {
-			lower := strings.ToLower(hostname)
-			for _, rule := range builtinHostnameMappings {
-				if rule.stratNameHint == "youtube" && strings.Contains(lower, rule.hostnameContains) {
-					applyYoutube = true
-					break
-				}
-			}
-		} else if protocol == "udp" {
-			applyYoutube = true // QUIC YouTube CDN
-		}
+	lowerHost := strings.ToLower(strings.TrimSuffix(hostname, "."))
 
-		if applyYoutube {
-			if s := m.selectByNameHint("youtube", protocol, port); s != nil {
-				return s
-			}
-		}
-	}
-
-	// ── 3. builtinHostnameMappings ───────────────────────────────────────────
-	if hostname != "" {
-		lower := strings.ToLower(hostname)
+	// ── 2. Узкие builtin hostname mappings ───────────────────────────────────
+	if lowerHost != "" {
 		for _, rule := range builtinHostnameMappings {
-			if strings.Contains(lower, rule.hostnameContains) {
-				if s := m.selectByNameHint(rule.stratNameHint, protocol, port); s != nil {
+			if strings.Contains(lowerHost, rule.hostnameContains) {
+				if s := m.selectByHints(rule.strategyHints, protocol, port); s != nil {
+					log.Printf("[SELECT] Builtin hostname match %q → strategy %d (%s)", lowerHost, s.ID, s.Name)
 					return s
 				}
 			}
 		}
 	}
 
-	// ── 4. Fallback — безопасный ─────────────────────────────────────────────
-	if protocol == "udp" {
-		log.Printf("[SELECT] Safe passthrough for unknown QUIC %s:%d", ip, port)
-		return nil
+	// ── 3. Google IP special-case ────────────────────────────────────────────
+	// Только для hostname-less QUIC или редких случаев, когда hostname ещё не известен.
+	// Для обычных неизвестных Google-хостов теперь direct, а не youtube-bypass.
+	if m.isGoogleIP(ip) && protocol == "udp" {
+		if s := m.selectByHints([]string{"quic-fake", "yt-syndata", "youtube"}, protocol, port); s != nil {
+			log.Printf("[SELECT] Google QUIC IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
+			return s
+		}
 	}
 
-	if s := m.bestForProtocol(protocol, port); s != nil {
-		log.Printf("[SELECT] Fallback → strategy %d (%s) priority=%d", s.ID, s.Name, s.Priority)
-		return s
+	// ── 4. Direct-by-default ─────────────────────────────────────────────────
+	if ps := m.passthroughStrategy(); ps != nil {
+		if hostname != "" {
+			log.Printf("[SELECT] Direct-by-default hostname=%q ip=%s:%d → passthrough", hostname, ip, port)
+		} else {
+			log.Printf("[SELECT] Direct-by-default ip=%s:%d → passthrough", ip, port)
+		}
+		return ps
 	}
 
-	log.Printf("[SELECT] No strategy for %s:%d (hostname='%s')", ip, port, hostname)
+	log.Printf("[SELECT] No passthrough strategy configured for %s:%d (hostname=%q)", ip, port, hostname)
 	return nil
 }
 

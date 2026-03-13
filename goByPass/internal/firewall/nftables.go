@@ -47,22 +47,26 @@ func (m *NFTablesManager) AddRule(queueNum int, ports []int, direction string) e
 
 // ensureTable создает таблицу и цепочку если их нет
 func (m *NFTablesManager) ensureTable() error {
-	// Проверяем существование таблицы
-	checkCmd := exec.Command("nft", "list", "table", "inet", m.table)
-	if err := checkCmd.Run(); err != nil {
-		// Создаем таблицу
+	checkTable := exec.Command("nft", "list", "table", "inet", m.table)
+	if err := checkTable.Run(); err != nil {
 		createTable := fmt.Sprintf("nft add table inet %s", m.table)
 		if err := runCommand("bash", "-c", createTable); err != nil {
 			return err
 		}
 	}
 
-	// Создаем цепочку
-	createChain := fmt.Sprintf(
-		"nft add chain inet %s %s { type filter hook output priority 0\\; }",
-		m.table, m.chain)
+	checkChain := exec.Command("nft", "list", "chain", "inet", m.table, m.chain)
+	if err := checkChain.Run(); err != nil {
+		createChain := fmt.Sprintf(
+			"nft add chain inet %s %s { type filter hook output priority 0\\; }",
+			m.table, m.chain,
+		)
+		if err := runCommand("bash", "-c", createChain); err != nil {
+			return err
+		}
+	}
 
-	return runCommand("bash", "-c", createChain)
+	return nil
 }
 
 // createPortSet создает набор портов
@@ -86,21 +90,28 @@ func (m *NFTablesManager) createPortSet(ports []int) error {
 
 // addQueueRule добавляет правило для NFQUEUE
 func (m *NFTablesManager) addQueueRule(queueNum int, direction string) error {
-	cmd := fmt.Sprintf(
+	tcpCmd := fmt.Sprintf(
 		"nft add rule inet %s %s tcp dport @%s counter queue num %d bypass",
 		m.table, m.chain, m.setName, queueNum,
 	)
-	return runCommand("bash", "-c", cmd)
+	if err := runCommand("bash", "-c", tcpCmd); err != nil {
+		return err
+	}
+
+	udpCmd := fmt.Sprintf(
+		"nft add rule inet %s %s udp dport 443 counter queue num %d bypass",
+		m.table, m.chain, queueNum,
+	)
+	return runCommand("bash", "-c", udpCmd)
 }
 
 // RemoveRule удаляет правило nftables
 func (m *NFTablesManager) RemoveRule(queueNum int, ports []int, direction string) error {
-	// Удаляем правило
-	delRule := fmt.Sprintf(
-		"nft delete rule inet %s %s handle $(nft -a list chain inet %s %s | grep 'queue num %d' | awk '{print $NF}') 2>/dev/null || true",
-		m.table, m.chain, m.table, m.chain, queueNum)
-
-	return runCommand("bash", "-c", delRule)
+	cmd := fmt.Sprintf(
+		`for h in $(nft -a list chain inet %s %s | awk '/queue num %d/ {print $NF}'); do nft delete rule inet %s %s handle $h; done`,
+		m.table, m.chain, queueNum, m.table, m.chain,
+	)
+	return runCommand("bash", "-c", cmd)
 }
 
 // ClearRules очищает все правила

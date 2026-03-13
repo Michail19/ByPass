@@ -37,12 +37,13 @@ type internalEntry struct {
 
 // IPCache кэширует информацию об IP-адресах
 type IPCache struct {
-	entries map[string]*internalEntry
-	mu      sync.RWMutex
-	ttl     time.Duration
-	maxSize int
-	stats   CacheStats
-	stopCh  chan struct{}
+	entries  map[string]*internalEntry
+	mu       sync.RWMutex
+	ttl      time.Duration
+	maxSize  int
+	stats    CacheStats
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // CacheStats статистика кэша
@@ -81,7 +82,12 @@ func NewIPCache(ttl time.Duration, maxSize int) *IPCache {
 
 // Stop останавливает очистку кэша
 func (c *IPCache) Stop() {
-	close(c.stopCh)
+	if c == nil {
+		return
+	}
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
 }
 
 // Get возвращает копию записи для IP
@@ -135,25 +141,35 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 	if entry, exists := c.entries[ip]; exists {
 		entry.Hits++
 		entry.LastSeen = now
-		entry.Hostname = hostname
-		entry.ShouldBypass = shouldBypass
-		entry.StrategyID = strategyID
-		entry.expireAt = now.Add(c.ttl)
-	} else {
-		c.entries[ip] = &internalEntry{
-			IPCacheEntry: &IPCacheEntry{
-				IP:           ip,
-				Hostname:     hostname,
-				Hits:         1,
-				FirstSeen:    now,
-				LastSeen:     now,
-				ShouldBypass: shouldBypass,
-				StrategyID:   strategyID,
-			},
-			expireAt: now.Add(c.ttl),
+
+		// не затираем точный hostname пустым
+		if hostname != "" {
+			entry.Hostname = hostname
 		}
-		c.stats.TotalEntries++
+
+		// не меняем стратегию на fallback, если уже есть hostname-bound запись
+		if !(hostname == "" && entry.Hostname != "" && strategyID != entry.StrategyID) {
+			entry.ShouldBypass = shouldBypass
+			entry.StrategyID = strategyID
+		}
+
+		entry.expireAt = now.Add(c.ttl)
+		return
 	}
+
+	c.entries[ip] = &internalEntry{
+		IPCacheEntry: &IPCacheEntry{
+			IP:           ip,
+			Hostname:     hostname,
+			Hits:         1,
+			FirstSeen:    now,
+			LastSeen:     now,
+			ShouldBypass: shouldBypass,
+			StrategyID:   strategyID,
+		},
+		expireAt: now.Add(c.ttl),
+	}
+	c.stats.TotalEntries++
 }
 
 // PutByIP добавляет запись по net.IP

@@ -18,12 +18,12 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          1,
 		Name:        "passthrough",
-		Description: "Без модификаций (для тестов)",
+		Description: "Без модификаций (default direct mode)",
 		ApplyToHTTP: true,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 		SplitMode:   SplitNone,
-		Priority:    20,
+		Priority:    999999,
 	})
 
 	// ── 2. Light — split pos=1 + hostcase ─────────────────────────────────────

@@ -21,52 +21,89 @@ func NewIPTablesManager(cfg Config) (*IPTablesManager, error) {
 	return &IPTablesManager{cfg: cfg}, nil
 }
 
-// AddRule добавляет правило iptables
+func chainsForDirection(direction string) []string {
+	switch direction {
+	case DirectionIncoming:
+		return []string{"INPUT"}
+	case DirectionBoth:
+		return []string{"OUTPUT", "INPUT"}
+	default:
+		return []string{"OUTPUT"}
+	}
+}
+
+func hasPort(ports []int, want int) bool {
+	for _, p := range ports {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *IPTablesManager) AddRule(queueNum int, ports []int, direction string) error {
-	portStr := buildPortString(ports)
-	if portStr == "" {
+	tcpPortStr := buildPortString(ports)
+	if tcpPortStr == "" {
 		return fmt.Errorf("no ports specified")
 	}
 
-	// Определяем цепочку в зависимости от направления
-	chain := "OUTPUT"
-	if direction == DirectionIncoming {
-		chain = "INPUT"
-	} else if direction == DirectionBoth {
-		// Добавляем правила для обеих цепочек
-		if err := m.addRuleToChain(queueNum, portStr, "OUTPUT"); err != nil {
+	for _, chain := range chainsForDirection(direction) {
+		if err := m.ensureNFQueueRule(queueNum, tcpPortStr, chain, "tcp"); err != nil {
 			return err
 		}
-		return m.addRuleToChain(queueNum, portStr, "INPUT")
+		if hasPort(ports, 443) {
+			if err := m.ensureNFQueueRule(queueNum, "443", chain, "udp"); err != nil {
+				return err
+			}
+		}
 	}
-
-	return m.addRuleToChain(queueNum, portStr, chain)
+	return nil
 }
 
-// addRuleToChain добавляет правило в конкретную цепочку
-func (m *IPTablesManager) addRuleToChain(queueNum int, portStr, chain string) error {
-	// Проверяем, существует ли уже правило
-	checkCmd := exec.Command("iptables", "-t", "mangle", "-C", chain,
-		"-p", "tcp", "-m", "multiport", "--dports", portStr,
-		"-j", "NFQUEUE", "--queue-num", fmt.Sprintf("%d", queueNum), "--queue-bypass")
-
-	if err := checkCmd.Run(); err == nil {
-		return nil // правило уже существует
+func (m *IPTablesManager) RemoveRule(queueNum int, ports []int, direction string) error {
+	tcpPortStr := buildPortString(ports)
+	if tcpPortStr == "" {
+		return nil
 	}
 
-	// Добавляем правило
-	args := []string{
+	for _, chain := range chainsForDirection(direction) {
+		if err := m.deleteNFQueueRule(queueNum, tcpPortStr, chain, "tcp"); err != nil {
+			return err
+		}
+		if hasPort(ports, 443) {
+			if err := m.deleteNFQueueRule(queueNum, "443", chain, "udp"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *IPTablesManager) ensureNFQueueRule(queueNum int, portStr, chain, proto string) error {
+	checkArgs := []string{
 		"-t", "mangle",
-		"-I", chain,
-		"-p", "tcp",
+		"-C", chain,
+		"-p", proto,
 		"-m", "multiport",
 		"--dports", portStr,
 		"-j", "NFQUEUE",
 		"--queue-num", fmt.Sprintf("%d", queueNum),
 		"--queue-bypass",
 	}
+	if err := exec.Command("iptables", checkArgs...).Run(); err == nil {
+		return nil
+	}
 
-	// Добавляем исключения
+	args := []string{
+		"-t", "mangle",
+		"-I", chain,
+		"-p", proto,
+		"-m", "multiport",
+		"--dports", portStr,
+		"-j", "NFQUEUE",
+		"--queue-num", fmt.Sprintf("%d", queueNum),
+		"--queue-bypass",
+	}
 	for _, ip := range m.cfg.ExcludeIPs {
 		args = append([]string{"!", "-d", ip}, args...)
 	}
@@ -74,39 +111,33 @@ func (m *IPTablesManager) addRuleToChain(queueNum int, portStr, chain string) er
 	return runCommand("iptables", args...)
 }
 
-// RemoveRule удаляет правило iptables
-func (m *IPTablesManager) RemoveRule(queueNum int, ports []int, direction string) error {
-	portStr := buildPortString(ports)
-	if portStr == "" {
-		return nil
-	}
-
-	if direction == DirectionBoth {
-		if err := m.removeRuleFromChain(queueNum, portStr, "OUTPUT"); err != nil {
-			return err
-		}
-		return m.removeRuleFromChain(queueNum, portStr, "INPUT")
-	}
-
-	chain := "OUTPUT"
-	if direction == DirectionIncoming {
-		chain = "INPUT"
-	}
-
-	return m.removeRuleFromChain(queueNum, portStr, chain)
-}
-
-// removeRuleFromChain удаляет правило из цепочки
-func (m *IPTablesManager) removeRuleFromChain(queueNum int, portStr, chain string) error {
-	args := []string{
+func (m *IPTablesManager) deleteNFQueueRule(queueNum int, portStr, chain, proto string) error {
+	checkArgs := []string{
 		"-t", "mangle",
-		"-D", chain,
-		"-p", "tcp",
+		"-C", chain,
+		"-p", proto,
 		"-m", "multiport",
 		"--dports", portStr,
 		"-j", "NFQUEUE",
 		"--queue-num", fmt.Sprintf("%d", queueNum),
 		"--queue-bypass",
+	}
+	if err := exec.Command("iptables", checkArgs...).Run(); err != nil {
+		return nil // правила уже нет
+	}
+
+	args := []string{
+		"-t", "mangle",
+		"-D", chain,
+		"-p", proto,
+		"-m", "multiport",
+		"--dports", portStr,
+		"-j", "NFQUEUE",
+		"--queue-num", fmt.Sprintf("%d", queueNum),
+		"--queue-bypass",
+	}
+	for _, ip := range m.cfg.ExcludeIPs {
+		args = append([]string{"!", "-d", ip}, args...)
 	}
 
 	return runCommand("iptables", args...)

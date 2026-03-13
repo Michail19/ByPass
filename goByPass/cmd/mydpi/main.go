@@ -102,16 +102,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize components: %v", err)
 	}
-	defer components.cleanup()
 
-	// Firewall теперь в components
+	// Firewall в components
 	if err := components.firewall.AddRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction); err != nil {
 		log.Fatalf("Failed to setup firewall: %v", err)
 	}
 
 	if err := components.pipeline.Start(); err != nil {
-		// Rollback firewall при ошибке старта
-		components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
+		_ = components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
 		log.Fatalf("Failed to start pipeline: %v", err)
 	}
 
@@ -128,13 +126,21 @@ func main() {
 	cancel()
 
 	log.Println("Shutting down...")
-	components.pipeline.Stop()
-	components.conntrack.Stop()
-	components.strategyMgr.Stop()
 
-	if cfg.Firewall.CleanupOnExit {
-		components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
+	if components.pipeline != nil {
+		components.pipeline.Stop()
 	}
+	if components.conntrack != nil {
+		components.conntrack.Stop()
+	}
+	if components.strategyMgr != nil {
+		components.strategyMgr.Stop()
+	}
+	if cfg.Firewall.CleanupOnExit && components.firewall != nil {
+		_ = components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
+	}
+
+	components.cleanup()
 
 	log.Println("Shutdown complete")
 }
@@ -262,29 +268,6 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		return nil, fmt.Errorf("failed to create firewall manager: %v", err)
 	}
 
-	handle := capturer.GetHandle()
-	log.Printf("DEBUG: Got handle from capturer after Start: %v", handle)
-
-	if handle != 0 {
-		if _, ok := s.(*sender.RawSender); ok {
-			s.Close()
-			s, err = sender.NewSenderWithHandle(handle, sender.Config{
-				Interface:   cfg.Sender.Interface,
-				BufferSize:  cfg.Sender.BufferSize,
-				SendTimeout: cfg.Sender.SendTimeout,
-				BatchSize:   cfg.Sender.BatchSize,
-			})
-			//if err := s.Close(); err != nil {
-			//	log.Printf("sender close error: %v", err)
-			//}
-			if err != nil {
-				capturer.Stop()
-				return nil, fmt.Errorf("failed to create sender with shared handle: %v", err)
-			}
-			log.Printf("Using WinDivert sender with shared handle: %v", handle)
-		}
-	}
-
 	pipeline := packetflow.NewPipeline(
 		capturer,
 		connManager,
@@ -324,87 +307,33 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 //
 // Правила применяются ДО выбора по IP и дефолтного fallback.
 // Порядок: первое совпадение побеждает.
-//
-// Источники для паттернов:
-//   - Наш захват wireshark показал основные цели: youtube.com + субдомены,
-//     googleads, ytimg, ggpht, doubleclick, gstatic.
-//   - Discord и другие цели добавлены из типичных сценариев ТСПУ.
-//
-// Стратегии выбраны как наиболее эффективные для ТСПУ 2026 (multisplit seqovl=681):
-//   - YouTube/Google → "yt-discord-2026-zapret" (multisplit+fake×6+QUIC)
-//   - Discord        → "discord-2026" (split+TLS record split)
-//   - Telegram       → "telegram" (split+TLS record split)
-//
-// Для остальных доменов SelectStrategy делает обычный fallback по приоритету.
 func defaultHostnameRules() []strategy.HostnameRule {
 	return []strategy.HostnameRule{
-		// ── YouTube и Google Video ────────────────────────────────────────────
-		// FIX: были "yt-discord-2026-zapret" (seqovl+fake) — ISP (ТСПУ) тихо дропал эти
-		// пакеты (подтверждено pcap: 0 ответов сервера, 0 RST для всех YouTube потоков).
-		// Теперь: "yt-syndata-2026" = ALT5 (syndata+multidisorder), которая проходит через ТСПУ.
-		{Pattern: "*.youtube.com", StrategyName: "yt-syndata-2026",
-			Comment: "YouTube основной домен (ALT5: syndata+multidisorder)"},
-		{Pattern: "youtube.com", StrategyName: "yt-syndata-2026",
-			Comment: "YouTube bare domain"},
-		{Pattern: "*.ytimg.com", StrategyName: "yt-syndata-2026",
-			Comment: "YouTube thumbnails/images"},
-		{Pattern: "*.ggpht.com", StrategyName: "yt-syndata-2026",
-			Comment: "YouTube аватары/фото"},
-		{Pattern: "*.googlevideo.com", StrategyName: "yt-syndata-2026",
-			Comment: "YouTube видеопоток"},
-		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-syndata-2026",
-			Comment: "YouTube embed"},
+		// YouTube only
+		{Pattern: "*.youtube.com", StrategyName: "yt-syndata-2026", Comment: "YouTube"},
+		{Pattern: "youtube.com", StrategyName: "yt-syndata-2026", Comment: "YouTube bare"},
+		{Pattern: "*.googlevideo.com", StrategyName: "yt-syndata-2026", Comment: "YouTube video CDN"},
+		{Pattern: "*.ytimg.com", StrategyName: "yt-syndata-2026", Comment: "YouTube static"},
+		{Pattern: "*.ggpht.com", StrategyName: "yt-syndata-2026", Comment: "YouTube avatars/images"},
+		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-syndata-2026", Comment: "YouTube embed"},
+		{Pattern: "*.youtubei.googleapis.com", StrategyName: "yt-syndata-2026", Comment: "YouTube API"},
+		{Pattern: "*.gvt1.com", StrategyName: "yt-syndata-2026", Comment: "YouTube CDN"},
+		{Pattern: "*.gvt2.com", StrategyName: "yt-syndata-2026", Comment: "YouTube CDN"},
 
-		// ── Google (остальные) ────────────────────────────────────────────────
-		{Pattern: "*.googleapis.com", StrategyName: "yt-syndata-2026",
-			Comment: "Google APIs (используются YouTube)"},
-		{Pattern: "*.gstatic.com", StrategyName: "yt-syndata-2026",
-			Comment: "Google static (шрифты, ресурсы)"},
-		{Pattern: "*.gvt2.com", StrategyName: "yt-syndata-2026",
-			Comment: "Google Video Transcoding (YouTube CDN)"},
-		{Pattern: "*.gvt1.com", StrategyName: "yt-syndata-2026",
-			Comment: "Google Video (YouTube CDN)"},
-		{Pattern: "*.doubleclick.net", StrategyName: "yt-syndata-2026",
-			Comment: "Google Ads (наш захват показал 9 подключений)"},
-		{Pattern: "*.google.com", StrategyName: "yt-syndata-2026",
-			Comment: "Google основной"},
-		{Pattern: "*.googleusercontent.com", StrategyName: "yt-syndata-2026",
-			Comment: "Google User Content"},
+		// Discord
+		{Pattern: "*.discord.com", StrategyName: "discord-2026", Comment: "Discord"},
+		{Pattern: "discord.com", StrategyName: "discord-2026", Comment: "Discord bare"},
+		{Pattern: "*.discordapp.com", StrategyName: "discord-2026", Comment: "Discord CDN"},
+		{Pattern: "*.discord.gg", StrategyName: "discord-2026", Comment: "Discord invite"},
+		{Pattern: "*.discord.media", StrategyName: "discord-2026", Comment: "Discord media"},
 
-		// ── Discord ───────────────────────────────────────────────────────────
-		{Pattern: "*.discord.com", StrategyName: "discord-2026",
-			Comment: "Discord основной"},
-		{Pattern: "discord.com", StrategyName: "discord-2026",
-			Comment: "Discord bare"},
-		{Pattern: "*.discordapp.com", StrategyName: "discord-2026",
-			Comment: "Discord CDN/assets"},
-		{Pattern: "*.discord.gg", StrategyName: "discord-2026",
-			Comment: "Discord invite links"},
-		{Pattern: "*.discord.media", StrategyName: "discord-2026",
-			Comment: "Discord медиа"},
+		// Telegram
+		{Pattern: "*.telegram.org", StrategyName: "telegram", Comment: "Telegram Web"},
+		{Pattern: "telegram.org", StrategyName: "telegram", Comment: "Telegram bare"},
+		{Pattern: "*.t.me", StrategyName: "telegram", Comment: "Telegram short links"},
+		{Pattern: "t.me", StrategyName: "telegram", Comment: "Telegram t.me"},
 
-		// ── Telegram ──────────────────────────────────────────────────────────
-		// Наш захват содержит 149.154.167.99 (Telegram DC1)
-		{Pattern: "*.telegram.org", StrategyName: "telegram",
-			Comment: "Telegram Web"},
-		{Pattern: "telegram.org", StrategyName: "telegram",
-			Comment: "Telegram bare"},
-		{Pattern: "*.t.me", StrategyName: "telegram",
-			Comment: "Telegram short links"},
-		{Pattern: "t.me", StrategyName: "telegram",
-			Comment: "Telegram t.me"},
-		{Pattern: "*.tdesktop.com", StrategyName: "telegram",
-			Comment: "Telegram Desktop updates"},
-
-		// ── Instagram / Meta ──────────────────────────────────────────────────
-		{Pattern: "*.instagram.com", StrategyName: "yt-discord-2026-zapret",
-			Comment: "Instagram"},
-		{Pattern: "*.cdninstagram.com", StrategyName: "yt-discord-2026-zapret",
-			Comment: "Instagram CDN"},
-		{Pattern: "*.facebook.com", StrategyName: "yt-discord-2026-zapret",
-			Comment: "Facebook"},
-
-		// ── Twitter/X ─────────────────────────────────────────────────────────
+		// Twitter/X
 		{Pattern: "*.twitter.com", StrategyName: "yt-discord-2026-zapret",
 			Comment: "Twitter/X"},
 		{Pattern: "*.x.com", StrategyName: "yt-discord-2026-zapret",
@@ -412,7 +341,7 @@ func defaultHostnameRules() []strategy.HostnameRule {
 		{Pattern: "*.twimg.com", StrategyName: "yt-discord-2026-zapret",
 			Comment: "Twitter images/media"},
 
-		// ── Прочие часто замедляемые ──────────────────────────────────────────
+		// Прочие часто замедляемые
 		{Pattern: "*.twitch.tv", StrategyName: "yt-discord-2026-zapret",
 			Comment: "Twitch стримы"},
 		{Pattern: "*.soundcloud.com", StrategyName: "medium",
@@ -424,26 +353,14 @@ func defaultHostnameRules() []strategy.HostnameRule {
 
 // cleanup освобождает ресурсы
 func (c *Components) cleanup() {
-	if c.logFile != nil {
-		c.logFile.Close()
-	}
-	if c.sender != nil {
-		c.sender.Close()
-	}
-	if c.capturer != nil {
-		c.capturer.Stop()
-	}
-	// FIX: остановить фоновые goroutine кэшей.
-	// Без Stop() cleanupLoop() работает вечно через time.NewTicker — goroutine leak.
 	if c.ipCache != nil {
 		c.ipCache.Stop()
 	}
 	if c.domainCache != nil {
 		c.domainCache.Stop()
 	}
-
-	if c.firewall != nil {
-		_ = c.firewall.RemoveRule(c.queueNum, c.ports, c.direction)
+	if c.logFile != nil {
+		_ = c.logFile.Close()
 	}
 }
 

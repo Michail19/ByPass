@@ -29,6 +29,7 @@ type DomainCache struct {
 	stats    DomainCacheStats
 	stopCh   chan struct{}
 	resolver *net.Resolver
+	stopOnce sync.Once
 }
 
 // DomainCacheStats статистика кэша доменов
@@ -186,7 +187,12 @@ func (c *DomainCache) Delete(domain string) {
 
 // Stop останавливает фоновую очистку кэша
 func (c *DomainCache) Stop() {
-	close(c.stopCh)
+	if c == nil {
+		return
+	}
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
 }
 
 // cleanupLoop периодически очищает кэш.

@@ -473,7 +473,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		shouldBypass = strat.ID != 1
 
 		// Update cache if strategy changed or wasn't set
-		if strat.ID != cachedStratID {
+		if strat.ID != cachedStratID && flowHostname != "" {
 			p.ipCache.PutByIP(dstIP, flow.Hostname, shouldBypass, strategyID)
 		}
 	} else if cachedStratID != 0 && cachedStratID != 1 && cached != nil {
