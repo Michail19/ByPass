@@ -624,11 +624,15 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	m.testOverridesMu.RLock()
 	var overrideStratID int
 	var hasOverride bool
+
 	if hostname != "" {
 		overrideStratID, hasOverride = m.testOverrides[strings.ToLower(hostname)]
-	} else {
+	} else if protocol == "udp" {
+		// IP-based test override нужен только для QUIC:
+		// UDP/443 не несёт SNI, поэтому Discovery иначе не сможет тестировать fake QUIC.
 		overrideStratID, hasOverride = m.testOverrides["ip:"+ip]
 	}
+
 	m.testOverridesMu.RUnlock()
 
 	if hasOverride {

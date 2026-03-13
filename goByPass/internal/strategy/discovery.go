@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -180,7 +181,7 @@ func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 	defer d.manager.ClearTestOverride(domain)
 
 	var resolvedIPs []string
-	if strat.ApplyToQUIC || strat.FakeQUICFile != "" {
+	if (strat.ApplyToQUIC || strat.FakeQUICFile != "") && shouldUseIPOverrideForDomain(domain) {
 		if addrs, err := net.LookupHost(domain); err == nil {
 			for _, addr := range addrs {
 				d.manager.SetTestOverrideByIP(addr, strat.ID)
@@ -356,4 +357,17 @@ func (d *Discovery) GetProgress() DiscoveryProgress {
 	}
 
 	return progress
+}
+
+func shouldUseIPOverrideForDomain(domain string) bool {
+	d := strings.ToLower(strings.TrimSuffix(domain, "."))
+
+	return strings.Contains(d, "youtube.com") ||
+		strings.Contains(d, "youtube-nocookie.com") ||
+		strings.Contains(d, "googlevideo.com") ||
+		strings.Contains(d, "youtubei.googleapis.com") ||
+		strings.Contains(d, "gvt1.com") ||
+		strings.Contains(d, "gvt2.com") ||
+		strings.Contains(d, "ytimg.com") ||
+		strings.Contains(d, "youtu.be")
 }

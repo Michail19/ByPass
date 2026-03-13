@@ -35,11 +35,11 @@ func (m *Manager) loadDefaultStrategies() {
 		ApplyToTLS:             true,
 		SplitMode:              SplitCustom,
 		SplitPositions:         []int{1},
-		SplitSNIOffset:         true,
+		SplitSNIOffset:         false,
 		HTTPModMode:            HTTPModHostCase,
 		HostCase:               true,
 		Priority:               10,
-		ModifyFirstDataPackets: 2,
+		ModifyFirstDataPackets: 1,
 	})
 
 	// ── 3. Medium — split 1+5 + fake TS ──────────────────────────────────────
@@ -51,7 +51,7 @@ func (m *Manager) loadDefaultStrategies() {
 		ApplyToTLS:             true,
 		SplitMode:              SplitCustom,
 		SplitPositions:         []int{1, 5},
-		SplitSNIOffset:         true,
+		SplitSNIOffset:         false,
 		Fooling:                FoolingTS,
 		FakeTTL:                6,
 		FakeRepeats:            1,
@@ -89,21 +89,21 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:                     12,
 		Name:                   "telegram",
-		Description:            "Telegram: split 1+5 + fake TS + TLS record split",
+		Description:            "Telegram: safe split 1+5 + fake TS",
 		ApplyToHTTP:            false,
 		ApplyToTLS:             true,
 		SplitMode:              SplitCustom,
 		SplitPositions:         []int{1, 5},
-		SplitSNIOffset:         true,
+		SplitSNIOffset:         false,
 		Fooling:                FoolingTS,
 		FakeTTL:                6,
 		FakeRepeats:            1,
 		HTTPModMode:            HTTPModHostCase,
 		HostCase:               true,
-		TLSRecordSplit:         true,
-		TLSRecordSize:          128,
+		TLSRecordSplit:         false,
+		TLSRecordSize:          0,
 		Priority:               25,
-		ModifyFirstDataPackets: 2,
+		ModifyFirstDataPackets: 1,
 	})
 
 	// ── 20. YouTube 2026 — multisplit seqovl=681 + fake TS + disorder OOB ─────
@@ -227,23 +227,21 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          26,
 		Name:        "yt-syndata-2026",
-		Description: "YouTube 2026 ALT5: syndata+multidisorder TCP + QUIC fake (РЕКОМЕНДУЕТСЯ для ТСПУ)",
+		Description: "YouTube 2026 ALT5: syndata+multidisorder TCP + QUIC fake (limited)",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		// TCP: ALT5 syndata+multidisorder
 		SynData:       true,
 		MultiDisorder: true,
 		DisorderTTL:   4,
 
-		// QUIC: ALT5 fake Initial
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 		FakeTTL:         6,
 
-		Priority:               40, // FIX: было 1 → применялась ко всем хостам через fallback
-		ModifyFirstDataPackets: 0,  // без ограничений (весь поток)
+		Priority:               40,
+		ModifyFirstDataPackets: 1,
 	})
 
 	// ── 60. syndata+multidisorder — агрессивный режим ──────────────────────────

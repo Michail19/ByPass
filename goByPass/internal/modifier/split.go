@@ -15,6 +15,13 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return [][]byte{packet}, nil
 	}
 
+	// ВАЖНО: alignSNI сейчас не реализован корректно.
+	// Лучше не делать опасный split, чем ломать TLS handshake.
+	if alignSNI {
+		log.Printf("WARNING: SplitSNIOffset requested but alignSNI is not implemented; skipping split")
+		return [][]byte{packet}, nil
+	}
+
 	ipHdrLen := int(packet[0]&0x0F) * 4
 	tcpHdrLen := int(packet[ipHdrLen+12]>>4) * 4
 	payloadOffset := ipHdrLen + tcpHdrLen

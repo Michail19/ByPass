@@ -43,7 +43,7 @@ strategy:
     default_strategy: "moderate"
     strategy_file: "configs/strategies/strategies.json"
     auto_discovery:
-        enabled: true
+        enabled: false
         test_domains:
             - google.com
             - youtube.com

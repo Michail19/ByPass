@@ -447,44 +447,77 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// Проверяем кэш
 	var shouldBypass bool
 	var strategyID int
-	var strats *strategy.Strategy // ← всегда указатель, может быть nil
+	var strats *strategy.Strategy
 	cachedStratID := 0
-	var cached *cache.IPCacheEntry // keep in scope for fallback below
+	var cached *cache.IPCacheEntry
+
 	if c, exists := p.ipCache.GetByIP(dstIP); exists {
 		cached = c
-		cachedStratID = cached.StrategyID
-		shouldBypass = cached.ShouldBypass
-		strategyID = cached.StrategyID
+		cachedStratID = c.StrategyID
+		shouldBypass = c.ShouldBypass
+		strategyID = c.StrategyID
 		p.updateStats(func(stats *PipelineStats) { stats.CacheHits++ })
 	}
 
-	// Always trust the fresh strategy selection — hostname-based routing takes priority over cache
-	strat := p.strategyMgr.SelectStrategy(
+	// 1. Свежий выбор по hostname/IP
+	fresh := p.strategyMgr.SelectStrategy(
 		dstIP.String(),
 		flowHostname,
 		int(dstPort),
 		"tcp",
 	)
 
-	if strat != nil {
-		strats = strat
-		strategyID = strat.ID
-		// Only bypass if strategy is not the passthrough (id=1)
-		shouldBypass = strat.ID != 1
+	// 2. Если hostname ещё не известен, а в кэше уже есть non-passthrough — кэш важнее fresh passthrough
+	preferCached := flowHostname == "" && cached != nil && cachedStratID > 1
 
-		// Update cache if strategy changed or wasn't set
-		if strat.ID != cachedStratID && flowHostname != "" {
-			p.ipCache.PutByIP(dstIP, flow.Hostname, shouldBypass, strategyID)
+	switch {
+	case preferCached && (fresh == nil || fresh.ID == 1):
+		if s, ok := p.strategyMgr.GetStrategy(cachedStratID); ok && s != nil {
+			strats = s
+			strategyID = s.ID
+			shouldBypass = cached.ShouldBypass
 		}
-	} else if cachedStratID != 0 && cachedStratID != 1 && cached != nil {
-		// No fresh selection but we have a valid cached non-passthrough strategy
-		strats, _ = p.strategyMgr.GetStrategy(cachedStratID)
-		shouldBypass = cached.ShouldBypass
+
+	case fresh != nil:
+		strats = fresh
+		strategyID = fresh.ID
+		shouldBypass = fresh.ID != 1
+
+		// Обновляем IP cache только когда hostname уже известен
+		if flowHostname != "" && (strategyID != cachedStratID || cached == nil) {
+			p.ipCache.PutByIP(dstIP, flowHostname, shouldBypass, strategyID)
+		}
+
+	case cached != nil && cachedStratID > 0:
+		// используем то, что уже лежит в кэше, включая strategy 1
+		if s, ok := p.strategyMgr.GetStrategy(cachedStratID); ok && s != nil {
+			strats = s
+			strategyID = s.ID
+			shouldBypass = cached.ShouldBypass
+		}
 	}
 
-	// 3. Финальный fallback: SelectStrategy вернула nil —
-	//    нет подходящей стратегии для этого IP/hostname/порта.
-	//    Просто реинжектируем пакет без модификаций (passthrough).
+	// 3. Если всё ещё nil — подставляем passthrough как явную стратегию,
+	// а не оставляем "пустое решение".
+	if strats == nil {
+		if s, ok := p.strategyMgr.GetStrategy(1); ok && s != nil {
+			strats = s
+			strategyID = 1
+			shouldBypass = false
+		}
+	}
+
+	// 4. Финальный лог — только ПОСЛЕ того как strats уже определена
+	finalStrategyID := 0
+	finalStrategyName := "nil"
+	if strats != nil {
+		finalStrategyID = strats.ID
+		finalStrategyName = strats.Name
+	}
+	log.Printf("[PIPELINE] Final strategy hostname=%q ip=%s:%d -> id=%d (%s), bypass=%v, cached=%v",
+		flowHostname, dstIP.String(), dstPort, finalStrategyID, finalStrategyName, shouldBypass, cached != nil)
+
+	// Совсем аварийный fallback — только если даже strategy 1 не найдена
 	if strats == nil {
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
@@ -536,9 +569,22 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		// Было: flow.DataPacketsModified < 0 → всегда false → data-пакеты не
 		// модифицировались у стратегий без лимита (например yt-syndata-2026).
 		// ModifyFirstDataPackets == 0 означает "без ограничений" (весь поток).
+		// modifyAppData включаем только для HTTP/AnyProtocol стратегий.
+		// Для TLS-only стратегий (YouTube/Telegram) модифицируем только SYN и ClientHello.
+		modifyAppData := false
+		if isData && !isClientHello {
+			if strats.AnyProtocol || strats.ApplyToHTTP {
+				modifyAppData = (strats.ModifyFirstDataPackets > 0 &&
+					flow.DataPacketsModified < strats.ModifyFirstDataPackets) ||
+					(strats.ModifyFirstDataPackets == 0)
+			}
+		}
+
+		attemptedAppDataMod := modifyAppData
 		applyMods := (isSYN && strats.SynData) ||
 			(isClientHello && strats.ApplyToTLS) ||
-			(isData && !isClientHello && (strats.ModifyFirstDataPackets == 0 || flow.DataPacketsModified < strats.ModifyFirstDataPackets))
+			modifyAppData
+
 		if applyMods {
 			flow.Mu.Lock()
 			if isClientHello {
@@ -570,28 +616,22 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 		// Отправляем модифицированные
 		if len(result.ModifiedPackets) > 0 {
-			for i, modPkt := range result.ModifiedPackets {
+			for _, modPkt := range result.ModifiedPackets {
 				if len(modPkt) >= 20 && (modPkt[0]>>4 == 4) {
-					// Checksums уже пересчитаны в modifier.go (#1).
-					// НЕ пересчитываем здесь повторно — это сломает FakeBadSum:
-					// modifier намеренно портит TCP checksum (XOR 0xFF),
-					// повторный пересчёт восстановит правильное значение и
-					// сервер не дропнет fake → bypass теряет эффект.
-					// sendModifiedPacket сбрасывает offload флаги — иначе
-					// Windows тоже перезапишет наш checksum своим.
 					p.sendModifiedPacket(modPkt, pkt.Addr)
 					p.updateStats(func(stats *PipelineStats) {
 						stats.PacketsModified++
 						stats.PacketsSent++
 					})
-				} else {
-					log.Printf("WARNING: Invalid modified packet %d, skipping", i)
 				}
 			}
-			// Increment только после успешной модификации
+
 			flow.Mu.Lock()
-			if !isClientHello {
+			if attemptedAppDataMod {
 				flow.DataPacketsModified++
+			}
+			if isClientHello {
+				flow.IsHandshakeModified = true
 			}
 			flow.Mu.Unlock()
 		}

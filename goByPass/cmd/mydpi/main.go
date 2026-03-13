@@ -117,7 +117,7 @@ func main() {
 	// Hostname rules имеют приоритет: discovery только для доменов,
 	// для которых нет явного правила в cfg.Strategy.HostnameRules.
 	if cfg.Strategy.AutoDiscovery.Enabled {
-		go runDiscovery(components.strategyMgr, cfg)
+		log.Printf("[Discovery] AutoDiscovery is configured, but automatic background discovery is disabled in normal runtime because it mutates live traffic via test overrides")
 	}
 
 	go runStatsMonitor(ctx, components)
@@ -188,13 +188,34 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	// Менеджер стратегий: сначала встроенные, затем из файла (если задан).
 	// LoadFromFile добавляет/обновляет стратегии по ID — встроенные не удаляются.
 	strategyMgr := strategy.NewManager()
+
+	//if s, ok := strategyMgr.GetStrategy(12); ok {
+	//	log.Printf("[DEBUG] strategy12: SplitSNIOffset=%v TLSRecordSplit=%v ModifyFirstDataPackets=%d",
+	//		s.SplitSNIOffset, s.TLSRecordSplit, s.ModifyFirstDataPackets)
+	//}
+	//if s, ok := strategyMgr.GetStrategy(26); ok {
+	//	log.Printf("[DEBUG] strategy26: MultiDisorder=%v ModifyFirstDataPackets=%d",
+	//		s.MultiDisorder, s.ModifyFirstDataPackets)
+	//}
+
 	if cfg.Strategy.StrategyFile != "" {
+		// сначала merge из JSON
 		if err := strategyMgr.LoadFromFile(cfg.Strategy.StrategyFile); err != nil {
-			log.Printf("Warning: failed to load strategies from %s: %v",
-				cfg.Strategy.StrategyFile, err)
+			log.Printf("Failed to load strategies from file: %v", err)
 		} else {
 			log.Printf("Loaded strategies from %s", cfg.Strategy.StrategyFile)
 		}
+
+		// и только теперь проверяем, какие стратегии реально активны
+		if s, ok := strategyMgr.GetStrategy(12); ok {
+			log.Printf("[DEBUG] ACTIVE strategy12: SplitSNIOffset=%v TLSRecordSplit=%v ModifyFirstDataPackets=%d",
+				s.SplitSNIOffset, s.TLSRecordSplit, s.ModifyFirstDataPackets)
+		}
+		if s, ok := strategyMgr.GetStrategy(26); ok {
+			log.Printf("[DEBUG] ACTIVE strategy26: MultiDisorder=%v ModifyFirstDataPackets=%d",
+				s.MultiDisorder, s.ModifyFirstDataPackets)
+		}
+
 	}
 
 	// ── Hostname Rules ────────────────────────────────────────────────────────
@@ -375,7 +396,7 @@ func setupLogging(cfg config.LoggingConfig) {
 	}
 }
 
-// runDiscovery запускает авто-подбор стратегий.
+// runManualDiscovery запускает авто-подбор стратегий.
 //
 // Discovery тестирует только домены из cfg.Strategy.AutoDiscovery.TestDomains.
 // Для доменов, которые уже покрыты hostname rules (defaultHostnameRules),
@@ -385,7 +406,7 @@ func setupLogging(cfg config.LoggingConfig) {
 //   - Применяем лучшую стратегию через ApplyBestStrategy
 //   - Обновляем hostname rule для тестируемого домена (если он там есть)
 //   - Продолжаем мониторинг — пересматриваем каждые 5 минут
-func runDiscovery(strategyMgr *strategy.Manager, cfg *config.Config) {
+func runManualDiscovery(strategyMgr *strategy.Manager, cfg *config.Config) {
 	var disc *strategy.Discovery
 	restart := func() {
 		if disc != nil {
