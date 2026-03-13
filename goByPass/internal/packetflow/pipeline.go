@@ -333,6 +333,12 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// Получаем или создаём поток
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
 
+	// Читаем flow.Hostname один раз под RLock — устраняет data race с SetHostname().
+	// Все последующие обращения к hostname используют эту локальную копию.
+	flow.Mu.RLock()
+	flowHostname := flow.Hostname
+	flow.Mu.RUnlock()
+
 	// UDP 443 = QUIC: инжектируем fake QUIC Initial из .bin перед реальным пакетом.
 	//
 	// Стратегия zapret для QUIC:
@@ -351,7 +357,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			//     корректно применится (#5).
 			//   - SelectStrategy приоритет: testOverride (по hostname) → isGoogleIP (по IP) →
 			//     bestForProtocol. Если hostname пуст — isGoogleIP всё равно сработает.
-			strat := p.strategyMgr.SelectStrategy(dstIP.String(), flow.Hostname, 443, "udp")
+			strat := p.strategyMgr.SelectStrategy(dstIP.String(), flowHostname, 443, "udp")
 			if strat != nil && strat.NeedsQUICFake() {
 				// Inject fake QUIC Initial только для первых пакетов handshake (#5).
 				// QUIC-соединение: 1-2 Initial пакета → handshake → тысячи data пакетов.
@@ -406,15 +412,14 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		if err == nil && info != nil {
 			if info.SNI != "" {
 				flow.SetHostname(info.SNI)
-				// Объединяем два последовательных Lock/Unlock в один (#7 в review).
-				// ВАЖНО: обнуляем DataPacketsModified — он использовался как
-				// analysis-attempt counter; теперь будет считать модифицированные пакеты.
+				flowHostname = info.SNI // обновляем локальную копию
 				flow.Mu.Lock()
 				flow.IsAnalyzed = true
 				flow.DataPacketsModified = 0
 				flow.Mu.Unlock()
 			} else if info.Host != "" {
 				flow.SetHostname(info.Host)
+				flowHostname = info.Host // обновляем локальную копию
 				flow.Mu.Lock()
 				flow.IsAnalyzed = true
 				flow.DataPacketsModified = 0
@@ -428,13 +433,12 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			}
 		}
 		// Отказываемся от анализа после 4 пакетов без результата.
-		// Читаем IsAnalyzed под Lock (уже могло стать true выше).
 		flow.Mu.Lock()
 		if !flow.IsAnalyzed {
-			flow.DataPacketsModified++ // временно: счётчик попыток анализа
+			flow.DataPacketsModified++
 			if flow.DataPacketsModified >= 4 {
 				flow.IsAnalyzed = true
-				flow.DataPacketsModified = 0 // сброс для реального использования ниже
+				flow.DataPacketsModified = 0
 			}
 		}
 		flow.Mu.Unlock()
@@ -457,7 +461,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// Always trust the fresh strategy selection — hostname-based routing takes priority over cache
 	strat := p.strategyMgr.SelectStrategy(
 		dstIP.String(),
-		flow.Hostname,
+		flowHostname,
 		int(dstPort),
 		"tcp",
 	)
@@ -551,7 +555,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		}
 
 		// Только здесь применяем модификации
-		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow)
+		result, err := p.pktModifier.ModifyPacket(pkt.Data, flow, strats)
 		if err != nil {
 			log.Printf("[STRATEGY] ModifyPacket error: %v, sending original", err)
 			p.sendPacket(pkt.Data, pkt.Addr)
@@ -847,8 +851,11 @@ func (p *Pipeline) resultProcessor() {
 
 			// Отправляем результат в менеджер стратегий для статистики
 			if p.strategyMgr != nil {
-				// Determine success before building the result struct
-				success := !(result.Delay > 500 || len(result.ModifiedPackets) == 0)
+				// BUG FIX: ранее len(result.ModifiedPackets)==0 считалось ошибкой,
+				// но это нормально когда стратегия вернула только SendOriginal=true.
+				// Такое ложное "failure" инвалидировало кэш без причины.
+				// Теперь: неудача только если задержка избыточно велика (>1с).
+				success := result.Delay <= 1000
 
 				strategyResult := &strategy.StrategyResult{
 					StrategyID:   result.StrategyID,

@@ -53,6 +53,11 @@ func NewPacketModifier(sm *strategy.Manager, ic *cache.IPCache) *PacketModifier 
 
 // ModifyPacket — главная функция модификации.
 //
+// strat — уже выбранная стратегия из pipeline.go (SelectStrategy вызван там).
+// Передаём готовую стратегию чтобы избежать повторного вызова SelectStrategy
+// внутри ModifyPacket: два независимых вызова могут вернуть разные стратегии
+// при гонке с Discovery → непредсказуемое поведение (#DoubleSelect).
+//
 // Приоритеты применения (аналог zapret):
 //  1. SynData    — применяется к SYN-пакетам, остальное пропускается
 //  2. Fake       — если Fooling != 0 или есть FakeTLSFiles, отправляем fake перед реальным
@@ -62,7 +67,7 @@ func NewPacketModifier(sm *strategy.Manager, ic *cache.IPCache) *PacketModifier 
 //  6. Disorder   — decoy + реальные сегменты
 //  7. Split      — только если ни один из 3-6 не активен
 //  8. TLSSplit   — только если Split не применился
-func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*ModifyResult, error) {
+func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, strat *strategy.Strategy) (*ModifyResult, error) {
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
 		return &ModifyResult{SendOriginal: true}, nil
 	}
@@ -77,9 +82,6 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow) (*Mo
 	isSYN := (flags & 0x02) != 0
 	isACK := (flags & 0x10) != 0
 
-	strat := pm.strategyManager.SelectStrategy(
-		flow.GetDstIP(), flow.Hostname, int(flow.GetDstPort()), "tcp",
-	)
 	if strat == nil || strat.ID == 1 {
 		return &ModifyResult{SendOriginal: true}, nil
 	}

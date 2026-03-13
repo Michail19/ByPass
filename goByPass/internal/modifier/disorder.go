@@ -109,12 +109,13 @@ func (pm *PacketModifier) ApplyDisorder(
 	}
 
 	// Реальный пакет — ПОЛНЫЙ оригинал с нормальным TTL.
-	// buildTCPSegments здесь не используется: split с overlap-байтами расширяет
-	// TCP-поток и ломает TLS-парсинг на сервере.
+	// buildTCPSegments НЕ используется: overlap-байты расширяют TCP-поток на 3 байта,
+	// сервер получает "0x16 0x16 0x03..." вместо валидного ClientHello → TLS Alert/RST.
+	// BUG FIX: ранее здесь ошибочно вызывался buildTCPSegments и результат добавлялся
+	// в results, а realPkt создавался но никогда не использовался (мёртвая переменная).
 	realPkt := make([]byte, len(packet))
 	copy(realPkt, packet)
-	realSegs := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
-	results = append(results, realSegs...)
+	results = append(results, realPkt)
 
 	return results, nil
 }
