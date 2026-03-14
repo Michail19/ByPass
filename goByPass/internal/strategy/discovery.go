@@ -1,16 +1,20 @@
 package strategy
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 // DiscoveryConfig конфигурация для автоподбора
@@ -36,18 +40,23 @@ type DiscoveryResult struct {
 	Timestamp      time.Time
 }
 
+type discoveryKey struct {
+	StrategyID int
+	Domain     string
+	Port       int
+}
+
 // Discovery управляет автоподбором стратегий
 type Discovery struct {
 	manager  *Manager
 	config   DiscoveryConfig
-	results  map[int]*DiscoveryResult
+	results  map[discoveryKey]*DiscoveryResult
 	mu       sync.RWMutex
 	running  bool
 	stopChan chan struct{}
-	// FIX #9: sync.Once гарантирует что stopChan закрывается ровно один раз.
-	// Было: close(stopChan) вызывался напрямую — повторный вызов Stop() паниковал.
 	stopOnce sync.Once
 	progress DiscoveryProgress
+	quicMu   sync.Mutex
 }
 
 // DiscoveryProgress прогресс автоподбора
@@ -84,7 +93,7 @@ func NewDiscovery(manager *Manager, config DiscoveryConfig) *Discovery {
 	return &Discovery{
 		manager:  manager,
 		config:   config,
-		results:  make(map[int]*DiscoveryResult),
+		results:  make(map[discoveryKey]*DiscoveryResult),
 		stopChan: make(chan struct{}),
 	}
 }
@@ -99,31 +108,31 @@ func (d *Discovery) Start() error {
 		return fmt.Errorf("discovery already running")
 	}
 	d.running = true
+
 	select {
 	case <-d.stopChan:
 		d.stopChan = make(chan struct{})
 		d.stopOnce = sync.Once{}
 	default:
 	}
+
+	d.results = make(map[discoveryKey]*DiscoveryResult)
+	d.progress = DiscoveryProgress{
+		StartTime: time.Now(),
+	}
+	atomic.StoreInt64(&d.progress.CompletedTests, 0)
+
 	d.manager.SetDiscoveryRunning(true)
-	d.progress.StartTime = time.Now()
 	d.mu.Unlock()
 
 	go d.runDiscovery()
-
 	return nil
 }
 
 // Stop останавливает автоподбор.
-// FIX #9: безопасен для многократного вызова благодаря sync.Once.
-// FIX race: d.running = false под d.mu.Lock() — синхронизировано с Start().
 func (d *Discovery) Stop() {
 	d.stopOnce.Do(func() {
 		close(d.stopChan)
-		d.mu.Lock()
-		d.running = false
-		d.manager.SetDiscoveryRunning(false)
-		d.mu.Unlock()
 	})
 }
 
@@ -137,7 +146,6 @@ func (d *Discovery) runDiscovery() {
 		d.mu.Lock()
 		d.running = false
 		d.mu.Unlock()
-
 		d.manager.SetDiscoveryRunning(false)
 	}()
 
@@ -145,20 +153,22 @@ func (d *Discovery) runDiscovery() {
 	domains := d.config.TestDomains
 	ports := d.config.TestPorts
 
+	d.mu.Lock()
 	d.progress.TotalTests = len(strategies) * len(domains) * len(ports)
+	d.mu.Unlock()
 
 	semaphore := make(chan struct{}, d.config.MaxConcurrent)
 	var wg sync.WaitGroup
 
 	for _, domain := range domains {
-		for _, port := range ports {
-			wg.Add(1)
-			semaphore <- struct{}{}
+		wg.Add(1)
+		semaphore <- struct{}{}
 
-			go func(domain string, port int) {
-				defer wg.Done()
-				defer func() { <-semaphore }()
+		go func(domain string) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
 
+			for _, port := range ports {
 				for _, strat := range strategies {
 					select {
 					case <-d.stopChan:
@@ -167,8 +177,8 @@ func (d *Discovery) runDiscovery() {
 					}
 					d.testStrategy(strat, domain, port)
 				}
-			}(domain, port)
-		}
+			}
+		}(domain)
 	}
 
 	wg.Wait()
@@ -188,18 +198,33 @@ func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 		Timestamp:  time.Now(),
 	}
 
+	isQUICProbe := port == 443 && (strat.ApplyToQUIC || strat.FakeQUICFile != "")
+	if isQUICProbe {
+		d.quicMu.Lock()
+		defer d.quicMu.Unlock()
+	}
+
 	d.manager.SetTestOverride(domain, strat.ID)
 	defer d.manager.ClearTestOverride(domain)
 
 	var resolvedIPs []string
-	if (strat.ApplyToQUIC || strat.FakeQUICFile != "") && shouldUseIPOverrideForDomain(domain) {
-		if addrs, err := net.LookupHost(domain); err == nil {
-			for _, addr := range addrs {
-				d.manager.SetTestOverrideByIP(addr, strat.ID)
-				resolvedIPs = append(resolvedIPs, addr)
-			}
-		} else {
-			log.Printf("[DISCOVERY] Warning: failed to resolve %s for QUIC override: %v", domain, err)
+	if isQUICProbe {
+		if !shouldUseIPOverrideForDomain(domain) {
+			log.Printf("[DISCOVERY] Skip QUIC strategy %d on %s: no reliable IP override mapping", strat.ID, domain)
+			atomic.AddInt64(&d.progress.CompletedTests, 1)
+			return
+		}
+
+		addrs, err := net.LookupHost(domain)
+		if err != nil || len(addrs) == 0 {
+			log.Printf("[DISCOVERY] Skip QUIC strategy %d on %s: resolve failed or returned no IPs: %v", strat.ID, domain, err)
+			atomic.AddInt64(&d.progress.CompletedTests, 1)
+			return
+		}
+
+		for _, addr := range addrs {
+			d.manager.SetTestOverrideByIP(addr, strat.ID)
+			resolvedIPs = append(resolvedIPs, addr)
 		}
 		defer func() {
 			for _, addr := range resolvedIPs {
@@ -211,17 +236,21 @@ func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 	log.Printf("[DISCOVERY] Testing strategy %d (%s) on %s:%d (QUIC IPs: %v)",
 		strat.ID, strat.Name, domain, port, resolvedIPs)
 
-	// FIX: обновляем CurrentDomain/Port для GetProgress() (#7 в review).
-	// Было: поля никогда не записывались → GetProgress() всегда возвращал пустые значения.
+	key := discoveryKey{StrategyID: strat.ID, Domain: domain, Port: port}
+
 	d.mu.Lock()
 	d.progress.CurrentDomain = domain
 	d.progress.CurrentPort = port
 	d.mu.Unlock()
 
-	// ── Warmup sample (не входит в статистику) ─────────────────────────────
-	_ = d.testConnection(domain, port) // просто прогреваем DNS/TCP/TLS
+	// warmup
+	if port == 443 && (strat.ApplyToQUIC || strat.FakeQUICFile != "") {
+		_ = d.testQUICConnection(domain, port)
+	} else {
+		_ = d.testConnection(domain, port)
+	}
 
-	// ── Основные SamplesPerTest с jitter ───────────────────────────────────
+	// Основные SamplesPerTest с jitter
 	for i := 0; i < d.config.SamplesPerTest; i++ {
 		// Jitter 0..50ms чтобы DPI не детектил паттерн
 		jitter := time.Duration(rand.Intn(51)) * time.Millisecond
@@ -234,7 +263,14 @@ func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 		}
 
 		start := time.Now()
-		err := d.testConnection(domain, port)
+
+		var err error
+		if port == 443 && (strat.ApplyToQUIC || strat.FakeQUICFile != "") {
+			err = d.testQUICConnection(domain, port)
+		} else {
+			err = d.testConnection(domain, port)
+		}
+
 		duration := time.Since(start)
 
 		result.Samples++
@@ -260,16 +296,39 @@ func (d *Discovery) testStrategy(strat *Strategy, domain string, port int) {
 
 	// Сохраняем только лучший результат для этой стратегии
 	d.mu.Lock()
-	if existing, ok := d.results[strat.ID]; ok {
-		if result.SuccessRate > existing.SuccessRate {
-			d.results[strat.ID] = result
-		}
-	} else {
-		d.results[strat.ID] = result
-	}
+	snapshot := *result
+	snapshot.Errors = append([]string(nil), result.Errors...)
+	d.results[key] = &snapshot
 	d.mu.Unlock()
 
 	atomic.AddInt64(&d.progress.CompletedTests, 1)
+}
+
+func (d *Discovery) testQUICConnection(domain string, port int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), d.config.TestTimeout)
+	defer cancel()
+
+	addr := net.JoinHostPort(domain, strconv.Itoa(port))
+
+	tlsConf := &tls.Config{
+		ServerName:         domain,
+		InsecureSkipVerify: true, // nolint:gosec // intentional for discovery
+		NextProtos:         []string{"h3", "h3-29", "h3-32"},
+	}
+
+	conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
+		HandshakeIdleTimeout: d.config.TestTimeout,
+		MaxIdleTimeout:       d.config.TestTimeout,
+		KeepAlivePeriod:      0,
+		EnableDatagrams:      true,
+	})
+	if err != nil {
+		return err
+	}
+	defer conn.CloseWithError(0, "discovery complete")
+
+	// Для parity с testConnection() достаточно успешного handshake.
+	return nil
 }
 
 // testConnection тестирует соединение с доменом
@@ -319,10 +378,15 @@ func (d *Discovery) GetResults() []*DiscoveryResult {
 
 	results := make([]*DiscoveryResult, 0, len(d.results))
 	for _, res := range d.results {
-		results = append(results, res)
+		cp := *res
+		cp.Errors = append([]string(nil), res.Errors...)
+		results = append(results, &cp)
 	}
 
 	sort.Slice(results, func(i, j int) bool {
+		if results[i].SuccessRate == results[j].SuccessRate {
+			return results[i].AvgResponse < results[j].AvgResponse
+		}
 		return results[i].SuccessRate > results[j].SuccessRate
 	})
 
@@ -332,13 +396,52 @@ func (d *Discovery) GetResults() []*DiscoveryResult {
 // GetBestStrategy возвращает лучший результат с SuccessRate >= MinSuccessRate.
 // Возвращает nil если подходящей стратегии ещё нет.
 func (d *Discovery) GetBestStrategy() *DiscoveryResult {
-	results := d.GetResults()
-	for _, res := range results {
-		if res.SuccessRate >= d.config.MinSuccessRate {
-			return res
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	type agg struct {
+		strategyID int
+		samples    int
+		successes  int
+		totalRTT   time.Duration
+	}
+	aggMap := map[int]*agg{}
+
+	for _, res := range d.results {
+		a := aggMap[res.StrategyID]
+		if a == nil {
+			a = &agg{strategyID: res.StrategyID}
+			aggMap[res.StrategyID] = a
+		}
+		a.samples += res.Samples
+		a.successes += res.SuccessSamples
+		if res.SuccessSamples > 0 {
+			a.totalRTT += res.AvgResponse * time.Duration(res.SuccessSamples)
 		}
 	}
-	return nil
+
+	var best *DiscoveryResult
+	for id, a := range aggMap {
+		if a.samples == 0 {
+			continue
+		}
+		sr := float64(a.successes) / float64(a.samples)
+		if sr < d.config.MinSuccessRate {
+			continue
+		}
+		candidate := &DiscoveryResult{
+			StrategyID:  id,
+			SuccessRate: sr,
+		}
+		if a.successes > 0 {
+			candidate.AvgResponse = a.totalRTT / time.Duration(a.successes)
+		}
+		if best == nil || candidate.SuccessRate > best.SuccessRate ||
+			(candidate.SuccessRate == best.SuccessRate && candidate.AvgResponse < best.AvgResponse) {
+			best = candidate
+		}
+	}
+	return best
 }
 
 // ApplyBestStrategy применяет лучшую найденную стратегию как активную
@@ -371,14 +474,18 @@ func (d *Discovery) GetProgress() DiscoveryProgress {
 }
 
 func shouldUseIPOverrideForDomain(domain string) bool {
-	d := strings.ToLower(strings.TrimSuffix(domain, "."))
+	return matchesDomain(domain, "youtube.com") ||
+		matchesDomain(domain, "youtube-nocookie.com") ||
+		matchesDomain(domain, "googlevideo.com") ||
+		matchesDomain(domain, "youtubei.googleapis.com") ||
+		matchesDomain(domain, "gvt1.com") ||
+		matchesDomain(domain, "gvt2.com") ||
+		matchesDomain(domain, "ytimg.com") ||
+		matchesDomain(domain, "youtu.be")
+}
 
-	return strings.Contains(d, "youtube.com") ||
-		strings.Contains(d, "youtube-nocookie.com") ||
-		strings.Contains(d, "googlevideo.com") ||
-		strings.Contains(d, "youtubei.googleapis.com") ||
-		strings.Contains(d, "gvt1.com") ||
-		strings.Contains(d, "gvt2.com") ||
-		strings.Contains(d, "ytimg.com") ||
-		strings.Contains(d, "youtu.be")
+func matchesDomain(domain, base string) bool {
+	d := strings.ToLower(strings.TrimSuffix(domain, "."))
+	b := strings.ToLower(strings.TrimSuffix(base, "."))
+	return d == b || strings.HasSuffix(d, "."+b)
 }

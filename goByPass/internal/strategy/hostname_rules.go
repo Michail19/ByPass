@@ -103,12 +103,15 @@ func (m *Manager) SetHostnameRules(rules []HostnameRule) {
 
 		if strings.HasPrefix(pat, "*.") {
 			cr.suffix = true
-			cr.suffixPat = pat[1:] // "*.youtube.com" → ".youtube.com"
+			cr.suffixPat = pat[1:]
 		} else {
 			cr.exact = true
+			if _, exists := m.hostnameRules.byExact[pat]; exists {
+				log.Printf("[HostnameRules] Duplicate exact rule %q ignored (first match wins)", pat)
+				continue
+			}
 			m.hostnameRules.byExact[pat] = sid
 		}
-
 		m.hostnameRules.rules = append(m.hostnameRules.rules, cr)
 
 		comment := ""

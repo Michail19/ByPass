@@ -53,6 +53,7 @@ type Manager struct {
 	rangesMu       sync.RWMutex
 	lastUpdateTime time.Time
 	updateErr      error
+	stopOnce       sync.Once
 
 	hostnameRules *hostnameRules
 
@@ -369,7 +370,9 @@ func (m *Manager) isGoogleIP(ipStr string) bool {
 
 // Stop останавливает менеджер
 func (m *Manager) Stop() {
-	close(m.closeChan)
+	m.stopOnce.Do(func() {
+		close(m.closeChan)
+	})
 }
 
 // AddStrategy добавляет стратегию.
@@ -665,7 +668,29 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 // Идея: direct-by-default.
 // Неизвестный сайт НЕ должен получать light/medium/hard автоматически.
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
-	// ── 0. Hostname Rules ────────────────────────────────────────────────────
+	// 0. Discovery override — абсолютный приоритет только во время discovery
+	if m.isDiscoveryRunning() {
+		m.testOverridesMu.RLock()
+		var overrideStratID int
+		var hasOverride bool
+		if hostname != "" {
+			overrideStratID, hasOverride = m.testOverrides[strings.ToLower(hostname)]
+		} else if protocol == "udp" {
+			overrideStratID, hasOverride = m.testOverrides["ip:"+ip]
+		}
+		m.testOverridesMu.RUnlock()
+
+		if hasOverride {
+			m.mu.RLock()
+			s := m.strategies[overrideStratID]
+			m.mu.RUnlock()
+			if s != nil {
+				return s
+			}
+		}
+	}
+
+	// 1. Hostname rules
 	if hostname != "" {
 		if s := m.hostnameRuleStrategy(hostname); s != nil {
 			return s
@@ -673,26 +698,22 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	} else if protocol == "udp" {
 		// QUIC без SNI: пробуем inferred hostname только для поддержки
 		// статических HostnameRules.
-		if inferredHostname := m.inferHostnameForIP(ip); inferredHostname != "" {
-			if s := m.hostnameRuleStrategy(inferredHostname); s != nil {
+		if inferred := m.inferHostnameForIP(ip); inferred != "" {
+			if s := m.hostnameRuleStrategy(inferred); s != nil {
 				return s
 			}
 		}
 	}
 
-	// ── 1. Test override ─────────────────────────────────────────────────────
+	// 2. Обычный test override, если он тебе вообще нужен вне discovery
 	m.testOverridesMu.RLock()
 	var overrideStratID int
 	var hasOverride bool
-
 	if hostname != "" {
 		overrideStratID, hasOverride = m.testOverrides[strings.ToLower(hostname)]
 	} else if protocol == "udp" {
-		// IP-based test override нужен только для QUIC:
-		// UDP/443 не несёт SNI, поэтому Discovery иначе не сможет тестировать fake QUIC.
 		overrideStratID, hasOverride = m.testOverrides["ip:"+ip]
 	}
-
 	m.testOverridesMu.RUnlock()
 
 	if hasOverride {
@@ -700,29 +721,11 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		s, exists := m.strategies[overrideStratID]
 		m.mu.RUnlock()
 		if exists {
-			log.Printf("[SELECT] TestOverride %s → strategy %d (%s)", labelFrom(ip, hostname), s.ID, s.Name)
 			return s
 		}
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	lowerHost := strings.ToLower(strings.TrimSuffix(hostname, "."))
-
-	// ── 2. Узкие builtin hostname mappings ───────────────────────────────────
-	if lowerHost != "" {
-		for _, rule := range builtinHostnameMappings {
-			if strings.Contains(lowerHost, rule.hostnameContains) {
-				if s := m.selectByHints(rule.strategyHints, protocol, port); s != nil {
-					log.Printf("[SELECT] Builtin hostname match %q → strategy %d (%s)", lowerHost, s.ID, s.Name)
-					return s
-				}
-			}
-		}
-	}
-
-	// ── 3. Google IP special-case ────────────────────────────────────────────
+	// 3. Google IP special-case
 	// Только когда hostname ещё не известен.
 	if hostname == "" && m.isGoogleIP(ip) {
 		if protocol == "udp" {
@@ -739,7 +742,7 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// ── 4. Direct-by-default ─────────────────────────────────────────────────
+	// 4. Direct-by-default
 	if ps := m.passthroughStrategy(); ps != nil {
 		if hostname != "" {
 			log.Printf("[SELECT] Direct-by-default hostname=%q ip=%s:%d → passthrough", hostname, ip, port)
@@ -1010,8 +1013,15 @@ func (m *Manager) GetStats() ManagerStats {
 
 	stats := m.stats
 	stats.TotalStrategies = len(m.strategies)
-	stats.ActiveStrategies = 1
-
+	if m.activeID > 0 {
+		if _, ok := m.strategies[m.activeID]; ok {
+			stats.ActiveStrategies = 1
+		} else {
+			stats.ActiveStrategies = 0
+		}
+	} else {
+		stats.ActiveStrategies = 0
+	}
 	return stats
 }
 
