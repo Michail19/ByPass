@@ -159,7 +159,7 @@ func (m *Manager) loadDefaultStrategies() {
 		ApplyToTLS:     true,
 		SplitMode:      SplitCustom,
 		SplitPositions: []int{1, 5},
-		SplitSNIOffset: true,
+		SplitSNIOffset: false,
 		Fooling:        FoolingTS,
 		FakeTTL:        6,
 		FakeRepeats:    6,

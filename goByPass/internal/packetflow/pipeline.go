@@ -615,10 +615,19 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		}
 
 		// Отправляем модифицированные
+		validModified := 0
+		sentModified := 0
+
 		if len(result.ModifiedPackets) > 0 {
 			for _, modPkt := range result.ModifiedPackets {
-				if len(modPkt) >= 20 && (modPkt[0]>>4 == 4) {
-					p.sendModifiedPacket(modPkt, pkt.Addr)
+				if len(modPkt) < 20 || (modPkt[0]>>4 != 4) {
+					continue
+				}
+
+				validModified++
+
+				if p.sendModifiedPacket(modPkt, pkt.Addr) {
+					sentModified++
 					p.updateStats(func(stats *PipelineStats) {
 						stats.PacketsModified++
 						stats.PacketsSent++
@@ -626,22 +635,46 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 				}
 			}
 
-			flow.Mu.Lock()
-			if attemptedAppDataMod {
-				flow.DataPacketsModified++
+			// Считаем пакет реально модифицированным только если ушли ВСЕ
+			// модифицированные части. Иначе flow state не трогаем — чтобы
+			// ретрансмит смог ещё раз попробовать bypass.
+			if validModified > 0 && sentModified == validModified {
+				flow.Mu.Lock()
+				if attemptedAppDataMod {
+					flow.DataPacketsModified++
+				}
+				if isClientHello {
+					flow.IsHandshakeModified = true
+				}
+				flow.Mu.Unlock()
 			}
-			if isClientHello {
-				flow.IsHandshakeModified = true
+
+			// Критический fallback:
+			// если стратегия заменяет оригинал (SendOriginal=false), но хотя бы
+			// одна модифицированная часть не отправилась — отправляем original,
+			// иначе трафик просто пропадёт.
+			if !result.SendOriginal && (validModified == 0 || sentModified < validModified) {
+				log.Printf(
+					"[STRATEGY] Modified send incomplete for strategy %d: sent=%d/%d, fallback to original",
+					strategyID, sentModified, validModified,
+				)
+
+				if p.sendPacket(pkt.Data, pkt.Addr) {
+					p.updateStats(func(stats *PipelineStats) {
+						stats.PacketsSent++
+					})
+				}
+				return
 			}
-			flow.Mu.Unlock()
 		}
 
 		// Отправляем оригинал (если нужно)
 		if result.SendOriginal {
-			p.sendPacket(pkt.Data, pkt.Addr)
-			p.updateStats(func(stats *PipelineStats) {
-				stats.PacketsSent++
-			})
+			if p.sendPacket(pkt.Data, pkt.Addr) {
+				p.updateStats(func(stats *PipelineStats) {
+					stats.PacketsSent++
+				})
+			}
 		}
 	} else {
 		p.sendPacket(pkt.Data, pkt.Addr)

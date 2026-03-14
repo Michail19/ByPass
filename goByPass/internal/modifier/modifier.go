@@ -173,6 +173,37 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	//     оригинал должен дойти до сервера.
 	var originalReplaced bool
 
+	// HTTP modifiers (hostcase / extra-space / dot-at-end)
+	isHTTPFlow := false
+	if flow != nil {
+		flow.Mu.RLock()
+		isHTTPFlow = flow.IsHTTP
+		flow.Mu.RUnlock()
+	}
+
+	if isHTTPFlow && strat.ApplyToHTTP && !isClientHello {
+		httpPayload := applyHTTPMods(packet[payloadOffset:], strat)
+		if httpPayload != nil {
+			httpPkt := rebuildPacketWithPayload(packet, ipHdrLen, tcpHdrLen, httpPayload)
+
+			// Для HTTP-стратегий тоже применяем обычный TCP split по payload,
+			// если он задан в профиле (light / medium и т.д.).
+			if strat.SplitMode != strategy.SplitNone && len(strat.SplitPositions) > 0 {
+				splitPkts, err := pm.ApplySplit(httpPkt, strat.SplitPositions, false)
+				if err == nil && len(splitPkts) > 0 {
+					packets = append(packets, splitPkts...)
+					pm.stats.SplitCount.Add(uint64(len(splitPkts)))
+					originalReplaced = true
+					goto finalize
+				}
+			}
+
+			packets = append(packets, httpPkt)
+			originalReplaced = true
+			goto finalize
+		}
+	}
+
 	if !isClientHello && !strat.AnyProtocol {
 		goto finalize
 	}
@@ -322,6 +353,132 @@ finalize:
 		//     DPI видит unmodified ORIGINAL и анализирует его вместо разрозненных частей.
 		SendOriginal: !originalReplaced,
 	}, nil
+}
+
+func rebuildPacketWithPayload(packet []byte, ipHdrLen, tcpHdrLen int, payload []byte) []byte {
+	payloadOffset := ipHdrLen + tcpHdrLen
+
+	newPkt := make([]byte, payloadOffset+len(payload))
+	copy(newPkt, packet[:payloadOffset])
+	copy(newPkt[payloadOffset:], payload)
+
+	binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
+	recalculateIPChecksum(newPkt)
+	FixTCPChecksum(newPkt)
+
+	return newPkt
+}
+
+func isHTTPRequestPayload(payload []byte) bool {
+	switch {
+	case bytes.HasPrefix(payload, []byte("GET ")),
+		bytes.HasPrefix(payload, []byte("POST ")),
+		bytes.HasPrefix(payload, []byte("HEAD ")),
+		bytes.HasPrefix(payload, []byte("PUT ")),
+		bytes.HasPrefix(payload, []byte("DELETE ")),
+		bytes.HasPrefix(payload, []byte("OPTIONS ")),
+		bytes.HasPrefix(payload, []byte("PATCH ")),
+		bytes.HasPrefix(payload, []byte("CONNECT ")),
+		bytes.HasPrefix(payload, []byte("TRACE ")):
+		return true
+	default:
+		return false
+	}
+}
+
+func applyHTTPMods(payload []byte, strat *strategy.Strategy) []byte {
+	hostCase := strat.HostCase ||
+		strat.HTTPModMode == strategy.HTTPModHostCase ||
+		strat.HTTPModMode == strategy.HTTPModAll
+
+	extraSpace := strat.ExtraSpace ||
+		strat.HTTPModMode == strategy.HTTPModExtraSpace ||
+		strat.HTTPModMode == strategy.HTTPModAll
+
+	dotAtEnd := strat.DotAtEnd ||
+		strat.HTTPModMode == strategy.HTTPModDotAtEnd ||
+		strat.HTTPModMode == strategy.HTTPModAll
+
+	if !hostCase && !extraSpace && !dotAtEnd {
+		return nil
+	}
+	if !isHTTPRequestPayload(payload) {
+		return nil
+	}
+
+	out := append([]byte(nil), payload...)
+	changed := false
+
+	// extra-space: "GET /" -> "GET  /"
+	if extraSpace {
+		if sp := bytes.IndexByte(out, ' '); sp > 0 {
+			if sp+1 < len(out) && out[sp+1] != ' ' {
+				tmp := make([]byte, 0, len(out)+1)
+				tmp = append(tmp, out[:sp+1]...)
+				tmp = append(tmp, ' ')
+				tmp = append(tmp, out[sp+1:]...)
+				out = tmp
+				changed = true
+			}
+		}
+	}
+
+	lower := bytes.ToLower(out)
+
+	hostIdx := bytes.Index(lower, []byte("\r\nhost:"))
+	if hostIdx >= 0 {
+		hostIdx += 2 // пропускаем \r\n
+	} else if bytes.HasPrefix(lower, []byte("host:")) {
+		hostIdx = 0
+	}
+
+	if hostIdx >= 0 {
+		lineEnd := hostIdx
+		for lineEnd < len(out) && out[lineEnd] != '\r' && out[lineEnd] != '\n' {
+			lineEnd++
+		}
+
+		line := out[hostIdx:lineEnd]
+		colon := bytes.IndexByte(line, ':')
+		if colon > 0 {
+			valueStart := hostIdx + colon + 1
+			for valueStart < lineEnd && out[valueStart] == ' ' {
+				valueStart++
+			}
+
+			hostValue := append([]byte(nil), out[valueStart:lineEnd]...)
+
+			if dotAtEnd && (len(hostValue) == 0 || hostValue[len(hostValue)-1] != '.') {
+				hostValue = append(hostValue, '.')
+				changed = true
+			}
+
+			headerName := []byte("Host")
+			if hostCase {
+				headerName = []byte("hOSt")
+				changed = true
+			}
+
+			newLine := make([]byte, 0, len(headerName)+2+len(hostValue))
+			newLine = append(newLine, headerName...)
+			newLine = append(newLine, ':', ' ')
+			newLine = append(newLine, hostValue...)
+
+			if !bytes.Equal(out[hostIdx:lineEnd], newLine) {
+				tmp := make([]byte, 0, len(out)-len(out[hostIdx:lineEnd])+len(newLine))
+				tmp = append(tmp, out[:hostIdx]...)
+				tmp = append(tmp, newLine...)
+				tmp = append(tmp, out[lineEnd:]...)
+				out = tmp
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+	return out
 }
 
 // selectFakeTLSPayload возвращает payload для fake-пакета с учётом всех режимов:
