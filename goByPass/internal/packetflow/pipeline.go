@@ -578,6 +578,32 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			len(pkt.Data) >= payloadOffset+6 &&
 			pkt.Data[payloadOffset] == 0x16
 
+		// Для TLS-only syndata профилей (например, yt-syndata-2026) не применяем
+		// SYN-data до тех пор, пока hostname/SNI ещё не известен.
+		//
+		// Идея:
+		//   - bare SYN отправляем как есть;
+		//   - первый ClientHello анализатор уже разберёт, выставит flowHostname;
+		//   - после этого та же стратегия сможет примениться уже по hostname.
+		//
+		// Это защищает от слишком раннего fake SYN на bare-IP Google/YouTube flow.
+		skipBareSynData := isSYN &&
+			flowHostname == "" &&
+			strats != nil &&
+			strats.SynData &&
+			strats.ApplyToTLS &&
+			!strats.ApplyToHTTP &&
+			!strats.AnyProtocol
+
+		if skipBareSynData {
+			log.Printf(
+				"[PIPELINE] Skip bare-IP SYN-data for strategy %d (%s) ip=%s:%d; waiting for SNI/Host",
+				strats.ID, strats.Name, dstIP.String(), dstPort,
+			)
+			p.sendPacket(pkt.Data, pkt.Addr)
+			return
+		}
+
 		packetTypeAllowed := strategyAllowsPacketType(strats, isSYN, isACK, isClientHello, isData)
 
 		// Для TLS-only стратегий модифицируем только SYN и ClientHello.

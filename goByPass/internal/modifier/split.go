@@ -231,9 +231,11 @@ func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte, ttl int) 
 	// Мы используем минимальный TLS-Alert (10 байт), который выглядит как валидный
 	// TLS-пакет для DPI, но является мусором для сервера → сервер игнорирует SYN+data.
 	if len(fakeData) == 0 {
-		// Minimal fake: TLS Alert (2,0) record — 10 bytes
-		// ContentType=21(Alert), Version=3.1, Length=2, Level=1, Desc=0
-		fakeData = []byte{0x15, 0x03, 0x01, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00}
+		// Более мягкий fallback, ближе к поведению zapret:
+		// минимальный 1-байтный payload вместо 10-байтного synthetic TLS alert.
+		// Это уменьшает шанс, что middlebox / server path негативно отреагирует
+		// именно на SYN+10B payload.
+		fakeData = []byte{0x00}
 	}
 
 	// TTL sanity: если 0 или не задан, используем zapret default

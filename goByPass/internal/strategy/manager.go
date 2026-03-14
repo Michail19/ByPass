@@ -700,22 +700,16 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	}
 
 	// ── 3. Google IP special-case ────────────────────────────────────────────
-	// Для hostname-less Google/YouTube трафика важен ПОРЯДОК предпочтения,
-	// а не просто минимальный Priority среди hints.
-	if m.isGoogleIP(ip) {
+	// Только когда hostname ещё не известен.
+	if hostname == "" && m.isGoogleIP(ip) {
 		if protocol == "udp" {
-			// Для QUIC сначала нужен специализированный quic-fake,
-			// потом уже fallback на youtube-подобные стратегии.
-			if s := m.selectByHintOrder([]string{"quic-fake", "yt-syndata", "youtube"}, protocol, port); s != nil {
+			if s := m.selectByHintOrder([]string{"quic-fake", "yt-multidisorder", "yt-syndata", "youtube"}, protocol, port); s != nil {
 				log.Printf("[SELECT] Google QUIC IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
 				return s
 			}
 		}
-
 		if protocol == "tcp" && port == 443 {
-			// Для раннего hostname-less YouTube TCP сначала пробуем ALT5/syndata,
-			// а legacy youtube оставляем fallback-ом.
-			if s := m.selectByHintOrder([]string{"yt-syndata", "youtube"}, protocol, port); s != nil {
+			if s := m.selectByHintOrder([]string{"yt-multidisorder", "yt-syndata", "youtube"}, protocol, port); s != nil {
 				log.Printf("[SELECT] Google TCP IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
 				return s
 			}

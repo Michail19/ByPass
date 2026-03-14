@@ -66,7 +66,7 @@ func (m *Manager) loadDefaultStrategies() {
 		ApplyToTLS:             true,
 		SplitMode:              SplitCustom,
 		SplitPositions:         []int{1, 3, 5},
-		SplitSNIOffset:         false, // важно: не оставлять true, пока align-SNI не реализован нормально
+		SplitSNIOffset:         true, // важно: не оставлять true, пока align-SNI не реализован нормально
 		DisorderMode:           DisorderOutOfBand,
 		DisorderPos:            []int{1},
 		DisorderTTL:            4,
@@ -201,6 +201,38 @@ func (m *Manager) loadDefaultStrategies() {
 		// держим выше medium/light, чтобы не лезла в обычный fallback
 		// и использовалась в основном через HostnameRules для YouTube
 		Priority:               40,
+		ModifyFirstDataPackets: 1,
+	})
+
+	// ── 27. yt-multidisorder-2026 — safe YouTube рабочий профиль ────────────
+	//
+	// Это "безопасный" вариант для автоприменения:
+	//   - без SynData
+	//   - только MultiDisorder на ClientHello
+	//   - QUIC fake остаётся
+	//
+	// Нужен потому, что pipeline.go сейчас специально пропускает bare SYN
+	// для TLS-only SynData-стратегий до появления SNI/hostname.
+	// Поэтому автоприменяемая стратегия с SynData в реальности исполняется
+	// не как "syndata+multidisorder", а как "multidisorder-only".
+	mustAdd(&Strategy{
+		ID:          27,
+		Name:        "yt-multidisorder-2026",
+		Description: "YouTube 2026 SAFE: multidisorder TCP + QUIC fake (без syndata)",
+		ApplyToHTTP: false,
+		ApplyToTLS:  true,
+		ApplyToQUIC: true,
+
+		SynData:       false,
+		MultiDisorder: true,
+		DisorderTTL:   4,
+		DisorderPos:   []int{1, 2, 3, 4, 5},
+
+		FakeQUICFile:    "quic_initial_www_google_com.bin",
+		FakeQUICRepeats: 6,
+		FakeTTL:         6,
+
+		Priority:               35,
 		ModifyFirstDataPackets: 1,
 	})
 
