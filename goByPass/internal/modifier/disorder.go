@@ -26,17 +26,18 @@ func (pm *PacketModifier) ApplyDisorder(
 	if len(disorderPos) == 0 {
 		return nil, nil
 	}
-	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
+
+	ipHdrLen, tcpHdrLen, payloadOffset, err := parseIPv4TCP(packet)
+	if err != nil {
 		return nil, nil
 	}
-
-	ipHdrLen := int(packet[0]&0x0F) * 4
-	tcpHdrLen := int(packet[ipHdrLen+12]>>4) * 4
-	payloadOffset := ipHdrLen + tcpHdrLen
+	
 	payloadLen := len(packet) - payloadOffset
 	if payloadLen <= 0 {
 		return nil, nil
 	}
+
+	_ = tcpHdrLen // если дальше не нужен, можно убрать переменную выше
 
 	// Dedup без map-аллокации (#10): sort + linear pass
 	var validPos []int
@@ -67,13 +68,16 @@ func (pm *PacketModifier) ApplyDisorder(
 		copy(oobPkt, packet)
 		binary.BigEndian.PutUint32(oobPkt[ipHdrLen+4:], originalSeq-512)
 		setIPTTL(oobPkt, ttl)
-		recalculateIPChecksum(oobPkt)
-		FixTCPChecksum(oobPkt)
+		if err := fixPacketChecksums(oobPkt); err != nil {
+			return nil, err
+		}
 		results = append(results, oobPkt)
 
 	case strategy.DisorderFakedDisorder:
-		// Fake-пакет перед реальными сегментами
-		fakePkts, _ := pm.ApplyFake(packet, ttl, fooling, badSeqIncrement, nil)
+		fakePkts, err := pm.ApplyFake(packet, ttl, fooling, badSeqIncrement, nil)
+		if err != nil {
+			return nil, err
+		}
 		results = append(results, fakePkts...)
 
 	default:
@@ -100,10 +104,12 @@ func (pm *PacketModifier) ApplyDisorder(
 			binary.BigEndian.PutUint16(decoy[2:4], uint16(segEnd))
 			binary.BigEndian.PutUint32(decoy[ipHdrLen+4:], originalSeq-32)
 			copy(decoy[payloadOffset:], packet[payloadOffset:segEnd])
+
 			// DF: сохраняем из оригинала — decoy скопирован из packet[:payloadOffset]
 			setIPTTL(decoy, ttl)
-			recalculateIPChecksum(decoy)
-			FixTCPChecksum(decoy)
+			if err := fixPacketChecksums(decoy); err != nil {
+				return nil, err
+			}
 			results = append(results, decoy)
 		}
 	}

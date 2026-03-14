@@ -26,16 +26,12 @@ func (pm *PacketModifier) ApplyFake(
 	badSeqIncrement int64,
 	fakePayload []byte,
 ) ([][]byte, error) {
-
-	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
-		return nil, fmt.Errorf("invalid packet")
+	ipHdrLen, tcpHdrLen, payloadOffset, err := parseIPv4TCP(packet)
+	if err != nil {
+		return nil, err
 	}
 
-	ipHdrLen := int(packet[0]&0x0F) * 4
 	tcpOffset := ipHdrLen
-	tcpHdrLen := int(packet[tcpOffset+12]>>4) * 4
-	payloadOffset := tcpOffset + tcpHdrLen
-
 	var fake []byte
 
 	if fakePayload != nil {
@@ -50,12 +46,15 @@ func (pm *PacketModifier) ApplyFake(
 		copy(fake, packet)
 	}
 
+	_ = tcpHdrLen // если дальше не нужен, можно убрать переменную выше
+
 	// FoolingBadSum: специальный путь — портим checksum и выходим сразу.
 	// FixTCPChecksum в конце НЕ вызываем — это сломало бы весь смысл.
 	if fooling&strategy.FoolingBadSum != 0 {
 		setIPTTL(fake, ttl)
-		recalculateIPChecksum(fake)
-		FixTCPChecksum(fake) // сначала считаем правильный
+		if err := FixTCPChecksum(fake); err != nil {
+			return nil, err
+		}
 
 		tcpHdr := ipHdrLen
 		checksum := tcpHdr + 16
@@ -76,9 +75,11 @@ func (pm *PacketModifier) ApplyFake(
 		binary.BigEndian.PutUint32(fake[tcpOffset+4:], seq)
 	}
 
-	//if fooling&strategy.FoolingDataNoAck != 0 {
-	//	fake[tcpOffset+13] &^= 0x10 // clear ACK
-	//}
+	// FoolingDataNoAck применяем только к fake-пакету.
+	// Реальный оригинал отправляется обычным путём и не трогаем его flags.
+	if fooling&strategy.FoolingDataNoAck != 0 {
+		clearTCPACK(fake)
+	}
 
 	if fooling&strategy.FoolingTS != 0 {
 		zeroTCPTimestamp(fake, ipHdrLen)
@@ -93,9 +94,9 @@ func (pm *PacketModifier) ApplyFake(
 	}
 
 	setIPTTL(fake, ttl)
-	recalculateIPChecksum(fake)
-	FixTCPChecksum(fake)
-
+	if err := fixPacketChecksums(fake); err != nil {
+		return nil, err
+	}
 	return [][]byte{fake}, nil
 }
 

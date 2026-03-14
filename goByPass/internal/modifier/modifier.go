@@ -68,16 +68,13 @@ func NewPacketModifier(sm *strategy.Manager, ic *cache.IPCache) *PacketModifier 
 //  7. Split      — только если ни один из 3-6 не активен
 //  8. TLSSplit   — только если Split не применился
 func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, strat *strategy.Strategy) (*ModifyResult, error) {
-	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
+	ipHdrLen, tcpHdrLen, payloadOffset, err := parseIPv4TCP(packet)
+	if err != nil {
 		return &ModifyResult{SendOriginal: true}, nil
 	}
 	pm.stats.PacketsProcessed.Add(1)
 
-	ipHdrLen := int(packet[0]&0x0F) * 4
-	tcpHdrLen := int(packet[ipHdrLen+12]>>4) * 4
-	payloadOffset := ipHdrLen + tcpHdrLen
 	payloadLen := len(packet) - payloadOffset
-
 	flags := packet[ipHdrLen+13]
 	isSYN := (flags & 0x02) != 0
 	isACK := (flags & 0x10) != 0
@@ -116,7 +113,11 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 			synTTL = strat.FakeTTL
 		}
 		synPkts, err := pm.ApplySynData(packet, synFakeData, synTTL)
-		if err == nil && len(synPkts) > 0 {
+		if err != nil {
+			pm.stats.Errors.Add(1)
+			return &ModifyResult{SendOriginal: true}, nil
+		}
+		if len(synPkts) > 0 {
 			// В synPkts теперь только fake SYN с низким TTL.
 			// Реальный SYN должен уйти обычным Send(), а не SendModified().
 			pm.stats.DisorderCount.Add(uint64(len(synPkts)))
@@ -139,8 +140,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 		len(strat.FakeTLSFilesData) > 0 ||
 		strat.FakeTLSNullBytes ||
 		strat.FakeTLSPrevPacket ||
-		strat.FakeTLSModSNI != "" ||
-		strat.FakeHTTPFileData != nil
+		strat.FakeTLSModSNI != ""
 
 	fakeRepeats := strat.FakeRepeats
 	if fakeRepeats <= 0 {
@@ -148,16 +148,17 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	}
 
 	// ── 2. Fake ───────────────────────────────────────────────────────────────
+	// Fake
 	if hasFooling && !strat.FakedSplit && (isClientHello || strat.AnyProtocol) {
 		for rep := 0; rep < fakeRepeats; rep++ {
 			fakePayload := pm.selectFakeTLSPayload(strat, rep, isClientHello, packet, ipHdrLen)
-			fakePkts, err := pm.ApplyFake(
-				packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload,
-			)
-			if err == nil {
-				packets = append(packets, fakePkts...)
-				pm.stats.FakeCount.Add(uint64(len(fakePkts)))
+			fakePkts, err := pm.ApplyFake(packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload)
+			if err != nil {
+				pm.stats.Errors.Add(1)
+				continue
 			}
+			packets = append(packets, fakePkts...)
+			pm.stats.FakeCount.Add(uint64(len(fakePkts)))
 		}
 	}
 
@@ -185,13 +186,19 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	if isHTTPFlow && strat.ApplyToHTTP && !isClientHello {
 		httpPayload := applyHTTPMods(packet[payloadOffset:], strat)
 		if httpPayload != nil {
-			httpPkt := rebuildPacketWithPayload(packet, ipHdrLen, tcpHdrLen, httpPayload)
+			httpPkt, err := rebuildPacketWithPayload(packet, ipHdrLen, tcpHdrLen, httpPayload)
+			if err != nil {
+				pm.stats.Errors.Add(1)
+				return &ModifyResult{SendOriginal: true}, nil
+			}
 
 			// Для HTTP-стратегий тоже применяем обычный TCP split по payload,
 			// если он задан в профиле (light / medium и т.д.).
 			if strat.SplitMode != strategy.SplitNone && len(strat.SplitPositions) > 0 {
 				splitPkts, err := pm.ApplySplit(httpPkt, strat.SplitPositions, false)
-				if err == nil && len(splitPkts) > 0 {
+				if err != nil {
+					pm.stats.Errors.Add(1)
+				} else if len(splitPkts) > 1 {
 					packets = append(packets, splitPkts...)
 					pm.stats.SplitCount.Add(uint64(len(splitPkts)))
 					originalReplaced = true
@@ -201,6 +208,30 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 
 			packets = append(packets, httpPkt)
 			originalReplaced = true
+			goto finalize
+		}
+	}
+
+	if isHTTPFlow && strat.FakeHTTPFileData != nil {
+		for rep := 0; rep < fakeRepeats; rep++ {
+			fakePkts, err := pm.ApplyFake(
+				packet,
+				strat.FakeTTL,
+				strat.Fooling,
+				strat.BadSeqIncrement,
+				strat.FakeHTTPFileData,
+			)
+			if err != nil {
+				pm.stats.Errors.Add(1)
+				continue
+			}
+			packets = append(packets, fakePkts...)
+			pm.stats.FakeCount.Add(uint64(len(fakePkts)))
+		}
+
+		// HTTP fake-пакеты — это decoy, оригинал должен уйти отдельно.
+		if len(packets) > 0 {
+			originalReplaced = false
 			goto finalize
 		}
 	}
@@ -225,6 +256,9 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 				return 6 // zapret default
 			}(),
 		)
+		if err != nil {
+			pm.stats.Errors.Add(1)
+		}
 		if err == nil && len(seqPkts) > 0 {
 			packets = append(packets, seqPkts...)
 			pm.stats.SplitCount.Add(uint64(len(seqPkts)))
@@ -248,6 +282,9 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 			strat.FakeTTL,
 			fakeTLSForFaked,
 		)
+		if err != nil {
+			pm.stats.Errors.Add(1)
+		}
 		if err == nil && len(fsPkts) > 0 {
 			// FakedSplit уже включает fake-пакеты, не дублируем из шага 2
 			// Заменяем packets (fake из шага 2 уже внутри ApplyFakedSplit)
@@ -274,6 +311,9 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 			packet, disorderPos, strat.DisorderTTL, strat.DisorderMode,
 			strat.Fooling, strat.BadSeqIncrement,
 		)
+		if err != nil {
+			pm.stats.Errors.Add(1)
+		}
 		if err == nil && len(dPkts) > 0 {
 			packets = append(packets, dPkts...)
 			pm.stats.DisorderCount.Add(uint64(len(dPkts)))
@@ -285,6 +325,9 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	// 7. HostFakeSplit (HTTP)
 	if strat.HostFakeSplit && flow != nil && flow.IsHTTP {
 		hfPkts, err := pm.ApplyHostFakeSplit(packet, strat)
+		if err != nil {
+			pm.stats.Errors.Add(1)
+		}
 		if err == nil && len(hfPkts) > 0 {
 			packets = append(packets, hfPkts...)
 			pm.stats.SplitCount.Add(uint64(len(hfPkts)))
@@ -299,33 +342,47 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	// 8. Split обычный
 	if strat.SplitMode != strategy.SplitNone && len(strat.SplitPositions) > 0 && isClientHello {
 		splitPkts, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
-		if err == nil && len(splitPkts) > 0 {
+		if err == nil && len(splitPkts) > 1 {
 			packets = append(packets, splitPkts...)
 			pm.stats.SplitCount.Add(uint64(len(splitPkts)))
-			originalReplaced = true // splitPkts — полная замена original
+			originalReplaced = true
 			goto finalize
+		}
+		if err != nil {
+			pm.stats.Errors.Add(1)
 		}
 	}
 
 	// 9. TLS record split — последний резерв
 	if strat.TLSRecordSplit && protocol.IsTLS(packet[payloadOffset:]) {
 		tlsFrag, err := pm.ApplyTLSSplit(packet[payloadOffset:], strat.TLSRecordSize)
+		if err != nil {
+			pm.stats.Errors.Add(1)
+		}
 		if err == nil && len(tlsFrag) > 1 {
 			seq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
+			addedTLS := 0
+
 			for _, frag := range tlsFrag {
 				newPkt := make([]byte, ipHdrLen+tcpHdrLen+len(frag))
 				copy(newPkt, packet[:payloadOffset])
 				binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
 				binary.BigEndian.PutUint32(newPkt[ipHdrLen+4:], seq)
 				copy(newPkt[payloadOffset:], frag)
-				// DF: не трогаем — newPkt скопирован из packet[:payloadOffset],
-				// packet[6] уже содержит оригинальные Flags+FragOffset (#6).
-				recalculateIPChecksum(newPkt)
-				FixTCPChecksum(newPkt)
+
+				if err := fixPacketChecksums(newPkt); err != nil {
+					pm.stats.Errors.Add(1)
+					continue
+				}
+
 				packets = append(packets, newPkt)
+				addedTLS++
 				seq += uint32(len(frag))
 			}
-			originalReplaced = true // TLS fragments покрывают весь payload
+
+			if addedTLS > 0 {
+				originalReplaced = true
+			}
 		}
 	}
 
@@ -362,7 +419,7 @@ finalize:
 	}, nil
 }
 
-func rebuildPacketWithPayload(packet []byte, ipHdrLen, tcpHdrLen int, payload []byte) []byte {
+func rebuildPacketWithPayload(packet []byte, ipHdrLen, tcpHdrLen int, payload []byte) ([]byte, error) {
 	payloadOffset := ipHdrLen + tcpHdrLen
 
 	newPkt := make([]byte, payloadOffset+len(payload))
@@ -370,10 +427,15 @@ func rebuildPacketWithPayload(packet []byte, ipHdrLen, tcpHdrLen int, payload []
 	copy(newPkt[payloadOffset:], payload)
 
 	binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
-	recalculateIPChecksum(newPkt)
-	FixTCPChecksum(newPkt)
+	if err := fixPacketChecksums(newPkt); err != nil {
+		return nil, err
+	}
+	return newPkt, nil
+}
 
-	return newPkt
+func fixPacketChecksums(packet []byte) error {
+	recalculateIPChecksum(packet)
+	return FixTCPChecksum(packet)
 }
 
 func isHTTPRequestPayload(payload []byte) bool {
@@ -530,10 +592,6 @@ func (pm *PacketModifier) selectFakeTLSPayload(
 		}
 	}
 
-	if strat.FakeHTTPFileData != nil && !isClientHello {
-		return strat.FakeHTTPFileData
-	}
-
 	return nil
 }
 
@@ -544,10 +602,10 @@ func (pm *PacketModifier) ApplyHostFakeSplit(packet []byte, strat *strategy.Stra
 		return nil, fmt.Errorf("hostfakesplit not configured")
 	}
 
-	ipHdrLen := int(packet[0]&0x0F) * 4
-	tcpHdrLen := int(packet[ipHdrLen+12]>>4) * 4
-	payloadOffset := ipHdrLen + tcpHdrLen
-
+	_, _, payloadOffset, err := parseIPv4TCP(packet)
+	if err != nil {
+		return nil, err
+	}
 	if payloadOffset >= len(packet) {
 		return nil, fmt.Errorf("no payload")
 	}
@@ -560,14 +618,7 @@ func (pm *PacketModifier) ApplyHostFakeSplit(packet []byte, strat *strategy.Stra
 		return nil, fmt.Errorf("host header not found")
 	}
 
-	fakePkts, err := pm.ApplyFake(packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload)
-	if err != nil {
-		return nil, err
-	}
-
-	// Реальный пакет должен уйти обычным Send() из pipeline,
-	// а не через SendModified().
-	return fakePkts, nil
+	return pm.ApplyFake(packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload)
 }
 
 // modifyClientHelloSNI заменяет SNI в TLS ClientHello.
@@ -710,23 +761,63 @@ func updateSNIExtensionLengths(data []byte, sniPos int, delta int) {
 // Поиск регистронезависимый через bytes.ToLower (#6 в review).
 func replaceHTTPHost(payload []byte, newHost string) []byte {
 	lower := bytes.ToLower(payload)
-	hostPrefix := []byte("host: ")
-	idx := bytes.Index(lower, hostPrefix)
-	if idx < 0 {
+
+	hostIdx := bytes.Index(lower, []byte("\r\nhost:"))
+	if hostIdx >= 0 {
+		hostIdx += 2
+	} else if bytes.HasPrefix(lower, []byte("host:")) {
+		hostIdx = 0
+	} else {
 		return nil
 	}
 
-	// Ищем конец строки заголовка
-	end := idx + len(hostPrefix)
-	for end < len(payload) && payload[end] != '\r' && payload[end] != '\n' {
-		end++
+	lineEnd := hostIdx
+	for lineEnd < len(payload) && payload[lineEnd] != '\r' && payload[lineEnd] != '\n' {
+		lineEnd++
 	}
 
-	result := make([]byte, 0, len(payload)+len(newHost))
-	result = append(result, payload[:idx]...)
-	result = append(result, []byte("Host: "+newHost)...)
-	result = append(result, payload[end:]...)
+	line := payload[hostIdx:lineEnd]
+	colon := bytes.IndexByte(line, ':')
+	if colon <= 0 {
+		return nil
+	}
+
+	newLine := []byte("Host: " + newHost)
+
+	result := make([]byte, 0, len(payload)-len(line)+len(newLine))
+	result = append(result, payload[:hostIdx]...)
+	result = append(result, newLine...)
+	result = append(result, payload[lineEnd:]...)
 	return result
+}
+
+func parseIPv4TCP(packet []byte) (ipHdrLen, tcpHdrLen, payloadOffset int, err error) {
+	if len(packet) < 40 {
+		return 0, 0, 0, fmt.Errorf("packet too short: %d", len(packet))
+	}
+	if packet[0]>>4 != 4 {
+		return 0, 0, 0, fmt.Errorf("not IPv4")
+	}
+	if packet[9] != 6 {
+		return 0, 0, 0, fmt.Errorf("not TCP")
+	}
+
+	ipHdrLen = int(packet[0]&0x0F) * 4
+	if ipHdrLen < 20 || ipHdrLen > 60 || len(packet) < ipHdrLen+20 {
+		return 0, 0, 0, fmt.Errorf("invalid IPv4 header length: %d", ipHdrLen)
+	}
+
+	tcpHdrLen = int(packet[ipHdrLen+12]>>4) * 4
+	if tcpHdrLen < 20 || tcpHdrLen > 60 {
+		return 0, 0, 0, fmt.Errorf("invalid TCP header length: %d", tcpHdrLen)
+	}
+
+	payloadOffset = ipHdrLen + tcpHdrLen
+	if payloadOffset > len(packet) {
+		return 0, 0, 0, fmt.Errorf("payload offset out of range: %d > %d", payloadOffset, len(packet))
+	}
+
+	return ipHdrLen, tcpHdrLen, payloadOffset, nil
 }
 
 // isClientHelloPacket — полноценная проверка TLS ClientHello.

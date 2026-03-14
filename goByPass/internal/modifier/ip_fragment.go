@@ -15,13 +15,6 @@ type IPFragment struct {
 
 // FragmentIPPacket разбивает IP-пакет на фрагменты (RFC 791)
 func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
-	// Add DF check
-	df := (packet[6] & 0x40) != 0
-	if df {
-		log.Printf("DF bit set, skipping fragmentation")
-		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
-	}
-
 	if len(packet) < 20 {
 		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
 	}
@@ -33,27 +26,31 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 
 	// Парсим оригинальный IP-заголовок
 	ihl := int(packet[0]&0x0F) * 4
-	if ihl < 20 {
-		log.Printf("WARNING: Invalid IP header length: %d", ihl)
+	if ihl < 20 || len(packet) < ihl {
+		return nil, fmt.Errorf("invalid IPv4 header length: ihl=%d, len=%d", ihl, len(packet))
+	}
+
+	// DF check — только после проверок длины
+	df := (packet[6] & 0x40) != 0
+	if df {
+		log.Printf("DF bit set, skipping fragmentation")
 		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
 	}
 
+	if mtu <= ihl {
+		return nil, fmt.Errorf("mtu too small for fragmentation: mtu=%d ihl=%d", mtu, ihl)
+	}
+
 	totalLen := int(binary.BigEndian.Uint16(packet[2:4]))
-	if totalLen != len(packet) {
-		log.Printf("WARNING: Packet length mismatch: header=%d, actual=%d", totalLen, len(packet))
-		// Исправляем длину в заголовке
-		binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	if totalLen <= 0 || totalLen > len(packet) {
 		totalLen = len(packet)
+		binary.BigEndian.PutUint16(packet[2:4], uint16(totalLen))
 	}
 
 	id := binary.BigEndian.Uint16(packet[4:6])
 
-	// Данные начинаются после заголовка
-	//flags := packet[6] >> 5
-
 	// Данные после заголовка
 	if totalLen <= ihl {
-		log.Printf("WARNING: No data in packet, totalLen=%d, ihl=%d", totalLen, ihl)
 		return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
 	}
 
@@ -63,7 +60,7 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 	// Максимальный размер данных во фрагменте (должен быть кратен 8)
 	maxDataSize := (mtu - ihl) & ^7
 	if maxDataSize <= 0 {
-		maxDataSize = 1400
+		return nil, fmt.Errorf("invalid fragment payload size: mtu=%d ihl=%d", mtu, ihl)
 	}
 
 	log.Printf("DEBUG: Fragmenting packet ID=%d, totalLen=%d, ihl=%d, dataLen=%d, maxDataSize=%d",
@@ -77,18 +74,22 @@ func FragmentIPPacket(packet []byte, mtu int) ([]*IPFragment, error) {
 	// и большинство серверов (особенно Cloudflare, Google) тихо дропают такие пакеты.
 	// zapret использует TCP segmentation, а не IP fragmentation.
 	// Если пакет содержит TLS — возвращаем как есть без фрагментации.
-	ipHeaderLen := int(packet[0]&0x0F) * 4
-	if len(packet) > ipHeaderLen+5 {
-		tcpHeaderOffset := ipHeaderLen
-		// Безопасная проверка: TCP-пакет с TLS payload (0x16 0x03 xx)
-		if packet[9] == 6 { // TCP
-			tcpHeaderLen := int(packet[tcpHeaderOffset+12]>>4) * 4
-			payloadOffset := ipHeaderLen + tcpHeaderLen
-			if len(packet) > payloadOffset+2 &&
-				packet[payloadOffset] >= 0x14 && packet[payloadOffset] <= 0x17 {
-				log.Printf("WARNING: Skipping IP fragmentation for TLS packet — use TCP split instead")
-				return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
-			}
+	ipHeaderLen := ihl
+	if packet[9] == 6 { // TCP
+		if len(packet) < ipHeaderLen+20 {
+			return nil, fmt.Errorf("packet too short for minimal TCP header: len=%d ihl=%d", len(packet), ipHeaderLen)
+		}
+
+		tcpHeaderLen := int(packet[ipHeaderLen+12]>>4) * 4
+		if tcpHeaderLen < 20 || len(packet) < ipHeaderLen+tcpHeaderLen {
+			return nil, fmt.Errorf("invalid TCP header length: tcp=%d len=%d", tcpHeaderLen, len(packet))
+		}
+
+		payloadOffset := ipHeaderLen + tcpHeaderLen
+		if len(packet) > payloadOffset+2 &&
+			packet[payloadOffset] >= 0x14 && packet[payloadOffset] <= 0x17 {
+			log.Printf("WARNING: Skipping IP fragmentation for TLS packet — use TCP split instead")
+			return []*IPFragment{{Data: packet, Offset: 0, MoreFragments: false}}, nil
 		}
 	}
 
