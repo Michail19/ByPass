@@ -71,6 +71,7 @@ var (
 	ErrInvalidPacket = errors.New("invalid packet")
 	ErrSendTimeout   = errors.New("send timeout")
 	ErrNotSupported  = errors.New("platform not supported")
+	ErrClosed        = errors.New("sender is closed")
 )
 
 // NewSender — заглушка, переопределяется в platform-specific файлах.

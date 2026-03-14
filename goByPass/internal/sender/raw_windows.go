@@ -31,12 +31,15 @@ type WinDivertHandle uintptr
 
 // RawSender отправляет пакеты через WinDivert (Windows)
 type RawSender struct {
+	mu        sync.RWMutex
 	handle    WinDivertHandle
 	cfg       Config
 	stats     SenderStats
 	dll       *syscall.DLL
+	ownDLL    bool
 	sendProc  *syscall.Proc
 	closeProc *syscall.Proc
+	closed    bool
 }
 
 // init регистрирует фабричную функцию для Windows
@@ -78,6 +81,7 @@ func newWindowsSender(cfg Config) (Sender, error) {
 		handle:    handle,
 		cfg:       cfg,
 		dll:       dll,
+		ownDLL:    true,
 		sendProc:  sendProc,
 		closeProc: closeProc,
 	}, nil
@@ -167,8 +171,14 @@ func (s *RawSender) sendInternal(packet []byte, addr []byte, clearChecksumFlags 
 		return fmt.Errorf("invalid WINDIVERT_ADDRESS (len=%d)", len(addr))
 	}
 
-	// Для модифицированных пакетов: сбросить offload флаги в копии addr.
-	// Оригинальный addr не трогаем — он может понадобиться для последующих sendPacket.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.closed || s.handle == 0 || s.sendProc == nil {
+		s.stats.PacketsFailed.Add(1)
+		return ErrClosed
+	}
+
 	sendAddr := addr
 	if clearChecksumFlags && len(addr) >= 11 {
 		addrCopy := make([]byte, len(addr))
@@ -202,15 +212,29 @@ func (s *RawSender) sendInternal(packet []byte, addr []byte, clearChecksumFlags 
 
 // SendWithDelay отправляет с задержкой
 func (s *RawSender) SendWithDelay(packet []byte, addr []byte, delay time.Duration) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return ErrClosed
+	}
+	s.mu.RUnlock()
+
 	pkt := make([]byte, len(packet))
 	copy(pkt, packet)
 
 	addrCopy := make([]byte, len(addr))
 	copy(addrCopy, addr)
 
+	if delay <= 0 {
+		return s.SendModified(pkt, addrCopy)
+	}
+
 	time.AfterFunc(delay, func() {
-		s.SendModified(pkt, addrCopy)
+		if err := s.SendModified(pkt, addrCopy); err != nil {
+			log.Printf("WARNING: delayed send failed: %v", err)
+		}
 	})
+
 	return nil
 }
 
@@ -221,6 +245,9 @@ func (s *RawSender) SendWithDelay(packet []byte, addr []byte, delay time.Duratio
 // Батч-отправка через один syscall в WinDivert невозможна (#3).
 // Используем цикл — overhead минимален, пакеты уходят без лишних аллокаций.
 func (s *RawSender) SendBatch(packets [][]byte, addr []byte) error {
+	if len(packets) == 0 {
+		return nil
+	}
 	for _, pkt := range packets {
 		if err := s.SendModified(pkt, addr); err != nil {
 			return err
@@ -232,7 +259,20 @@ func (s *RawSender) SendBatch(packets [][]byte, addr []byte) error {
 
 // Close закрывает WinDivert
 func (s *RawSender) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil
+	}
+
 	if s.handle != 0 {
+		if s.closeProc == nil {
+			s.closed = true
+			s.handle = 0
+			return ErrClosed
+		}
+
 		ret, _, _ := s.closeProc.Call(uintptr(s.handle))
 		if ret == 0 {
 			return fmt.Errorf("failed to close WinDivert handle")
@@ -240,8 +280,14 @@ func (s *RawSender) Close() error {
 		s.handle = 0
 	}
 
+	if s.ownDLL && s.dll != nil {
+		_ = s.dll.Release()
+	}
+
 	s.sendProc = nil
 	s.closeProc = nil
+	s.dll = nil
+	s.closed = true
 
 	return nil
 }
@@ -293,6 +339,7 @@ func newWindowsSenderWithHandle(handle uintptr, cfg Config) (Sender, error) {
 		handle:    WinDivertHandle(handle),
 		cfg:       cfg,
 		dll:       dll,
+		ownDLL:    false,
 		sendProc:  sendProc,
 		closeProc: closeProc,
 	}, nil
