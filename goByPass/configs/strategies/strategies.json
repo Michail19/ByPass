@@ -1,26 +1,5 @@
 [
   {
-    "_comment": "=== БАЗОВЫЕ (legacy, для тестов) ===",
-    "id": 1,
-    "name": "passthrough",
-    "description": "Без модификаций (пассивный режим для дебага)",
-    "apply_to_http": true,
-    "apply_to_tls": true,
-    "apply_to_quic": true,
-    "split_mode": 0,
-    "priority": 999999
-  },
-  {
-    "_comment": "=== QUIC / UDP 443 ===",
-    "id": 30,
-    "name": "quic-fake-6",
-    "description": "QUIC fake: 6 повторов quic_initial (ALT1-11, SIMPLE, FAKE TLS AUTO*)",
-    "apply_to_quic": true,
-    "fake_quic_file": "quic_initial_www_google_com.bin",
-    "fake_quic_repeats": 6,
-    "priority": 10
-  },
-  {
     "id": 31,
     "name": "quic-fake-11",
     "description": "QUIC fake: 11 повторов quic_initial (ALT11, FAKE TLS AUTO*)",
@@ -49,16 +28,6 @@
     "fake_repeats": 12,
     "cutoff": 2,
     "priority": 21
-  },
-  {
-    "id": 35,
-    "name": "game-udp-fake-14",
-    "description": "Game UDP: fake-unknown-udp x14, cutoff=n3 (ALT5)",
-    "any_protocol": true,
-    "fake_unknown_udp_file": "quic_initial_www_google_com.bin",
-    "fake_repeats": 14,
-    "cutoff": 3,
-    "priority": 22
   },
   {
     "_comment": "=== MULTISPLIT (seqovl только) ===",
@@ -380,31 +349,6 @@
     "fake_http_file": "tls_clienthello_max_ru.bin",
     "priority": 53,
     "fake_ttl": 6
-  },
-  {
-    "_comment": "=== SYNDATA / MULTIDISORDER ===",
-    "id": 60,
-    "name": "syndata-multidisorder",
-    "description": "syndata+multidisorder без файлов (ALT5 — для IPv4 TCP 80/443/...) НЕ РЕКОМЕНДУЕТСЯ",
-    "apply_to_http": true,
-    "apply_to_tls": true,
-    "syn_data": true,
-    "multi_disorder": true,
-    "priority": 60,
-    "disorder_ttl": 4
-  },
-  {
-    "id": 61,
-    "name": "syndata-multidisorder-anyprot",
-    "description": "syndata+multidisorder any_protocol cutoff=n4 (ALT5 game TCP)",
-    "apply_to_http": true,
-    "apply_to_tls": true,
-    "syn_data": true,
-    "multi_disorder": true,
-    "any_protocol": true,
-    "cutoff": 4,
-    "priority": 61,
-    "disorder_ttl": 4
   },
   {
     "id": 62,

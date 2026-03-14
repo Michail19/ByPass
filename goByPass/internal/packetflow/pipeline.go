@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -259,6 +260,40 @@ func isHandshakePacket(data []byte) bool {
 		return true
 	}
 	return false
+}
+
+func strategyAllowsPacketType(
+	s *strategy.Strategy,
+	isSYN bool,
+	isACK bool,
+	isClientHello bool,
+	isData bool,
+) bool {
+	if s == nil || len(s.ApplyToPacketTypes) == 0 {
+		return true
+	}
+
+	allowed := make(map[string]bool, len(s.ApplyToPacketTypes))
+	for _, t := range s.ApplyToPacketTypes {
+		allowed[strings.ToLower(strings.TrimSpace(t))] = true
+	}
+
+	// SYN / ClientHello считаем handshake-пакетами
+	if isSYN || isClientHello {
+		return allowed["handshake"] || allowed["syn"] || allowed["tls"]
+	}
+
+	// Чистый ACK без payload
+	if isACK && !isData {
+		return allowed["ack"]
+	}
+
+	// Data / appdata
+	if isData {
+		return allowed["data"] || allowed["appdata"] || allowed["payload"]
+	}
+
+	return true
 }
 
 func (p *Pipeline) hashPacketToWorker(data []byte) int {
@@ -535,44 +570,19 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 		flags := pkt.Data[tcpOffset+13]
 		isSYN := (flags & 0x02) != 0
-		//isACK := (flags & 0x10) != 0
+		isACK := (flags & 0x10) != 0
 		tcpHeaderLen := int(pkt.Data[tcpOffset+12]>>4) * 4
 		payloadOffset := tcpOffset + tcpHeaderLen
 		isData := len(pkt.Data) > payloadOffset
 		isClientHello := isData &&
-			len(pkt.Data) >= payloadOffset+6 && // need indices [+0..+5]
-			pkt.Data[payloadOffset] == 0x16 // ContentType: Handshake
-		//pkt.Data[payloadOffset+1] == 0x03 && // TLS major version
-		//pkt.Data[payloadOffset+5] == 0x01 // HandshakeType: ClientHello
+			len(pkt.Data) >= payloadOffset+6 &&
+			pkt.Data[payloadOffset] == 0x16
 
-		// applyMods определяет, нужно ли модифицировать этот пакет.
-		//
-		// ВАЖНО: !flow.IsHandshakeModified НАМЕРЕННО УБРАНО для ClientHello.
-		// Проблема (подтверждена захватом трафика):
-		//   1. ClientHello перехватывается → seqovl+split отправлен (IsHandshakeModified=true)
-		//   2. DPI всё равно блокирует → сервер не ACKает
-		//   3. Windows TCP stack ретрансмитит (тот же seq)
-		//   4. Ретрансмит: IsHandshakeModified==true → passthrough (баг!)
-		//   5. DPI видит чистый ClientHello → снова блокирует
-		//   6. ×7 повторов, 9 секунд, затем сервер присылает FIN
-		//
-		// Zapret применяет bypass к КАЖДОМУ пакету потока до cutoff — включая ретрансмиты.
-		// Каждый ретрансмит = новая попытка запутать DPI через seqovl/fake.
-		//
-		// IsHandshakeModified остаётся как tracking-флаг, но НЕ блокирует модификацию.
-		//
-		// FIX #1 — SYN + SynData:
-		// Было: isSYN никогда не учитывался → стратегии с SynData (ALT5) никогда
-		// не применялись к SYN-пакетам → syndata+multidisorder не работал совсем.
-		//
-		// FIX #2 — ModifyFirstDataPackets == 0:
-		// Было: flow.DataPacketsModified < 0 → всегда false → data-пакеты не
-		// модифицировались у стратегий без лимита (например yt-syndata-2026).
-		// ModifyFirstDataPackets == 0 означает "без ограничений" (весь поток).
-		// modifyAppData включаем только для HTTP/AnyProtocol стратегий.
-		// Для TLS-only стратегий (YouTube/Telegram) модифицируем только SYN и ClientHello.
+		packetTypeAllowed := strategyAllowsPacketType(strats, isSYN, isACK, isClientHello, isData)
+
+		// Для TLS-only стратегий модифицируем только SYN и ClientHello.
 		modifyAppData := false
-		if isData && !isClientHello {
+		if packetTypeAllowed && isData && !isClientHello {
 			if strats.AnyProtocol || strats.ApplyToHTTP {
 				modifyAppData = (strats.ModifyFirstDataPackets > 0 &&
 					flow.DataPacketsModified < strats.ModifyFirstDataPackets) ||
@@ -581,9 +591,10 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		}
 
 		attemptedAppDataMod := modifyAppData
-		applyMods := (isSYN && strats.SynData) ||
+
+		applyMods := packetTypeAllowed && ((isSYN && strats.SynData) ||
 			(isClientHello && strats.ApplyToTLS) ||
-			modifyAppData
+			modifyAppData)
 
 		if applyMods {
 			flow.Mu.Lock()

@@ -269,8 +269,6 @@ func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte, ttl int) 
 // Если validPos пуст — возвращает packet как есть.
 // DF flag: копируется из оригинального packet[6] через copy(newPkt, packet[:payloadOffset]) (#6).
 func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, validPos []int) [][]byte {
-	const overlapBytes = 3
-
 	payloadLen := len(packet) - payloadOffset
 	if payloadLen <= 0 {
 		return [][]byte{packet}
@@ -285,72 +283,31 @@ func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, val
 	chunks = append(chunks, packet[payloadOffset+prev:])
 
 	seq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
-	overlap := 0
-	if isClientHelloPacket(packet, payloadOffset, payloadLen) {
-		overlap = overlapBytes
-	}
-	var results [][]byte
+	results := make([][]byte, 0, len(chunks))
+
 	for i, seg := range chunks {
-		extra := 0
-		if i > 0 && overlap > 0 {
-			ov := overlap
-			if ov > len(chunks[i-1]) {
-				ov = len(chunks[i-1])
-			}
-			extra = ov
-		}
-
-		newPkt := make([]byte, payloadOffset+len(seg)+extra)
-
+		newPkt := make([]byte, payloadOffset+len(seg))
 		copy(newPkt, packet[:payloadOffset])
 
 		flags := packet[ipHdrLen+13]
-
 		if i != len(chunks)-1 {
-			flags &= ^byte(0x01) // FIN
-			flags &= ^byte(0x08) // PSH
+			flags &^= 0x01 // FIN
+			flags &^= 0x08 // PSH
 		}
-
-		newPkt[ipHdrLen+13] = flags // копирует packet[6] включая DF бит
+		newPkt[ipHdrLen+13] = flags
 
 		binary.BigEndian.PutUint16(newPkt[2:4], uint16(len(newPkt)))
 		binary.BigEndian.PutUint32(newPkt[ipHdrLen+4:], seq)
-		if i > 0 && overlap > 0 {
-			prev := chunks[i-1]
 
-			ov := overlap
-			if ov > len(prev) {
-				ov = len(prev)
-			}
+		copy(newPkt[payloadOffset:], seg)
 
-			overlapData := prev[len(prev)-ov:]
-
-			copy(newPkt[payloadOffset:], overlapData)
-			copy(newPkt[payloadOffset+ov:], seg)
-		} else {
-			copy(newPkt[payloadOffset:], seg)
-		}
-		// Не трогаем newPkt[6] — DF уже скопирован из оригинала (#6)
 		recalculateIPChecksum(newPkt)
 		FixTCPChecksum(newPkt)
+
 		results = append(results, newPkt)
-		advance := len(seg)
-
-		if i > 0 && overlap > 0 {
-			ov := overlap
-			if ov > len(chunks[i-1]) {
-				ov = len(chunks[i-1])
-			}
-
-			if advance > ov {
-				advance -= ov
-			} else {
-				advance = 0
-			}
-		}
-
-		seq += uint32(advance)
+		seq += uint32(len(seg))
 	}
+
 	return results
 }
 

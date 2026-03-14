@@ -461,21 +461,37 @@ func protocolMatches(s *Strategy, protocol string, port int) bool {
 	if s == nil {
 		return false
 	}
-	if s.AnyProtocol {
-		return true
-	}
 
 	switch protocol {
 	case "tcp":
-		return s.ApplyToTLS || s.ApplyToHTTP
+		// AnyProtocol разрешаем для TCP, но не используем это как "магическое совпадение"
+		// для всех UDP-профилей.
+		return s.AnyProtocol ||
+			s.ApplyToTLS ||
+			s.ApplyToHTTP ||
+			s.FakeHTTPFile != "" ||
+			s.HostFakeSplit ||
+			s.TLSRecordSplit
 	case "udp":
-		return port == 443 && (s.ApplyToQUIC || s.FakeQUICFile != "")
+		// QUIC/UDP443 или неизвестный UDP fake (игровые профили).
+		if s.AnyProtocol && (s.FakeUnknownUDPFile != "" || len(s.FakeUnknownUDPFileData) > 0) {
+			return true
+		}
+		if port == 443 && (s.ApplyToQUIC || s.FakeQUICFile != "" || len(s.FakeQUICFileData) > 0) {
+			return true
+		}
+		return s.FakeUnknownUDPFile != "" || len(s.FakeUnknownUDPFileData) > 0
 	}
+
 	return false
 }
 
 // isPassthrough возвращает true если стратегия не делает реальных модификаций.
 func isPassthrough(s *Strategy) bool {
+	if s == nil {
+		return true
+	}
+
 	return s.SplitMode == SplitNone &&
 		s.DisorderMode == DisorderNone &&
 		s.Fooling == 0 &&
@@ -484,7 +500,28 @@ func isPassthrough(s *Strategy) bool {
 		!s.FakedSplit &&
 		s.SeqOvlLen == 0 &&
 		len(s.FakeTLSFiles) == 0 &&
-		s.FakeQUICFile == ""
+		s.FakeHTTPFile == "" &&
+		s.FakeQUICFile == "" &&
+		s.FakeUnknownUDPFile == "" &&
+		!s.HostFakeSplit &&
+		s.HTTPModMode == HTTPModNone &&
+		!s.HostCase &&
+		!s.ExtraSpace &&
+		!s.DotAtEnd &&
+		!s.TLSRecordSplit &&
+		!s.IPIDZero
+}
+
+// selectByHintOrder ищет стратегии в заданном порядке hints.
+// Для каждого hint выбирается лучший кандидат по Priority/ID,
+// но между hints порядок ЖЁСТКИЙ: первый найденный hint выигрывает.
+func (m *Manager) selectByHintOrder(hints []string, protocol string, port int) *Strategy {
+	for _, hint := range hints {
+		if s := m.selectByHints([]string{hint}, protocol, port); s != nil {
+			return s
+		}
+	}
+	return nil
 }
 
 // passthroughStrategy возвращает strategy 1.
@@ -663,12 +700,25 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	}
 
 	// ── 3. Google IP special-case ────────────────────────────────────────────
-	// Только для hostname-less QUIC или редких случаев, когда hostname ещё не известен.
-	// Для обычных неизвестных Google-хостов теперь direct, а не youtube-bypass.
-	if m.isGoogleIP(ip) && protocol == "udp" {
-		if s := m.selectByHints([]string{"quic-fake", "yt-syndata", "youtube"}, protocol, port); s != nil {
-			log.Printf("[SELECT] Google QUIC IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
-			return s
+	// Для hostname-less Google/YouTube трафика важен ПОРЯДОК предпочтения,
+	// а не просто минимальный Priority среди hints.
+	if m.isGoogleIP(ip) {
+		if protocol == "udp" {
+			// Для QUIC сначала нужен специализированный quic-fake,
+			// потом уже fallback на youtube-подобные стратегии.
+			if s := m.selectByHintOrder([]string{"quic-fake", "yt-syndata", "youtube"}, protocol, port); s != nil {
+				log.Printf("[SELECT] Google QUIC IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
+				return s
+			}
+		}
+
+		if protocol == "tcp" && port == 443 {
+			// Для раннего hostname-less YouTube TCP сначала пробуем ALT5/syndata,
+			// а legacy youtube оставляем fallback-ом.
+			if s := m.selectByHintOrder([]string{"yt-syndata", "youtube"}, protocol, port); s != nil {
+				log.Printf("[SELECT] Google TCP IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
+				return s
+			}
 		}
 	}
 

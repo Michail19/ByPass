@@ -3,10 +3,7 @@ package strategy
 import "log"
 
 // loadDefaultStrategies загружает встроенные стратегии.
-// FIX #8: AddStrategy возвращает ошибку если ID уже занят.
-// Используем mustAdd — паникует при дублировании ID (ошибка программиста, не рантайм).
 func (m *Manager) loadDefaultStrategies() {
-
 	mustAdd := func(s *Strategy) {
 		if err := m.AddStrategy(s); err != nil {
 			log.Panicf("[Profiles] Failed to add built-in strategy id=%d name=%q: %v", s.ID, s.Name, err)
@@ -14,7 +11,6 @@ func (m *Manager) loadDefaultStrategies() {
 	}
 
 	// ── 1. Passthrough ────────────────────────────────────────────────────────
-	// Priority: 999999 — никогда не выбирается в fallback-цикле.
 	mustAdd(&Strategy{
 		ID:          1,
 		Name:        "passthrough",
@@ -62,10 +58,6 @@ func (m *Manager) loadDefaultStrategies() {
 	})
 
 	// ── 4. Hard — split + disorder OOB + fake TS ──────────────────────────────
-	//
-	// FIX: DisorderTTL=1 и FakeTTL=1 → decoy/fake умирают на первом hop'е,
-	// до DPI ТСПУ (2-3 hop) не доходят совсем → bypass не работает.
-	// TTL=4 доходит до DPI и умирает до сервера (6+ hop по pcap).
 	mustAdd(&Strategy{
 		ID:                     4,
 		Name:                   "hard",
@@ -74,18 +66,18 @@ func (m *Manager) loadDefaultStrategies() {
 		ApplyToTLS:             true,
 		SplitMode:              SplitCustom,
 		SplitPositions:         []int{1, 3, 5},
-		SplitSNIOffset:         true,
+		SplitSNIOffset:         false, // важно: не оставлять true, пока align-SNI не реализован нормально
 		DisorderMode:           DisorderOutOfBand,
 		DisorderPos:            []int{1},
-		DisorderTTL:            4, // FIX: было 1 → умирал на первом hop'е до DPI
+		DisorderTTL:            4,
 		Fooling:                FoolingTS,
-		FakeTTL:                4, // FIX: было 1
+		FakeTTL:                4,
 		FakeRepeats:            1,
 		Priority:               30,
 		ModifyFirstDataPackets: 4,
 	})
 
-	// ── 12. Telegram — split 1+5 + fake TS + TLS record split ─────────────────
+	// ── 12. Telegram ──────────────────────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:                     12,
 		Name:                   "telegram",
@@ -106,22 +98,11 @@ func (m *Manager) loadDefaultStrategies() {
 		ModifyFirstDataPackets: 1,
 	})
 
-	// ── 20. YouTube 2026 — multisplit seqovl=681 + fake TS + disorder OOB ─────
-	//
-	// FIX #priority: было Priority=1, конфликтовало с id=25 (тоже Priority=1).
-	// Итерация по Go map нестабильна → разные воркеры получали разные стратегии
-	// для одного IP → ipcache осциллировал 20↔25 каждые ~100ms (видно в логах).
-	// Теперь: id=20 Priority=5, id=25 Priority=4.
-	// Используется как fallback для Google IP без явного hostname rule.
-	//
-	// FIX DisorderTTL: было DisorderTTL=1 → OOB-decoy умирал на первом роутере
-	// (TTL=1 → ICMP Time Exceeded от первого hop'а, DPI не видит decoy совсем).
-	// DPI ТСПУ находится на 2-3 hop'е. TTL=4 гарантирует что decoy дойдёт до DPI,
-	// но умрёт до сервера (6 hop'ов от клиента по pcap capture817).
+	// ── 20. YouTube legacy/manual ─────────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          20,
 		Name:        "youtube-2026",
-		Description: "YouTube 2026: multisplit seqovl=681 + fake fooling=ts + disorder OOB",
+		Description: "YouTube legacy: seqovl + fake + disorder OOB",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
@@ -133,7 +114,7 @@ func (m *Manager) loadDefaultStrategies() {
 
 		DisorderMode: DisorderOutOfBand,
 		DisorderPos:  []int{1},
-		DisorderTTL:  4, // FIX: было 1 → умирало на первом роутере, не доходило до DPI
+		DisorderTTL:  4,
 
 		Fooling:     FoolingTS,
 		FakeTTL:     6,
@@ -146,11 +127,11 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICRepeats: 6,
 
 		ApplyToPacketTypes:     []string{"handshake", "ack"},
-		Priority:               25, // FIX: было 1
+		Priority:               35,
 		ModifyFirstDataPackets: 4,
 	})
 
-	// ── 21. Discord 2026 ───────────────────────────────────────────────────────
+	// ── 21. Discord ───────────────────────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:             21,
 		Name:           "discord-2026",
@@ -171,10 +152,7 @@ func (m *Manager) loadDefaultStrategies() {
 		Priority:       25,
 	})
 
-	// ── 25. yt-discord-2026-zapret — основной zapret-пресет 2026 ──────────────
-	//
-	// FIX #priority: было Priority=1, конфликтовало с id=20.
-	// Используется как fallback для Discord и других Google IP-адресов без hostname rule.
+	// ── 25. General zapret analog ─────────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          25,
 		Name:        "yt-discord-2026-zapret",
@@ -199,35 +177,15 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 
-		Priority:               25, // FIX: было 1
+		Priority:               25,
 		ModifyFirstDataPackets: 4,
 	})
 
-	// ── 26. yt-syndata-2026 — ALT5: syndata+multidisorder для YouTube TCP ──────
-	//
-	// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: анализ pcap (newcapture.pcapng) показал что ISP
-	// (ТСПУ) тихо дропает seqovl+fake (0 ответов сервера, 0 RST для YouTube),
-	// но пропускает syndata+multidisorder (ALT5 bat file).
-	//
-	// ALT5 bat file (TCP 80/443):
-	//   --dpi-desync=syndata,multidisorder --dpi-desync-ttl=4
-	// ALT5 bat file (UDP 443 / QUIC):
-	//   --dpi-desync=fake --dpi-desync-fake-quic=quic_initial_www_google_com.bin
-	//
-	// FIX Priority=99 (было 1):
-	// Priority=1 побеждал в fallback-цикле bestForProtocol → стратегия 26
-	// применялась ко ВСЕМ неизвестным хостам (87.250.250.119 Yandex,
-	// 46.229.243.178, 47.246.2.228 и др.) → multidisorder ломал их TLS.
-	// Стратегия 26 должна применяться ТОЛЬКО через HostnameRules (*.youtube.com
-	// и т.д.), а не через fallback. Priority=99 гарантирует что fallback
-	// выбирает "medium" (Priority=20), а не multidisorder.
-	//
-	// ModifyFirstDataPackets=0: 0 = без ограничений. multidisorder применяется
-	// ко всему потоку как в оригинальном ALT5 (без --dpi-desync-cutoff).
+	// ── 26. YouTube ALT5 ──────────────────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          26,
 		Name:        "yt-syndata-2026",
-		Description: "YouTube 2026 ALT5: syndata+multidisorder TCP + QUIC fake (limited)",
+		Description: "YouTube 2026 ALT5: syndata+multidisorder TCP + QUIC fake",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
@@ -240,19 +198,66 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICRepeats: 6,
 		FakeTTL:         6,
 
+		// держим выше medium/light, чтобы не лезла в обычный fallback
+		// и использовалась в основном через HostnameRules для YouTube
 		Priority:               40,
 		ModifyFirstDataPackets: 1,
 	})
 
-	// ── 60. syndata+multidisorder — агрессивный режим ──────────────────────────
+	// ── 30. QUIC fake x6 ──────────────────────────────────────────────────────
+	mustAdd(&Strategy{
+		ID:          30,
+		Name:        "quic-fake-6",
+		Description: "QUIC fake: 6 повторов quic_initial (ALT1-11 / SIMPLE / ALT5 UDP-ветка)",
+		ApplyToQUIC: true,
+
+		FakeQUICFile:    "quic_initial_www_google_com.bin",
+		FakeQUICRepeats: 6,
+
+		Priority: 10,
+	})
+
+	// ── 35. Game UDP fake x14 ────────────────────────────────────────────────
+	mustAdd(&Strategy{
+		ID:          35,
+		Name:        "game-udp-fake-14",
+		Description: "Game UDP: fake-unknown-udp x14, cutoff=n3 (ALT5)",
+		ApplyToQUIC: false,
+		AnyProtocol: true,
+
+		FakeUnknownUDPFile: "quic_initial_www_google_com.bin",
+		FakeRepeats:        14,
+		Cutoff:             3,
+
+		Priority: 22,
+	})
+
+	// ── 60. General TCP ALT5 ──────────────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:            60,
 		Name:          "syndata-multidisorder",
-		Description:   "syndata+multidisorder (агрессивный, НЕ РЕКОМЕНДУЕТСЯ — ALT5)",
+		Description:   "TCP ALT5: syndata+multidisorder",
 		ApplyToHTTP:   true,
 		ApplyToTLS:    true,
 		SynData:       true,
 		MultiDisorder: true,
+		DisorderTTL:   4,
 		Priority:      60,
+	})
+
+	// ── 61. Game TCP ALT5 ─────────────────────────────────────────────────────
+	mustAdd(&Strategy{
+		ID:                     61,
+		Name:                   "syndata-multidisorder-anyprot",
+		Description:            "Game TCP ALT5: syndata+multidisorder + any-protocol + cutoff=4",
+		ApplyToHTTP:            false,
+		ApplyToTLS:             false,
+		AnyProtocol:            true,
+		SynData:                true,
+		MultiDisorder:          true,
+		DisorderTTL:            4,
+		ModifyFirstDataPackets: 4,
+		Cutoff:                 4,
+		Priority:               61,
 	})
 }
