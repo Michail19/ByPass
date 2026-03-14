@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"log"
-	"strings"
 )
 
 // ProtocolType определяет тип протокола
@@ -71,12 +69,18 @@ func NewAnalyzer() *Analyzer {
 
 // Analyze анализирует пакет
 func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort uint16) (*ConnectionInfo, error) {
-	if len(packet) < 20 {
-		return nil, errors.New("packet too short")
-	}
-
 	info := &ConnectionInfo{
 		PayloadLen: len(packet),
+	}
+
+	proto, _, payload, err := parseIPv4Transport(packet)
+	if err != nil {
+		return info, nil
+	}
+	info.Protocol = proto
+
+	if len(payload) == 0 {
+		return info, nil
 	}
 
 	// Транспортный протокол
@@ -94,7 +98,6 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 		return info, nil
 	}
 
-	var payload []byte
 	if info.Protocol == ProtocolTCP {
 		tcpHeaderLen := int(packet[ipHeaderLen+12]>>4) * 4
 		if len(packet) < ipHeaderLen+tcpHeaderLen {
@@ -124,78 +127,54 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 
 	// Оптимизация: если не handshake — пропуск полного парсинга
 	if len(payload) >= 5 && payload[0] == 0x16 && payload[1] == 0x03 {
-		// TLS Handshake или Application Data
 		info.IsTLS = true
-		info.IsHandshake = len(payload) > 5 && payload[5] == 0x01
+		info.Protocol = ProtocolTLS
 
+		// Если есть только record header или record не несёт ClientHello —
+		// всё равно считаем это TLS, но не лезем в ClientHello-парсинг.
+		if len(payload) < 9 {
+			info.PossibleFragment = true
+			return info, nil
+		}
+
+		info.IsHandshake = payload[5] == 0x01
 		if !info.IsHandshake {
-			return info, nil // Не handshake — не парсим SNI/ECH и т.д.
+			return info, nil
 		}
 
-		if sni := extractSNI(payload); sni != "" {
-			info.SNI = sni
+		// Один путь парсинга вместо набора extract* helper'ов
+		if err := a.parseTLS(payload, info); err != nil {
+			// fail-open: протокол уже распознан как TLS
+			return info, nil
 		}
 
-		alpn := extractALPN(payload)
-		if len(alpn) > 0 {
-			info.ALPN = alpn
-		}
-
-		if hasECH(payload) {
-			info.IsECH = true
-		}
-
-		if len(payload) < 60 && info.IsHandshake {
-			// PossibleFragment: реальный TLS ClientHello ≥ 100-200 байт (extensions + session).
-			// Порог 150 (#3) был слишком велик — обычные ClientHello помечались как фрагменты.
-			// Порог 60 байт: payload короче 60 не может содержать полный ClientHello
-			// (version(2) + random(32) + session + ciphers + exts ≥ 60 байт minimum).
+		if len(payload) < 60 {
 			info.PossibleFragment = true
 		}
-	} else if isTLSFragment(payload) {
-		// Фрагментированный ClientHello (#1): первый пакет содержит только record header
-		// без HandshakeType byte, или TCP segmentation разбил ClientHello между пакетами.
-		//
-		// Пример:
-		//   packet1: 16 03 01 02 00   (TLS record header, recordLen=512)
-		//   packet2: 01 00 01 f4 ...  (HandshakeType=ClientHello + body)
-		//
-		// Старая проверка "payload[0]==0x16 && payload[1]==0x03" не ловила packet2.
-		// isTLSFragment: проверяет можно ли это быть началом TLS Handshake body.
-		//
-		// Для таких пакетов:
-		//   - IsTLS = true, IsHandshake = true (предположительно)
-		//   - SNI извлечь невозможно (нет record header) — hostname будет пустым
-		//   - pipeline применит bypass на основе flow.IsTLS уже установленного первым пакетом
+		return info, nil
+	}
+
+	if isTLSFragment(payload) {
 		info.IsTLS = true
 		info.IsHandshake = true
 		info.PossibleFragment = true
-	} else if bytes.HasPrefix(payload, []byte("GET ")) ||
-		bytes.HasPrefix(payload, []byte("POST ")) ||
-		bytes.HasPrefix(payload, []byte("HTTP/")) {
-		info.IsHTTP = true
+		info.Protocol = ProtocolTLS
+		return info, nil
+	}
 
-		if host := extractHTTPHost(payload); host != "" {
-			info.Host = host
-			log.Printf("[Analyzer] Extracted HTTP Host: %s", host)
+	if looksLikeHTTP(payload) {
+		info.Protocol = ProtocolHTTP
+		if err := a.parseHTTP(payload, info); err != nil {
+			return info, nil
 		}
-	} else if len(payload) >= 17 && (payload[0]&0xC0) == 0xC0 && dstPort == 443 {
-		// QUIC Long Header: top 2 bits = 11 → (byte & 0xC0) == 0xC0.
-		// Маска 0xF0 была неверной — она требовала bits[4..7]=0xC0, пропуская
-		// пакеты с type-specific bits != 0 (например, 0xD0, 0xE0, 0xFF).
-		//
-		// Минимальный размер QUIC Long Header (#2):
-		//   1 (flags) + 4 (version) + 1 (DCIL) + 1 (SCIL) + ... ≥ 17 байт.
-		//   Проверка len >= 5 давала false positives для DTLS, WireGuard, random UDP.
-		//
-		// Дополнительная проверка версии снижает false positives с DTLS и random UDP:
-		//   QUIC v1       = 0x00000001
-		//   QUIC v2       = 0x6b3343cf
-		//   QUIC grease   = 0x?a?a?a?a (нижний nibble каждого байта = 0xA)
+		return info, nil
+	}
+
+	if len(payload) >= 17 && proto == ProtocolUDP && (payload[0]&0xC0) == 0xC0 && dstPort == 443 {
 		version := binary.BigEndian.Uint32(payload[1:5])
 		isKnownQUIC := version == 0x00000001 ||
 			version == 0x6b3343cf ||
-			(version&0x0F0F0F0F == 0x0A0A0A0A) // grease pattern
+			(version&0x0F0F0F0F == 0x0A0A0A0A)
 		if isKnownQUIC {
 			info.IsQUIC = true
 			info.Protocol = ProtocolQUIC
@@ -203,88 +182,6 @@ func (a *Analyzer) Analyze(packet []byte, srcIP, dstIP string, srcPort, dstPort 
 	}
 
 	return info, nil
-}
-
-// extractSNI — надёжный парсер SNI из TLS ClientHello.
-// Все продвижения pos проверяются на выход за границы данных (#6).
-func extractSNI(data []byte) string {
-	if len(data) < 43 {
-		return ""
-	}
-	pos := 5
-	if data[pos] != 0x01 {
-		return ""
-	}
-	pos += 4  // handshake header
-	pos += 34 // version(2) + random(32)
-
-	if pos >= len(data) {
-		return ""
-	}
-	sessionLen := int(data[pos])
-	pos++
-	if pos+sessionLen > len(data) {
-		return ""
-	}
-	pos += sessionLen
-
-	if pos+2 > len(data) {
-		return ""
-	}
-	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
-	pos += 2
-	if pos+cipherLen > len(data) {
-		return ""
-	}
-	pos += cipherLen
-
-	if pos >= len(data) {
-		return ""
-	}
-	compLen := int(data[pos])
-	pos++
-	if pos+compLen > len(data) {
-		return ""
-	}
-	pos += compLen
-
-	if pos+2 > len(data) {
-		return ""
-	}
-	extLen := int(binary.BigEndian.Uint16(data[pos:]))
-	pos += 2
-	end := pos + extLen
-	if end > len(data) {
-		return ""
-	}
-
-	for pos+4 <= end {
-		extType := binary.BigEndian.Uint16(data[pos : pos+2])
-		extDataLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
-		pos += 4
-		if pos+extDataLen > end {
-			return "" // усечённое расширение
-		}
-
-		if extType == 0x0000 { // server_name
-			// listLen(2) + nameType(1) + nameLen(2) + name
-			if extDataLen < 5 {
-				return ""
-			}
-			nameType := data[pos+2]
-			if nameType != 0x00 {
-				return ""
-			}
-			nameLen := int(binary.BigEndian.Uint16(data[pos+3:]))
-			nameStart := pos + 5
-			if nameLen == 0 || nameStart+nameLen > end {
-				return ""
-			}
-			return string(data[nameStart : nameStart+nameLen])
-		}
-		pos += extDataLen
-	}
-	return ""
 }
 
 // hasECH — проверка наличия Encrypted Client Hello extension
@@ -351,111 +248,6 @@ func hasECH(data []byte) bool {
 	return false
 }
 
-// extractALPN — извлечение списка протоколов из ALPN extension (0x0010).
-//
-// Формат extension data:
-//
-//	alpnListLen(2) [ protoLen(1) proto(...) ]...
-func extractALPN(data []byte) []string {
-	if len(data) < 43 {
-		return nil
-	}
-	pos := 5
-	if data[pos] != 0x01 {
-		return nil
-	}
-	pos += 4
-	pos += 34
-	if pos >= len(data) {
-		return nil
-	}
-	sessionLen := int(data[pos])
-	pos++
-	if pos+sessionLen > len(data) {
-		return nil
-	}
-	pos += sessionLen
-
-	if pos+2 > len(data) {
-		return nil
-	}
-	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
-	pos += 2
-	if pos+cipherLen > len(data) {
-		return nil
-	}
-	pos += cipherLen
-
-	if pos >= len(data) {
-		return nil
-	}
-	compLen := int(data[pos])
-	pos++
-	if pos+compLen > len(data) {
-		return nil
-	}
-	pos += compLen
-
-	if pos+2 > len(data) {
-		return nil
-	}
-	extTotalLen := int(binary.BigEndian.Uint16(data[pos:]))
-	pos += 2
-	end := pos + extTotalLen
-	if end > len(data) {
-		return nil
-	}
-
-	for pos+4 <= end {
-		extType := binary.BigEndian.Uint16(data[pos : pos+2])
-		extDataLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
-		pos += 4
-		if pos+extDataLen > end {
-			return nil
-		}
-
-		if extType == 0x0010 { // ALPN
-			if extDataLen < 2 {
-				return nil
-			}
-			alpnListLen := int(binary.BigEndian.Uint16(data[pos:]))
-			alpnEnd := pos + 2 + alpnListLen
-			if alpnEnd > pos+extDataLen {
-				return nil
-			}
-			cur := pos + 2
-			var protos []string
-			for cur < alpnEnd {
-				protoLen := int(data[cur])
-				cur++
-				if protoLen == 0 || cur+protoLen > alpnEnd {
-					break
-				}
-				protos = append(protos, string(data[cur:cur+protoLen]))
-				cur += protoLen
-			}
-			return protos
-		}
-		pos += extDataLen
-	}
-	return nil
-}
-
-// extractHTTPHost — извлечение Host из HTTP
-func extractHTTPHost(data []byte) string {
-	lines := bytes.Split(data, []byte("\r\n"))
-	for _, line := range lines {
-		lower := bytes.ToLower(line)
-		if bytes.HasPrefix(lower, []byte("host:")) {
-			parts := bytes.SplitN(line, []byte(":"), 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(string(parts[1]))
-			}
-		}
-	}
-	return ""
-}
-
 // IsTLS — простая проверка
 func IsTLS(data []byte) bool {
 	return len(data) >= 5 && data[0] == 0x16 && data[1] == 0x03
@@ -487,4 +279,61 @@ func isTLSFragment(payload []byte) bool {
 	hsLen := int(payload[1])<<16 | int(payload[2])<<8 | int(payload[3])
 	// ClientHello body минимум ~38 байт, максимум ~16000 байт
 	return hsLen >= 38 && hsLen <= 16000
+}
+
+func parseIPv4Transport(packet []byte) (proto ProtocolType, ipHeaderLen int, payload []byte, err error) {
+	if len(packet) < 20 {
+		return ProtocolUnknown, 0, nil, errors.New("packet too short")
+	}
+	if packet[0]>>4 != 4 {
+		return ProtocolUnknown, 0, nil, errors.New("not IPv4")
+	}
+
+	ipHeaderLen = int(packet[0]&0x0F) * 4
+	if ipHeaderLen < 20 || ipHeaderLen > 60 || len(packet) < ipHeaderLen {
+		return ProtocolUnknown, 0, nil, errors.New("invalid IPv4 header length")
+	}
+
+	switch packet[9] {
+	case 6: // TCP
+		if len(packet) < ipHeaderLen+20 {
+			return ProtocolTCP, ipHeaderLen, nil, errors.New("truncated TCP header")
+		}
+		tcpHeaderLen := int(packet[ipHeaderLen+12]>>4) * 4
+		if tcpHeaderLen < 20 || tcpHeaderLen > 60 || len(packet) < ipHeaderLen+tcpHeaderLen {
+			return ProtocolTCP, ipHeaderLen, nil, errors.New("invalid TCP header length")
+		}
+		return ProtocolTCP, ipHeaderLen, packet[ipHeaderLen+tcpHeaderLen:], nil
+
+	case 17: // UDP
+		if len(packet) < ipHeaderLen+8 {
+			return ProtocolUDP, ipHeaderLen, nil, errors.New("truncated UDP header")
+		}
+		udpLen := int(binary.BigEndian.Uint16(packet[ipHeaderLen+4 : ipHeaderLen+6]))
+		if udpLen < 8 {
+			return ProtocolUDP, ipHeaderLen, nil, errors.New("invalid UDP length")
+		}
+		end := ipHeaderLen + udpLen
+		if end > len(packet) {
+			return ProtocolUDP, ipHeaderLen, nil, errors.New("truncated UDP payload")
+		}
+		return ProtocolUDP, ipHeaderLen, packet[ipHeaderLen+8 : end], nil
+
+	default:
+		return ProtocolUnknown, ipHeaderLen, nil, nil
+	}
+}
+
+func looksLikeHTTP(payload []byte) bool {
+	methods := [][]byte{
+		[]byte("GET "), []byte("POST "), []byte("HEAD "), []byte("PUT "),
+		[]byte("DELETE "), []byte("PATCH "), []byte("OPTIONS "),
+		[]byte("CONNECT "), []byte("TRACE "),
+	}
+	for _, m := range methods {
+		if bytes.HasPrefix(payload, m) {
+			return true
+		}
+	}
+	return bytes.HasPrefix(payload, []byte("HTTP/"))
 }

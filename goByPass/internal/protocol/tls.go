@@ -90,44 +90,82 @@ func (a *Analyzer) parseClientHello(data []byte, info *ConnectionInfo) error {
 	}
 
 	pos := 0
-	pos += 2  // version
-	pos += 32 // random
+
+	// version(2) + random(32)
+	if pos+34 > len(data) {
+		return fmt.Errorf("truncated version/random")
+	}
+	pos += 34
+
+	// session id
+	if pos >= len(data) {
+		return fmt.Errorf("truncated session id len")
+	}
 	sessionLen := int(data[pos])
-	pos += 1 + sessionLen
-	cipherLen := int(binary.BigEndian.Uint16(data[pos:]))
-	pos += 2 + cipherLen
-	compLen := int(data[pos])
-	pos += 1 + compLen
+	pos++
+	if pos+sessionLen > len(data) {
+		return fmt.Errorf("truncated session id")
+	}
+	pos += sessionLen
+
+	// cipher suites
 	if pos+2 > len(data) {
+		return fmt.Errorf("truncated cipher suites len")
+	}
+	cipherLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+	if cipherLen < 2 || pos+cipherLen > len(data) {
+		return fmt.Errorf("truncated cipher suites")
+	}
+	pos += cipherLen
+
+	// compression methods
+	if pos >= len(data) {
+		return fmt.Errorf("truncated compression len")
+	}
+	compLen := int(data[pos])
+	pos++
+	if pos+compLen > len(data) {
+		return fmt.Errorf("truncated compression methods")
+	}
+	pos += compLen
+
+	// extensions
+	if pos == len(data) {
 		return nil
 	}
-	extLen := int(binary.BigEndian.Uint16(data[pos:]))
+	if pos+2 > len(data) {
+		return fmt.Errorf("truncated extensions len")
+	}
+	extLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
 	pos += 2
 	end := pos + extLen
 	if end > len(data) {
 		return fmt.Errorf("extensions truncated")
 	}
+
 	for pos < end {
 		if pos+4 > end {
-			break
+			return fmt.Errorf("truncated extension header")
 		}
 		extType := binary.BigEndian.Uint16(data[pos : pos+2])
 		extDataLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
 		pos += 4
 		if pos+extDataLen > end {
-			break
+			return fmt.Errorf("truncated extension body")
 		}
-		if extType == 0x0000 { // SNI
+
+		switch extType {
+		case 0x0000:
 			a.parseSNI(data[pos:pos+extDataLen], info)
-		}
-		if extType == 0x0010 { // ALPN
+		case 0x0010:
 			a.parseALPN(data[pos:pos+extDataLen], info)
-		}
-		if extType == 0xfe0d { // ECH
+		case 0xfe0d:
 			info.IsECH = true
 		}
 		pos += extDataLen
 	}
+
 	return nil
 }
 
@@ -160,18 +198,24 @@ func (a *Analyzer) parseALPN(data []byte, info *ConnectionInfo) {
 		return
 	}
 
-	// ALPN содержит список протоколов
+	listLen := int(binary.BigEndian.Uint16(data[:2]))
+	if 2+listLen > len(data) {
+		return
+	}
+
 	pos := 2
+	end := 2 + listLen
 
-	for pos < len(data) && pos+1 < len(data) {
-		protoLen := int(data[pos])
-		pos += 1
-
-		if pos+protoLen <= len(data) {
-			proto := string(data[pos : pos+protoLen])
-			// Здесь можно сохранить ALPN протоколы
-			_ = proto
+	for pos < end {
+		if pos >= len(data) {
+			return
 		}
+		protoLen := int(data[pos])
+		pos++
+		if protoLen == 0 || pos+protoLen > end {
+			return
+		}
+		info.ALPN = append(info.ALPN, string(data[pos:pos+protoLen]))
 		pos += protoLen
 	}
 }
@@ -232,15 +276,24 @@ func FindSNI(data []byte) (int, error) {
 		extLen := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
 		pos += 4
 
-		if extType == 0x0000 { // SNI
-			// Возвращаем позицию начала имени
-			if pos+3 <= len(data) {
-				// пропускаем список длины и тип
-				sniPos := pos + 3
-				if sniPos < len(data) {
-					return sniPos, nil
-				}
+		if extType == 0x0000 {
+			if pos+5 > len(data) {
+				return -1, fmt.Errorf("truncated SNI extension")
 			}
+			listLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+			if listLen < 3 || pos+2+listLen > len(data) {
+				return -1, fmt.Errorf("invalid SNI list")
+			}
+			nameType := data[pos+2]
+			if nameType != 0x00 {
+				return -1, fmt.Errorf("unexpected SNI name type")
+			}
+			nameLen := int(binary.BigEndian.Uint16(data[pos+3 : pos+5]))
+			namePos := pos + 5
+			if nameLen == 0 || namePos+nameLen > len(data) {
+				return -1, fmt.Errorf("truncated SNI name")
+			}
+			return namePos, nil
 		}
 		pos += extLen
 	}
@@ -253,7 +306,7 @@ func CalculateJA3(data []byte, compute bool) (string, string) {
 	if !compute {
 		return "", ""
 	}
-	
+
 	if len(data) < 5 || data[0] != 0x16 {
 		return "", ""
 	}

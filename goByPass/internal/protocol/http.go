@@ -67,13 +67,13 @@ func (a *Analyzer) parseHTTPHeaders(data []byte, info *ConnectionInfo) {
 			continue
 		}
 
-		parts := bytes.SplitN(header, []byte(": "), 2)
-		if len(parts) != 2 {
+		colon := bytes.IndexByte(header, ':')
+		if colon <= 0 {
 			continue
 		}
 
-		key := strings.ToLower(string(parts[0]))
-		value := strings.TrimSpace(string(parts[1]))
+		key := strings.ToLower(string(header[:colon]))
+		value := strings.TrimSpace(string(header[colon+1:]))
 
 		switch key {
 		case "host":
@@ -90,11 +90,12 @@ func (a *Analyzer) parseHTTPHeaders(data []byte, info *ConnectionInfo) {
 func ExtractHost(data []byte) string {
 	lines := bytes.Split(data, []byte("\r\n"))
 	for _, line := range lines {
-		if bytes.HasPrefix(bytes.ToLower(line), []byte("host:")) {
-			parts := bytes.SplitN(line, []byte(":"), 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(string(parts[1]))
-			}
+		colon := bytes.IndexByte(line, ':')
+		if colon <= 0 {
+			continue
+		}
+		if strings.EqualFold(string(line[:colon]), "host") {
+			return strings.TrimSpace(string(line[colon+1:]))
 		}
 	}
 	return ""
