@@ -67,32 +67,26 @@ func NewDomainCache(ttl time.Duration, maxSize int) *DomainCache {
 
 // Get возвращает запись для домена
 func (c *DomainCache) Get(domain string) (*DomainCacheEntry, bool) {
-	c.mu.RLock()
-	entry, exists := c.entries[domain]
-	c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	entry, exists := c.entries[domain]
 	if !exists {
-		c.mu.Lock()
 		c.stats.Misses++
-		c.mu.Unlock()
 		return nil, false
 	}
 
 	now := time.Now()
 	if now.After(entry.ExpireAt) {
-		c.Delete(domain)
-		c.mu.Lock()
+		delete(c.entries, domain)
 		c.stats.Misses++
-		c.mu.Unlock()
 		return nil, false
 	}
 
-	c.mu.Lock()
-	entry.LastSeen = time.Now()
+	entry.LastSeen = now
 	c.stats.Hits++
-	c.mu.Unlock()
 
-	return &DomainCacheEntry{
+	cp := &DomainCacheEntry{
 		Domain:      entry.Domain,
 		IPs:         append([]net.IP(nil), entry.IPs...),
 		CNAME:       entry.CNAME,
@@ -101,7 +95,8 @@ func (c *DomainCache) Get(domain string) (*DomainCacheEntry, bool) {
 		ExpireAt:    entry.ExpireAt,
 		ResolveTime: entry.ResolveTime,
 		TTL:         entry.TTL,
-	}, true
+	}
+	return cp, true
 }
 
 // Resolve разрешает домен в IP (с кэшированием и таймаутом)
@@ -143,11 +138,20 @@ func (c *DomainCache) Put(domain string, ips []net.IP, cname string, resolveTime
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	now := time.Now()
+
+	if entry, exists := c.entries[domain]; exists {
+		entry.IPs = append([]net.IP(nil), ips...)
+		entry.CNAME = cname
+		entry.LastSeen = now
+		entry.ExpireAt = now.Add(c.ttl)
+		entry.ResolveTime = resolveTime
+		return
+	}
+
 	if len(c.entries) >= c.maxSize {
 		c.evictOldest()
 	}
-
-	now := time.Now()
 
 	c.entries[domain] = &DomainCacheEntry{
 		Domain:      domain,
@@ -166,6 +170,26 @@ func (c *DomainCache) PutWithTTL(domain string, ips []net.IP, cname string, ttl 
 	defer c.mu.Unlock()
 
 	now := time.Now()
+
+	if ttl <= 0 {
+		ttl = int(c.ttl / time.Second)
+		if ttl <= 0 {
+			ttl = 60
+		}
+	}
+
+	if entry, exists := c.entries[domain]; exists {
+		entry.IPs = append([]net.IP(nil), ips...)
+		entry.CNAME = cname
+		entry.LastSeen = now
+		entry.ExpireAt = now.Add(time.Duration(ttl) * time.Second)
+		entry.TTL = ttl
+		return
+	}
+
+	if len(c.entries) >= c.maxSize {
+		c.evictOldest()
+	}
 
 	c.entries[domain] = &DomainCacheEntry{
 		Domain:    domain,
@@ -261,8 +285,9 @@ func (c *DomainCache) GetStats() DomainCacheStats {
 // НЕ оборачивать в отдельную go-рутину снаружи: это double goroutine spawn.
 func (c *DomainCache) Preload(domains []string) error {
 	semaphore := make(chan struct{}, 5)
-
 	var wg sync.WaitGroup
+
+	errCh := make(chan error, len(domains))
 
 	for _, domain := range domains {
 		wg.Add(1)
@@ -271,10 +296,21 @@ func (c *DomainCache) Preload(domains []string) error {
 		go func(d string) {
 			defer wg.Done()
 			defer func() { <-semaphore }()
-			c.Resolve(d)
+
+			if _, err := c.Resolve(d); err != nil {
+				errCh <- err
+			}
 		}(domain)
 	}
 
 	wg.Wait()
-	return nil
+	close(errCh)
+
+	var firstErr error
+	for err := range errCh {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

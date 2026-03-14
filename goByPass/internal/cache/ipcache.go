@@ -92,24 +92,27 @@ func (c *IPCache) Stop() {
 
 // Get возвращает копию записи для IP
 func (c *IPCache) Get(ip string) (*IPCacheEntry, bool) {
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	entry, exists := c.entries[ip]
-	c.mu.RUnlock()
-
 	if !exists {
-		c.updateMisses()
+		c.stats.Misses++
 		return nil, false
 	}
 
-	if time.Now().After(entry.expireAt) {
-		c.Delete(ip)
-		c.updateExpired()
+	now := time.Now()
+	if now.After(entry.expireAt) {
+		delete(c.entries, ip)
+		c.stats.Expired++
 		return nil, false
 	}
 
-	c.updateHits(entry)
+	entry.Hits++
+	entry.LastSeen = now
+	c.stats.Hits++
 
-	return &IPCacheEntry{
+	cp := &IPCacheEntry{
 		IP:           entry.IP,
 		Hostname:     entry.Hostname,
 		ShouldBypass: entry.ShouldBypass,
@@ -119,7 +122,8 @@ func (c *IPCache) Get(ip string) (*IPCacheEntry, bool) {
 		LastSeen:     entry.LastSeen,
 		AvgLatency:   entry.AvgLatency,
 		PacketLoss:   entry.PacketLoss,
-	}, true
+	}
+	return cp, true
 }
 
 // GetByIP получает запись по net.IP
@@ -131,10 +135,6 @@ func (c *IPCache) GetByIP(ip net.IP) (*IPCacheEntry, bool) {
 func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if len(c.entries) >= c.maxSize {
-		c.evictOldest()
-	}
 
 	now := time.Now()
 
@@ -155,6 +155,10 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 
 		entry.expireAt = now.Add(c.ttl)
 		return
+	}
+
+	if len(c.entries) >= c.maxSize {
+		c.evictOldest()
 	}
 
 	c.entries[ip] = &internalEntry{
@@ -290,24 +294,5 @@ func (c *IPCache) GetStats() CacheStats {
 func (c *IPCache) Clear() {
 	c.mu.Lock()
 	c.entries = make(map[string]*internalEntry)
-	c.mu.Unlock()
-}
-
-func (c *IPCache) updateMisses() {
-	c.mu.Lock()
-	c.stats.Misses++
-	c.mu.Unlock()
-}
-
-func (c *IPCache) updateExpired() {
-	c.mu.Lock()
-	c.stats.Expired++
-	c.mu.Unlock()
-}
-
-func (c *IPCache) updateHits(entry *internalEntry) {
-	c.mu.Lock()
-	entry.Hits++
-	c.stats.Hits++
 	c.mu.Unlock()
 }
