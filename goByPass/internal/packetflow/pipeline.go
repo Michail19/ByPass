@@ -423,8 +423,12 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 					for i := 0; i < repeats; i++ {
 						fakePkt := buildFakeQUICPacket(pkt.Data, strat.FakeQUICFileData, fakeTTL)
 						if fakePkt != nil {
-							p.sendModifiedPacket(fakePkt, pkt.Addr)
-							p.updateStats(func(stats *PipelineStats) { stats.PacketsModified++ })
+							if p.sendModifiedPacket(fakePkt, pkt.Addr) {
+								p.updateStats(func(stats *PipelineStats) {
+									stats.PacketsModified++
+									stats.PacketsSent++
+								})
+							}
 						}
 					}
 				}
@@ -559,7 +563,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	}
 
 	if shouldBypass {
-		// Определить тип пакета (уже есть)
+		// До блока анализа вычисли эти признаки один раз
 		ipHeaderLen := int(pkt.Data[0]&0x0F) * 4
 		tcpOffset := ipHeaderLen
 
@@ -568,11 +572,59 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			return
 		}
 
+		tcpHeaderLen := int(pkt.Data[tcpOffset+12]>>4) * 4
+		payloadOffset := tcpOffset + tcpHeaderLen
+		hasPayload := len(pkt.Data) > payloadOffset
+
+		looksClientHello := hasPayload &&
+			len(pkt.Data) >= payloadOffset+6 &&
+			pkt.Data[payloadOffset] == 0x16 &&
+			pkt.Data[payloadOffset+1] == 0x03 &&
+			pkt.Data[payloadOffset+5] == 0x01
+
+		forceAnalyze := flowHostname == "" && looksClientHello
+
+		if !isAnalyzed || forceAnalyze {
+			info, err := p.analyzer.Analyze(pkt.Data, srcIP.String(), dstIP.String(), srcPort, dstPort)
+			if err == nil && info != nil {
+				if info.SNI != "" {
+					flow.SetHostname(info.SNI)
+					flowHostname = info.SNI
+					flow.Mu.Lock()
+					flow.IsAnalyzed = true
+					flow.DataPacketsModified = 0
+					flow.Mu.Unlock()
+				} else if info.Host != "" {
+					flow.SetHostname(info.Host)
+					flowHostname = info.Host
+					flow.Mu.Lock()
+					flow.IsAnalyzed = true
+					flow.DataPacketsModified = 0
+					flow.Mu.Unlock()
+				}
+				if info.IsTLS {
+					flow.SetTLS()
+				}
+				if info.IsHTTP {
+					flow.SetHTTP()
+				}
+			}
+
+			// Отказываемся от анализа только после 4 payload-пакетов без результата.
+			flow.Mu.Lock()
+			if !flow.IsAnalyzed && hasPayload {
+				flow.DataPacketsModified++
+				if flow.DataPacketsModified >= 4 && !looksClientHello {
+					flow.IsAnalyzed = true
+					flow.DataPacketsModified = 0
+				}
+			}
+			flow.Mu.Unlock()
+		}
+
 		flags := pkt.Data[tcpOffset+13]
 		isSYN := (flags & 0x02) != 0
 		isACK := (flags & 0x10) != 0
-		tcpHeaderLen := int(pkt.Data[tcpOffset+12]>>4) * 4
-		payloadOffset := tcpOffset + tcpHeaderLen
 		isData := len(pkt.Data) > payloadOffset
 		isClientHello := isData &&
 			len(pkt.Data) >= payloadOffset+6 &&
@@ -702,6 +754,17 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 					})
 				}
 				return
+			}
+		}
+
+		// Репортим итог применения стратегии в асинхронный resultProcessor.
+		if p.strategyMgr != nil && result.StrategyID != 0 {
+			result.Delay = int(time.Since(startTime).Milliseconds())
+
+			select {
+			case p.resultChan <- *result:
+			default:
+				log.Printf("[STRATEGY] resultChan full, dropping result for strategy %d", result.StrategyID)
 			}
 		}
 
@@ -965,7 +1028,7 @@ func (p *Pipeline) resultProcessor() {
 				// но это нормально когда стратегия вернула только SendOriginal=true.
 				// Такое ложное "failure" инвалидировало кэш без причины.
 				// Теперь: неудача только если задержка избыточно велика (>1с).
-				success := result.Delay <= 1000
+				success := (len(result.ModifiedPackets) > 0 || result.SendOriginal) && result.Delay <= 1000
 
 				strategyResult := &strategy.StrategyResult{
 					StrategyID:   result.StrategyID,

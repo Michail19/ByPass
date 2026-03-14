@@ -98,16 +98,39 @@ func NewManager() *Manager {
 
 	m.loadDefaultStrategies()
 
+	m.seedGoogleFallbackRanges()
+
 	go m.processResults()
-
 	go m.startGoogleIPUpdater()
-
-	// FIX #6: первичная загрузка в горутине, не блокируем конструктор.
-	// Было: m.updateGoogleIPRanges() синхронно — 3 retry × 20s = до 60с блокировки.
-	// Fallback-список применяется немедленно если HTTP недоступен.
 	go m.updateGoogleIPRanges()
 
 	return m
+}
+
+func (m *Manager) seedGoogleFallbackRanges() {
+	newRanges := make([]*net.IPNet, 0, len(fallbackRanges))
+	newIndex := make(map[byte][]*net.IPNet)
+
+	for _, cidr := range fallbackRanges {
+		_, netw, err := net.ParseCIDR(cidr)
+		if err != nil {
+			log.Printf("[GoogleIP] Invalid fallback CIDR %q: %v", cidr, err)
+			continue
+		}
+		newRanges = append(newRanges, netw)
+		if ip4 := netw.IP.To4(); ip4 != nil {
+			newIndex[ip4[0]] = append(newIndex[ip4[0]], netw)
+		}
+	}
+
+	m.rangesMu.Lock()
+	if len(m.googleRanges) == 0 && len(m.cidrIndex) == 0 {
+		m.googleRanges = newRanges
+		m.cidrIndex = newIndex
+		m.lastUpdateTime = time.Now()
+		log.Printf("[GoogleIP] Seeded %d fallback IPv4 ranges before async update", len(newRanges))
+	}
+	m.rangesMu.Unlock()
 }
 
 // SetDiscoveryRunning вызывается из Discovery.Start/Stop
@@ -703,13 +726,13 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	// Только когда hostname ещё не известен.
 	if hostname == "" && m.isGoogleIP(ip) {
 		if protocol == "udp" {
-			if s := m.selectByHintOrder([]string{"quic-fake", "yt-multidisorder", "yt-syndata", "youtube"}, protocol, port); s != nil {
+			if s := m.selectByHintOrder([]string{"quic-fake", "yt-discord", "yt-syndata", "youtube"}, protocol, port); s != nil {
 				log.Printf("[SELECT] Google QUIC IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
 				return s
 			}
 		}
 		if protocol == "tcp" && port == 443 {
-			if s := m.selectByHintOrder([]string{"yt-multidisorder", "yt-syndata", "youtube"}, protocol, port); s != nil {
+			if s := m.selectByHintOrder([]string{"yt-discord", "yt-syndata", "youtube"}, protocol, port); s != nil {
 				log.Printf("[SELECT] Google TCP IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
 				return s
 			}

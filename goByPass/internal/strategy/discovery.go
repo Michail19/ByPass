@@ -99,6 +99,12 @@ func (d *Discovery) Start() error {
 		return fmt.Errorf("discovery already running")
 	}
 	d.running = true
+	select {
+	case <-d.stopChan:
+		d.stopChan = make(chan struct{})
+		d.stopOnce = sync.Once{}
+	default:
+	}
 	d.manager.SetDiscoveryRunning(true)
 	d.progress.StartTime = time.Now()
 	d.mu.Unlock()
@@ -127,6 +133,14 @@ func (d *Discovery) Stop() {
 // параллельно, так как SetTestOverride перезаписывает глобальное состояние.
 // Разные домены тестируются параллельно (в пределах MaxConcurrent).
 func (d *Discovery) runDiscovery() {
+	defer func() {
+		d.mu.Lock()
+		d.running = false
+		d.mu.Unlock()
+
+		d.manager.SetDiscoveryRunning(false)
+	}()
+
 	strategies := d.manager.ListStrategies()
 	domains := d.config.TestDomains
 	ports := d.config.TestPorts
@@ -158,9 +172,6 @@ func (d *Discovery) runDiscovery() {
 	}
 
 	wg.Wait()
-	d.mu.Lock()
-	d.running = false
-	d.mu.Unlock()
 }
 
 // testStrategy тестирует стратегию на одном домене.

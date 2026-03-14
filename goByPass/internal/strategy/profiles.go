@@ -66,7 +66,7 @@ func (m *Manager) loadDefaultStrategies() {
 		ApplyToTLS:             true,
 		SplitMode:              SplitCustom,
 		SplitPositions:         []int{1, 3, 5},
-		SplitSNIOffset:         true, // важно: не оставлять true, пока align-SNI не реализован нормально
+		SplitSNIOffset:         false, // важно: не оставлять true, пока align-SNI не реализован нормально
 		DisorderMode:           DisorderOutOfBand,
 		DisorderPos:            []int{1},
 		DisorderTTL:            4,
@@ -126,30 +126,39 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 
-		ApplyToPacketTypes:     []string{"handshake", "ack"},
+		ApplyToPacketTypes:     []string{"handshake"},
 		Priority:               35,
 		ModifyFirstDataPackets: 4,
 	})
 
 	// ── 21. Discord ───────────────────────────────────────────────────────────
 	mustAdd(&Strategy{
-		ID:             21,
-		Name:           "discord-2026",
-		Description:    "Discord: split 1+5 + fake fooling=ts + TLS record split",
-		ApplyToHTTP:    false,
-		ApplyToTLS:     true,
-		SplitMode:      SplitCustom,
-		SplitPositions: []int{1, 5},
-		SplitSNIOffset: false,
-		Fooling:        FoolingTS,
-		FakeTTL:        6,
-		FakeRepeats:    6,
-		FakeTLSFiles:   []string{"tls_clienthello_www_google_com.bin"},
-		HTTPModMode:    HTTPModHostCase,
-		HostCase:       true,
-		TLSRecordSplit: true,
-		TLSRecordSize:  128,
-		Priority:       25,
+		ID:          21,
+		Name:        "discord-2026",
+		Description: "Discord: seqovl + fake TS x6 + QUIC fake (zapret-like)",
+		ApplyToHTTP: false,
+		ApplyToTLS:  true,
+		ApplyToQUIC: true,
+
+		SplitMode:         SplitSeqOvl,
+		SplitPositions:    []int{1},
+		SeqOvlLen:         681,
+		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
+
+		Fooling:     FoolingTS,
+		FakeTTL:     6,
+		FakeRepeats: 6,
+		FakeTLSFiles: []string{
+			"stun.bin",
+			"tls_clienthello_www_google_com.bin",
+		},
+
+		FakeQUICFile:    "quic_initial_www_google_com.bin",
+		FakeQUICRepeats: 6,
+
+		ApplyToPacketTypes:     []string{"handshake"},
+		Priority:               25,
+		ModifyFirstDataPackets: 1,
 	})
 
 	// ── 25. General zapret analog ─────────────────────────────────────────────
@@ -218,7 +227,7 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          27,
 		Name:        "yt-multidisorder-2026",
-		Description: "YouTube 2026 SAFE: multidisorder TCP + QUIC fake (без syndata)",
+		Description: "YouTube 2026 SAFE: multidisorder TCP + QUIC fake (handshake-only, no syndata)",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
@@ -232,6 +241,7 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICRepeats: 6,
 		FakeTTL:         6,
 
+		ApplyToPacketTypes:     []string{"handshake"},
 		Priority:               35,
 		ModifyFirstDataPackets: 1,
 	})

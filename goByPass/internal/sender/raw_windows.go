@@ -251,19 +251,20 @@ func (s *RawSender) GetStats() SenderStatsSnapshot {
 	return s.stats.Snapshot()
 }
 
-// loadWinDivertDLL - загрузка DDL
+// loadWinDivertDLL - загрузка DLL
 func loadWinDivertDLL() (*syscall.DLL, error) {
-	var err error
-
 	once.Do(func() {
 		winDivertDLL, winDivertDLLErr = syscall.LoadDLL("WinDivert.dll")
 	})
 
+	if winDivertDLLErr != nil {
+		return nil, winDivertDLLErr
+	}
 	if winDivertDLL == nil {
-		return nil, err
+		return nil, fmt.Errorf("WinDivert.dll loaded nil DLL without explicit error")
 	}
 
-	return winDivertDLL, winDivertDLLErr
+	return winDivertDLL, nil
 }
 
 // newWindowsSenderWithHandle создает с handle

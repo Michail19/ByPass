@@ -149,7 +149,7 @@ func (pm *PacketModifier) ApplyFakedSplit(
 ) ([][]byte, error) {
 
 	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 {
-		return [][]byte{packet}, nil
+		return nil, nil
 	}
 
 	ipHdrLen := int(packet[0]&0x0F) * 4
@@ -157,7 +157,7 @@ func (pm *PacketModifier) ApplyFakedSplit(
 	payloadOffset := ipHdrLen + tcpHdrLen
 	payloadLen := len(packet) - payloadOffset
 	if payloadLen <= 0 {
-		return [][]byte{packet}, nil
+		return nil, nil
 	}
 
 	var results [][]byte
@@ -177,13 +177,17 @@ func (pm *PacketModifier) ApplyFakedSplit(
 		results = append(results, fakePkts...)
 	}
 
-	// Реальные сегменты
-	if splitPos > 0 && splitPos < payloadLen {
-		segs := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, []int{splitPos})
-		results = append(results, segs...)
-	} else {
-		results = append(results, packet)
+	// Если splitPos плохой, но payload длиннее 1 байта — делаем безопасный fallback на split=1.
+	// Если payload совсем короткий — остаёмся в fake-only режиме, а оригинал отправит pipeline.
+	if splitPos <= 0 || splitPos >= payloadLen {
+		if payloadLen <= 1 {
+			return results, nil
+		}
+		splitPos = 1
 	}
+
+	segs := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, []int{splitPos})
+	results = append(results, segs...)
 
 	return results, nil
 }
@@ -264,7 +268,7 @@ func (pm *PacketModifier) ApplySynData(packet []byte, fakeData []byte, ttl int) 
 	recalculateIPChecksum(synPkt)
 	FixTCPChecksum(synPkt)
 
-	return [][]byte{synPkt, packet}, nil
+	return [][]byte{synPkt}, nil
 }
 
 // buildTCPSegments разбивает packet на TCP-сегменты по validPos (уже отсортированным).

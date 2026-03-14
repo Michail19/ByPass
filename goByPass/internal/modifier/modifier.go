@@ -117,13 +117,14 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 		}
 		synPkts, err := pm.ApplySynData(packet, synFakeData, synTTL)
 		if err == nil && len(synPkts) > 0 {
-			// synPkts уже включает оригинальный SYN как последний элемент
+			// В synPkts теперь только fake SYN с низким TTL.
+			// Реальный SYN должен уйти обычным Send(), а не SendModified().
 			pm.stats.DisorderCount.Add(uint64(len(synPkts)))
 			pm.stats.PacketsModified.Add(uint64(len(synPkts)))
 			return &ModifyResult{
 				StrategyID:      strat.ID,
 				ModifiedPackets: synPkts,
-				SendOriginal:    false,
+				SendOriginal:    true,
 			}, nil
 		}
 		return &ModifyResult{SendOriginal: true}, nil
@@ -252,7 +253,10 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 			// Заменяем packets (fake из шага 2 уже внутри ApplyFakedSplit)
 			packets = fsPkts
 			pm.stats.SplitCount.Add(uint64(len(fsPkts)))
-			originalReplaced = true // fsPkts содержит реальные сегменты
+
+			// Если payload > 1, ApplyFakedSplit гарантированно вернула реальные сегменты.
+			// Иначе это fake-only режим, и оригинал должен уйти отдельно.
+			originalReplaced = payloadLen > 1
 			goto finalize
 		}
 	}
@@ -279,12 +283,15 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	}
 
 	// 7. HostFakeSplit (HTTP)
-	if strat.HostFakeSplit && flow.IsHTTP {
+	if strat.HostFakeSplit && flow != nil && flow.IsHTTP {
 		hfPkts, err := pm.ApplyHostFakeSplit(packet, strat)
 		if err == nil && len(hfPkts) > 0 {
 			packets = append(packets, hfPkts...)
 			pm.stats.SplitCount.Add(uint64(len(hfPkts)))
-			originalReplaced = true
+
+			// HostFakeSplit здесь даёт только fake-пакеты.
+			// Оригинал должен уйти отдельно обычным Send().
+			originalReplaced = false
 			goto finalize
 		}
 	}
@@ -558,8 +565,9 @@ func (pm *PacketModifier) ApplyHostFakeSplit(packet []byte, strat *strategy.Stra
 		return nil, err
 	}
 
-	// Реальный пакет идёт после fake
-	return append(fakePkts, packet), nil
+	// Реальный пакет должен уйти обычным Send() из pipeline,
+	// а не через SendModified().
+	return fakePkts, nil
 }
 
 // modifyClientHelloSNI заменяет SNI в TLS ClientHello.
