@@ -132,6 +132,7 @@ type Flow struct {
 	// После этого поток идёт как video streaming — тысячи пакетов.
 	// Без этого флага каждый UDP:443 пакет генерирует 6 fake → убивает throughput.
 	QUICFakeInjected bool
+	AnalyzeMisses    int // сколько payload-пакетов прошло без SNI/Host
 }
 
 // NewFlow создает новый поток

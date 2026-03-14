@@ -44,6 +44,8 @@ type Pipeline struct {
 	cancel      context.CancelFunc
 	stats       PipelineStats
 	statsMu     sync.RWMutex
+	wgWorkers   sync.WaitGroup
+	wgResults   sync.WaitGroup
 }
 
 // PipelineStats статистика конвейера
@@ -159,16 +161,18 @@ func (p *Pipeline) Stop() {
 		log.Printf("Error stopping capturer: %v", err)
 	}
 
-	p.wg.Wait()
-
-	if err := p.sender.Close(); err != nil {
-		log.Printf("Error closing sender: %v", err)
-	}
+	p.wgWorkers.Wait()
 
 	for _, ch := range p.workerChans {
 		close(ch)
 	}
+
 	close(p.resultChan)
+	p.wgResults.Wait()
+
+	if err := p.sender.Close(); err != nil {
+		log.Printf("Error closing sender: %v", err)
+	}
 }
 
 // packetForwarder читает пакеты из capturer и направляет их в нужный воркер-канал.
@@ -343,6 +347,17 @@ func (p *Pipeline) worker(id int) {
 func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	startTime := time.Now()
 
+	defer func() {
+		processTime := time.Since(startTime)
+		p.updateStats(func(stats *PipelineStats) {
+			stats.PacketsProcessed++
+			stats.TotalProcessTime += processTime
+			if stats.PacketsProcessed > 0 {
+				stats.AvgProcessTime = stats.TotalProcessTime / time.Duration(stats.PacketsProcessed)
+			}
+		})
+	}()
+
 	// Проверяем минимальную длину пакета
 	if len(pkt.Data) < 20 {
 		log.Printf("WARNING: Packet too short (%d bytes), forwarding original", len(pkt.Data))
@@ -361,6 +376,13 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	srcPort, dstPort, protocol, err := p.extractPorts(pkt.Data)
 	if err != nil {
 		log.Printf("WARNING: Failed to extract ports: %v", err)
+		p.sendPacket(pkt.Data, pkt.Addr)
+		return
+	}
+
+	// Поддерживаем в pipeline только TCP и UDP.
+	// Остальные IPv4-протоколы не трогаем и не пытаемся парсить как TCP.
+	if protocol != 6 && protocol != 17 {
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
 	}
@@ -454,6 +476,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 				flowHostname = info.SNI // обновляем локальную копию
 				flow.Mu.Lock()
 				flow.IsAnalyzed = true
+				flow.AnalyzeMisses = 0
 				flow.DataPacketsModified = 0
 				flow.Mu.Unlock()
 			} else if info.Host != "" {
@@ -461,6 +484,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 				flowHostname = info.Host // обновляем локальную копию
 				flow.Mu.Lock()
 				flow.IsAnalyzed = true
+				flow.AnalyzeMisses = 0
 				flow.DataPacketsModified = 0
 				flow.Mu.Unlock()
 			}
@@ -474,10 +498,10 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		// Отказываемся от анализа после 4 пакетов без результата.
 		flow.Mu.Lock()
 		if !flow.IsAnalyzed {
-			flow.DataPacketsModified++
-			if flow.DataPacketsModified >= 4 {
+			flow.AnalyzeMisses++
+			if flow.AnalyzeMisses >= 4 {
 				flow.IsAnalyzed = true
-				flow.DataPacketsModified = 0
+				flow.AnalyzeMisses = 0
 			}
 		}
 		flow.Mu.Unlock()
@@ -592,6 +616,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 					flowHostname = info.SNI
 					flow.Mu.Lock()
 					flow.IsAnalyzed = true
+					flow.AnalyzeMisses = 0
 					flow.DataPacketsModified = 0
 					flow.Mu.Unlock()
 				} else if info.Host != "" {
@@ -599,6 +624,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 					flowHostname = info.Host
 					flow.Mu.Lock()
 					flow.IsAnalyzed = true
+					flow.AnalyzeMisses = 0
 					flow.DataPacketsModified = 0
 					flow.Mu.Unlock()
 				}
@@ -613,10 +639,10 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			// Отказываемся от анализа только после 4 payload-пакетов без результата.
 			flow.Mu.Lock()
 			if !flow.IsAnalyzed && hasPayload {
-				flow.DataPacketsModified++
-				if flow.DataPacketsModified >= 4 && !looksClientHello {
+				flow.AnalyzeMisses++
+				if flow.AnalyzeMisses >= 4 && !looksClientHello {
 					flow.IsAnalyzed = true
-					flow.DataPacketsModified = 0
+					flow.AnalyzeMisses = 0
 				}
 			}
 			flow.Mu.Unlock()
@@ -1013,41 +1039,20 @@ func (p *Pipeline) sendModifiedPacket(data []byte, addr []byte) bool {
 func (p *Pipeline) resultProcessor() {
 	defer p.wg.Done()
 
-	for {
-		select {
-		case <-p.ctx.Done():
-			return
-		case result, ok := <-p.resultChan:
-			if !ok {
-				return
+	for result := range p.resultChan {
+		if p.strategyMgr != nil {
+			success := len(result.ModifiedPackets) > 0 || result.SendOriginal
+
+			strategyResult := &strategy.StrategyResult{
+				StrategyID:   result.StrategyID,
+				Success:      success,
+				ResponseTime: 0,
+				BytesSent:    len(result.ModifiedPackets) * 1500,
+				PacketsSent:  len(result.ModifiedPackets),
+				Timestamp:    time.Now(),
 			}
 
-			// Отправляем результат в менеджер стратегий для статистики
-			if p.strategyMgr != nil {
-				// BUG FIX: ранее len(result.ModifiedPackets)==0 считалось ошибкой,
-				// но это нормально когда стратегия вернула только SendOriginal=true.
-				// Такое ложное "failure" инвалидировало кэш без причины.
-				// Теперь: неудача только если задержка избыточно велика (>1с).
-				success := (len(result.ModifiedPackets) > 0 || result.SendOriginal) && result.Delay <= 1000
-
-				strategyResult := &strategy.StrategyResult{
-					StrategyID:   result.StrategyID,
-					Success:      success,
-					ResponseTime: time.Duration(result.Delay) * time.Millisecond,
-					BytesSent:    len(result.ModifiedPackets) * 1500,
-					PacketsSent:  len(result.ModifiedPackets),
-					Timestamp:    time.Now(),
-				}
-
-				if !success {
-					invalidated := p.ipCache.InvalidateByStrategy(result.StrategyID)
-					if invalidated > 0 {
-						log.Printf("Invalidated %d cache entries due to strategy %d failure", invalidated, result.StrategyID)
-					}
-				}
-
-				p.strategyMgr.ReportResult(strategyResult)
-			}
+			p.strategyMgr.ReportResult(strategyResult)
 		}
 	}
 }
