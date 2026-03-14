@@ -14,6 +14,7 @@ type Manager struct {
 	timeout   time.Duration
 	maxFlows  int
 	closeChan chan struct{}
+	stopOnce  sync.Once
 	stats     ManagerStats
 }
 
@@ -43,7 +44,12 @@ func NewManager(timeout time.Duration, maxFlows int) *Manager {
 
 // Stop останавливает менеджер
 func (m *Manager) Stop() {
-	close(m.closeChan)
+	if m == nil {
+		return
+	}
+	m.stopOnce.Do(func() {
+		close(m.closeChan)
+	})
 }
 
 // GetOrCreate возвращает существующий поток или создает новый
@@ -52,36 +58,32 @@ func (m *Manager) GetOrCreate(
 	srcPort, dstPort uint16,
 	protocol uint8,
 ) *Flow {
-
-	key := m.createKey(srcIP, dstIP, srcPort, dstPort, protocol)
-
-	// Пытаемся найти существующий поток
-	m.mu.RLock()
-	flow, exists := m.flows[key]
-	m.mu.RUnlock()
-
-	if exists {
-		return flow
+	key, ok := m.createKey(srcIP, dstIP, srcPort, dstPort, protocol)
+	if !ok {
+		m.mu.Lock()
+		m.stats.Errors++
+		m.mu.Unlock()
+		return nil
 	}
+	rev := reverseKey(key)
+	now := time.Now()
 
-	// Создаем новый поток
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Проверяем еще раз (race condition)
-	if flow, exists = m.flows[key]; exists {
+	if flow, exists := m.findActiveFlowLocked(key, rev, now); exists {
 		return flow
 	}
 
-	// Проверяем лимит
 	if len(m.flows) >= m.maxFlows {
 		m.evictOldest()
 	}
 
-	flow = NewFlow(key, srcIP.String(), dstIP.String())
+	flow := NewFlow(key, srcIP.String(), dstIP.String())
 	m.flows[key] = flow
 	m.stats.CreatedFlows++
 	m.stats.TotalFlows++
+	m.stats.ActiveFlows = len(m.flows)
 
 	return flow
 }
@@ -92,14 +94,24 @@ func (m *Manager) Get(
 	srcPort, dstPort uint16,
 	protocol uint8,
 ) (*Flow, bool) {
+	key, ok := m.createKey(srcIP, dstIP, srcPort, dstPort, protocol)
+	if !ok {
+		m.mu.Lock()
+		m.stats.Errors++
+		m.mu.Unlock()
+		return nil, false
+	}
+	rev := reverseKey(key)
+	now := time.Now()
 
-	key := m.createKey(srcIP, dstIP, srcPort, dstPort, protocol)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	m.mu.RLock()
-	flow, exists := m.flows[key]
-	m.mu.RUnlock()
-
-	return flow, exists
+	flow, exists := m.findActiveFlowLocked(key, rev, now)
+	if !exists {
+		return nil, false
+	}
+	return flow, true
 }
 
 // Delete удаляет поток
@@ -114,25 +126,20 @@ func (m *Manager) createKey(
 	srcIP, dstIP net.IP,
 	srcPort, dstPort uint16,
 	protocol uint8,
-) FlowKey {
-
-	var srcUint32, dstUint32 uint32
-
-	// Конвертируем IPv4 в uint32
-	if ipv4 := srcIP.To4(); ipv4 != nil {
-		srcUint32 = binary.BigEndian.Uint32(ipv4)
-	}
-	if ipv4 := dstIP.To4(); ipv4 != nil {
-		dstUint32 = binary.BigEndian.Uint32(ipv4)
+) (FlowKey, bool) {
+	src4 := srcIP.To4()
+	dst4 := dstIP.To4()
+	if src4 == nil || dst4 == nil {
+		return FlowKey{}, false
 	}
 
 	return FlowKey{
-		SrcIP:    srcUint32,
-		DstIP:    dstUint32,
+		SrcIP:    binary.BigEndian.Uint32(src4),
+		DstIP:    binary.BigEndian.Uint32(dst4),
 		SrcPort:  srcPort,
 		DstPort:  dstPort,
 		Protocol: FlowProtocol(protocol),
-	}
+	}, true
 }
 
 // cleanupLoop периодически удаляет устаревшие потоки
@@ -224,4 +231,36 @@ func (m *Manager) GetFlows() []*Flow {
 	}
 
 	return flows
+}
+
+func reverseKey(key FlowKey) FlowKey {
+	return FlowKey{
+		SrcIP:    key.DstIP,
+		DstIP:    key.SrcIP,
+		SrcPort:  key.DstPort,
+		DstPort:  key.SrcPort,
+		Protocol: key.Protocol,
+	}
+}
+
+func (m *Manager) findActiveFlowLocked(key, reverseKey FlowKey, now time.Time) (*Flow, bool) {
+	if flow, ok := m.flows[key]; ok {
+		if flow.IsExpired(m.timeout, now) {
+			delete(m.flows, key)
+			m.stats.ExpiredFlows++
+		} else {
+			return flow, true
+		}
+	}
+
+	if flow, ok := m.flows[reverseKey]; ok {
+		if flow.IsExpired(m.timeout, now) {
+			delete(m.flows, reverseKey)
+			m.stats.ExpiredFlows++
+		} else {
+			return flow, true
+		}
+	}
+
+	return nil, false
 }

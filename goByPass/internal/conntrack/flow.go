@@ -160,18 +160,23 @@ func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
 	f.UpdatedAt = now
 	f.LastPacket = now
 
+	copyLen := length
+	if copyLen < 0 {
+		copyLen = 0
+	}
+	if data != nil && copyLen > len(data) {
+		copyLen = len(data)
+	}
+
 	if isClient {
 		f.SeqClient = seq
 		f.AckClient = ack
 		f.PacketsOut++
 		f.BytesOut += uint64(length)
 
-		// Ограничиваем размер буфера
-		if length > 0 && data != nil {
-			// Создаем копию данных
-			dataCopy := make([]byte, length)
-			copy(dataCopy, data)
-
+		if copyLen > 0 {
+			dataCopy := make([]byte, copyLen)
+			copy(dataCopy, data[:copyLen])
 			f.ClientData = append(f.ClientData, dataCopy)
 			// Ограничиваем размер
 			if len(f.ClientData) > maxReassemblyPackets {
@@ -185,10 +190,9 @@ func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
 		f.PacketsIn++
 		f.BytesIn += uint64(length)
 
-		if length > 0 && data != nil {
-			dataCopy := make([]byte, length)
-			copy(dataCopy, data)
-
+		if copyLen > 0 {
+			dataCopy := make([]byte, copyLen)
+			copy(dataCopy, data[:copyLen])
 			f.ServerData = append(f.ServerData, dataCopy)
 			if len(f.ServerData) > maxReassemblyPackets {
 				f.ServerData = f.ServerData[1:]
