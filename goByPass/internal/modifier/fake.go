@@ -68,7 +68,7 @@ func (pm *PacketModifier) ApplyFake(
 	// Остальные режимы
 	if fooling&strategy.FoolingBadSeq != 0 {
 		if badSeqIncrement == 0 {
-			badSeqIncrement = 2 // минимальный безопасный дефолт
+			badSeqIncrement = 4096
 		}
 		seq := binary.BigEndian.Uint32(fake[tcpOffset+4:])
 		seq += uint32(badSeqIncrement)

@@ -1,6 +1,7 @@
 package modifier
 
 import (
+	"ByPass/internal/protocol"
 	"encoding/binary"
 	"errors"
 	"log"
@@ -24,36 +25,50 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 		return nil, nil
 	}
 
-	// ВАЖНО: alignSNI сейчас не реализован корректно.
-	// Лучше не делать опасный split, чем ломать TLS handshake.
-	if alignSNI {
-		return nil, ErrSplitSNIOffsetUnsupported
-	}
-
 	ipHdrLen, tcpHdrLen, payloadOffset, err := parseIPv4TCP(packet)
 	if err != nil {
 		return nil, err
 	}
 
-	payloadLen := len(packet) - payloadOffset
-	if payloadLen <= 0 {
-		return [][]byte{packet}, nil
-	}
-
-	// Dedup без map-аллокации (#10): sort + linear pass
-	var validPos []int
-	for _, pos := range splitPos {
-		if pos > 0 && pos < payloadLen {
-			validPos = append(validPos, pos)
-		}
+	payload := packet[payloadOffset:]
+	validPos, err := resolveSplitPositions(payload, splitPos, alignSNI)
+	if err != nil {
+		return nil, err
 	}
 	if len(validPos) == 0 {
 		return [][]byte{packet}, nil
 	}
-	sortInts(validPos)
-	validPos = dedupInts(validPos)
 
 	return buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
+}
+
+func resolveSplitPositions(payload []byte, splitPos []int, alignSNI bool) ([]int, error) {
+	var validPos []int
+
+	base := 0
+	if alignSNI {
+		sniPos, err := protocol.FindSNI(payload)
+		if err != nil {
+			return nil, err
+		}
+		base = sniPos
+	}
+
+	for _, pos := range splitPos {
+		resolved := pos
+		if alignSNI {
+			resolved = base + pos
+		}
+		if resolved > 0 && resolved < len(payload) {
+			validPos = append(validPos, resolved)
+		}
+	}
+
+	if len(validPos) == 0 {
+		return nil, nil
+	}
+	sortInts(validPos)
+	return dedupInts(validPos), nil
 }
 
 // ApplySeqOvl реализует multisplit с sequence overlap (основная техника zapret/general.bat).

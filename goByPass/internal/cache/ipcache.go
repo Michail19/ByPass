@@ -57,8 +57,6 @@ type CacheStats struct {
 }
 
 // NewIPCache создает новый IP-кэш.
-// FIX #10: если ttl <= 0 — используем defaultCacheTTL вместо того чтобы передавать 0
-// в time.NewTicker (panic: non-positive interval for NewTicker).
 func NewIPCache(ttl time.Duration, maxSize int) *IPCache {
 	if ttl <= 0 {
 		log.Printf("[IPCache] Warning: invalid TTL %v, using default %v", ttl, defaultCacheTTL)
@@ -142,15 +140,16 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 		entry.Hits++
 		entry.LastSeen = now
 
-		// не затираем точный hostname пустым
 		if hostname != "" {
 			entry.Hostname = hostname
 		}
 
-		// не меняем стратегию на fallback, если уже есть hostname-bound запись
-		if !(hostname == "" && entry.Hostname != "" && strategyID != entry.StrategyID) {
-			entry.ShouldBypass = shouldBypass
-			entry.StrategyID = strategyID
+		// strategyID <= 0 => это hostname hint из DNS, стратегию не меняем
+		if strategyID > 0 {
+			if !(hostname == "" && entry.Hostname != "" && strategyID != entry.StrategyID) {
+				entry.ShouldBypass = shouldBypass
+				entry.StrategyID = strategyID
+			}
 		}
 
 		entry.expireAt = now.Add(c.ttl)
@@ -161,19 +160,32 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 		c.evictOldest()
 	}
 
+	entry := &IPCacheEntry{
+		IP:        ip,
+		Hostname:  hostname,
+		Hits:      1,
+		FirstSeen: now,
+		LastSeen:  now,
+	}
+
+	if strategyID > 0 {
+		entry.ShouldBypass = shouldBypass
+		entry.StrategyID = strategyID
+	}
+
 	c.entries[ip] = &internalEntry{
-		IPCacheEntry: &IPCacheEntry{
-			IP:           ip,
-			Hostname:     hostname,
-			Hits:         1,
-			FirstSeen:    now,
-			LastSeen:     now,
-			ShouldBypass: shouldBypass,
-			StrategyID:   strategyID,
-		},
-		expireAt: now.Add(c.ttl),
+		IPCacheEntry: entry,
+		expireAt:     now.Add(c.ttl),
 	}
 	c.stats.TotalEntries++
+}
+
+func (c *IPCache) SeedHostnameByIP(ip net.IP, hostname string) {
+	if ip == nil || hostname == "" {
+		return
+	}
+	c.Put(ip.String(), hostname, false, 0)
+	log.Printf("[CACHE] Seeded hostname for IP %s: hostname=%s", ip.String(), hostname)
 }
 
 // PutByIP добавляет запись по net.IP

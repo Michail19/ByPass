@@ -6,14 +6,6 @@ import (
 )
 
 // ApplyDisorder применяет нарушение порядка в стиле zapret.
-//
-// НЕ меняет порядок TCP сегментов (→ missing packets → duplicate ACK → slow start reset).
-// Вместо этого: decoy с низким TTL + реальные сегменты в прямом порядке.
-//
-// DisorderOutOfBand:      OOB decoy (bad seq + low TTL), затем все сегменты прямо
-// DisorderTTLZero:        decoy = первый сегмент с TTL=disorder_ttl, затем все сегменты
-// DisorderFakedDisorder:  fake-пакет перед сегментами
-// DisorderMulti:          disorder в нескольких позициях (multidisorder)
 func (pm *PacketModifier) ApplyDisorder(
 	packet []byte,
 	disorderPos []int,
@@ -22,14 +14,13 @@ func (pm *PacketModifier) ApplyDisorder(
 	fooling uint32,
 	badSeqIncrement int64,
 ) ([][]byte, error) {
-
 	if len(disorderPos) == 0 {
 		return nil, nil
 	}
 
 	ipHdrLen, tcpHdrLen, payloadOffset, err := parseIPv4TCP(packet)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 
 	payloadLen := len(packet) - payloadOffset
@@ -37,9 +28,6 @@ func (pm *PacketModifier) ApplyDisorder(
 		return nil, nil
 	}
 
-	_ = tcpHdrLen // если дальше не нужен, можно убрать переменную выше
-
-	// Dedup без map-аллокации (#10): sort + linear pass
 	var validPos []int
 	for _, pos := range disorderPos {
 		if pos > 0 && pos < payloadLen {
@@ -52,26 +40,26 @@ func (pm *PacketModifier) ApplyDisorder(
 	sortInts(validPos)
 	validPos = dedupInts(validPos)
 
+	realSegs, err := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
+	if err != nil {
+		return nil, err
+	}
+	reversed := reversePackets(realSegs)
+
 	originalSeq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
 	var results [][]byte
 
 	switch mode {
 	case strategy.DisorderOutOfBand:
-		// OOB: пакет с заведомо неверным seq + low TTL.
-		// seq = originalSeq - 512: гарантированно вне TCP-окна сервера.
-		// Было -1: при начальном окне 64–256 KB seq-1 всё ещё внутри окна →
-		// сервер отвечал Duplicate ACK → out-of-order → slow start reset.
-		// Zapret использует смещение ~500–700 байт (ovl_len).
-		// -512 достаточно велико чтобы выйти за окно, но не является
-		// очевидным паттерном (0xFFFFFFFF) детектируемым DPI (#3).
 		oobPkt := make([]byte, len(packet))
 		copy(oobPkt, packet)
 		binary.BigEndian.PutUint32(oobPkt[ipHdrLen+4:], originalSeq-512)
-		setIPTTL(oobPkt, ttl)
+		_ = setIPTTL(oobPkt, ttl)
 		if err := fixPacketChecksums(oobPkt); err != nil {
 			return nil, err
 		}
 		results = append(results, oobPkt)
+		results = append(results, reversed...)
 
 	case strategy.DisorderFakedDisorder:
 		fakePkts, err := pm.ApplyFake(packet, ttl, fooling, badSeqIncrement, nil)
@@ -79,54 +67,22 @@ func (pm *PacketModifier) ApplyDisorder(
 			return nil, err
 		}
 		results = append(results, fakePkts...)
+		results = append(results, reversed...)
 
 	default:
-		// TTLZero / MultiDisorder / default:
-		//
-		// ALT5 zapret --dpi-desync=syndata,multidisorder --dpi-desync-ttl=4:
-		//   Отправляем decoy-сегменты (каждый = кусок ClientHello с низким TTL),
-		//   умирают до сервера. DPI видит частичные записи и не может корректно
-		//   распознать TLS. После decoy-ов — ПОЛНЫЙ оригинальный пакет (нормальный TTL).
-		//
-		// ВАЖНО (FIX): ранее вместо полного пакета вызывался buildTCPSegments,
-		// который добавлял 3 overlap-байта — это РАСШИРЯЛО поток: server получал
-		// 518 байт вместо 517, TLS-запись начиналась с 0x16 0x16 0x03... (невалидно),
-		// handshake падал → ERR_CONNECTION_CLOSED.
-		// Теперь: decoy(ы) + полный оригинальный пакет. Сервер гарантированно
-		// получает корректный ClientHello.
-		for _, pos := range validPos {
-			segEnd := payloadOffset + pos
-			if segEnd > len(packet) {
-				segEnd = len(packet)
-			}
-			decoy := make([]byte, segEnd)
-			copy(decoy, packet[:payloadOffset])
-			binary.BigEndian.PutUint16(decoy[2:4], uint16(segEnd))
-			binary.BigEndian.PutUint32(decoy[ipHdrLen+4:], originalSeq-32)
-			copy(decoy[payloadOffset:], packet[payloadOffset:segEnd])
-
-			// DF: сохраняем из оригинала — decoy скопирован из packet[:payloadOffset]
-			setIPTTL(decoy, ttl)
-			if err := fixPacketChecksums(decoy); err != nil {
-				return nil, err
-			}
-			results = append(results, decoy)
-		}
+		// настоящий multidisorder
+		results = append(results, reversed...)
 	}
-
-	// Реальный пакет — ПОЛНЫЙ оригинал с нормальным TTL.
-	// buildTCPSegments НЕ используется: overlap-байты расширяют TCP-поток на 3 байта,
-	// сервер получает "0x16 0x16 0x03..." вместо валидного ClientHello → TLS Alert/RST.
-	// BUG FIX: ранее здесь ошибочно вызывался buildTCPSegments и результат добавлялся
-	// в results, а realPkt создавался но никогда не использовался (мёртвая переменная).
-	realPkt := make([]byte, len(packet))
-	copy(realPkt, packet)
-	if err := fixPacketChecksums(realPkt); err != nil {
-		return nil, err
-	}
-	results = append(results, realPkt)
 
 	return results, nil
+}
+
+func reversePackets(pkts [][]byte) [][]byte {
+	out := make([][]byte, len(pkts))
+	for i := range pkts {
+		out[i] = pkts[len(pkts)-1-i]
+	}
+	return out
 }
 
 // setIPTTL устанавливает TTL в IP-заголовке и пересчитывает IP checksum.

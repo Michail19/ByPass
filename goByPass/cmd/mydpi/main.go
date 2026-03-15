@@ -420,15 +420,15 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 func defaultHostnameRules() []strategy.HostnameRule {
 	return []strategy.HostnameRule{
 		// YouTube only
-		{Pattern: "*.youtube.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube"},
-		{Pattern: "youtube.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube bare"},
-		{Pattern: "*.googlevideo.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube video CDN"},
-		{Pattern: "*.ytimg.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube static"},
-		{Pattern: "*.ggpht.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube avatars/images"},
-		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube embed"},
-		{Pattern: "*.youtubei.googleapis.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube API"},
-		{Pattern: "*.gvt1.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube CDN"},
-		{Pattern: "*.gvt2.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube CDN"},
+		{Pattern: "*.youtube.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube"},
+		{Pattern: "youtube.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube bare"},
+		{Pattern: "*.googlevideo.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube video CDN"},
+		{Pattern: "*.ytimg.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube static"},
+		{Pattern: "*.ggpht.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube avatars/images"},
+		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube embed"},
+		{Pattern: "*.youtubei.googleapis.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube API"},
+		{Pattern: "*.gvt1.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube CDN"},
+		{Pattern: "*.gvt2.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube CDN"},
 
 		// Discord
 		{Pattern: "*.discord.com", StrategyName: "discord-2026", Comment: "Discord"},

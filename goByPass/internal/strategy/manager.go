@@ -456,19 +456,19 @@ func (m *Manager) ClearTestOverrideByIP(ip string) {
 //   - используем набор hints, а не один "youtube", чтобы находить стратегии
 //     вроде "yt-syndata-2026" и "quic-fake-6".
 var builtinHostnameMappings = []struct {
-	hostnameContains string   // подстрока в hostname (lowercase)
-	strategyHints    []string // подстрока в имени стратегии
+	hostnameContains string
+	strategyHints    []string
 }{
 	// YouTube / CDN only
-	{"youtube.com", []string{"yt-syndata", "youtube", "quic-fake"}},
-	{"youtube-nocookie.com", []string{"yt-syndata", "youtube", "quic-fake"}},
-	{"googlevideo.com", []string{"yt-syndata", "youtube", "quic-fake"}},
-	{"youtubei.googleapis.com", []string{"yt-syndata", "youtube", "quic-fake"}},
-	{"ytimg.com", []string{"yt-syndata", "youtube"}},
-	{"ggpht.com", []string{"yt-syndata", "youtube"}},
-	{"gvt1.com", []string{"yt-syndata", "youtube", "quic-fake"}},
-	{"gvt2.com", []string{"yt-syndata", "youtube", "quic-fake"}},
-	{"youtu.be", []string{"yt-syndata", "youtube"}},
+	{"youtube.com", []string{"youtube-safe", "youtube", "quic-fake", "yt-syndata"}},
+	{"youtube-nocookie.com", []string{"youtube-safe", "youtube", "quic-fake", "yt-syndata"}},
+	{"googlevideo.com", []string{"youtube-safe", "quic-fake", "youtube", "yt-syndata"}},
+	{"youtubei.googleapis.com", []string{"youtube-safe", "youtube", "quic-fake", "yt-syndata"}},
+	{"ytimg.com", []string{"youtube-safe", "youtube"}},
+	{"ggpht.com", []string{"youtube-safe", "youtube"}},
+	{"gvt1.com", []string{"youtube-safe", "quic-fake", "youtube", "yt-syndata"}},
+	{"gvt2.com", []string{"youtube-safe", "quic-fake", "youtube", "yt-syndata"}},
+	{"youtu.be", []string{"youtube-safe", "youtube"}},
 
 	// Discord
 	{"discord.com", []string{"discord"}},
@@ -478,9 +478,9 @@ var builtinHostnameMappings = []struct {
 	{"discord.media", []string{"discord"}},
 
 	// Telegram
-	{"telegram.org", []string{"telegram"}},
-	{"telegram.me", []string{"telegram"}},
-	{".t.me", []string{"telegram"}},
+	{"telegram.org", []string{"telegram-safe", "telegram"}},
+	{"telegram.me", []string{"telegram-safe", "telegram"}},
+	{".t.me", []string{"telegram-safe", "telegram"}},
 }
 
 // protocolMatches проверяет применимость стратегии к протоколу/порту.

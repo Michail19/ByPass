@@ -362,7 +362,14 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 
 	// 9. TLS record split — последний резерв
 	if strat.TLSRecordSplit && protocol.IsTLS(packet[payloadOffset:]) {
-		tlsFrag, err := pm.ApplyTLSSplit(packet[payloadOffset:], strat.TLSRecordSize)
+		tlsSplitPos := strat.TLSRecordSize
+		if strat.SplitSNIOffset {
+			if sniPos, err := protocol.FindSNI(packet[payloadOffset:]); err == nil {
+				tlsSplitPos = sniPos + strat.TLSRecordSize
+			}
+		}
+		tlsFrag, err := pm.ApplyTLSSplit(packet[payloadOffset:], tlsSplitPos)
+
 		if err != nil {
 			pm.stats.Errors.Add(1)
 		}

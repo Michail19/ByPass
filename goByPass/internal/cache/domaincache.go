@@ -42,7 +42,6 @@ type DomainCacheStats struct {
 }
 
 // NewDomainCache создает новый кэш доменов.
-// FIX #11: если ttl <= 0 — используем defaultCacheTTL вместо передачи 0 в time.NewTicker.
 func NewDomainCache(ttl time.Duration, maxSize int) *DomainCache {
 	if ttl <= 0 {
 		log.Printf("[DomainCache] Warning: invalid TTL %v, using default %v", ttl, defaultCacheTTL)

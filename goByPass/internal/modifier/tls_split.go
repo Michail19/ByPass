@@ -15,53 +15,38 @@ type TLSSplitConfig struct {
 }
 
 // ApplyTLSSplit применяет разделение TLS записей
-func (pm *PacketModifier) ApplyTLSSplit(packet []byte, recordSize int) ([][]byte, error) {
-	if recordSize <= 0 || recordSize > 1024 {
-		recordSize = 80 // разумное значение по умолчанию
-	}
-
-	if len(packet) < 5 || !protocol.IsTLS(packet) {
+func (pm *PacketModifier) ApplyTLSSplit(packet []byte, splitPos int) ([][]byte, error) {
+	if len(packet) < 9 || !protocol.IsTLS(packet) {
 		return [][]byte{packet}, nil
 	}
 
-	// Определяем тип TLS записи
 	recordType := packet[0]
 	version := binary.BigEndian.Uint16(packet[1:3])
 	totalLen := int(binary.BigEndian.Uint16(packet[3:5]))
-
-	if len(packet) != 5+totalLen {
-		log.Printf("WARNING: TLS packet length mismatch: header=%d, actual=%d", 5+totalLen, len(packet))
+	if len(packet) < 5+totalLen {
 		return [][]byte{packet}, nil
 	}
 
-	var fragments [][]byte
-	pos := 5 // начало данных после record header
-
-	for pos < len(packet) {
-		chunkSize := recordSize
-		remaining := len(packet) - pos
-		if chunkSize > remaining {
-			chunkSize = remaining
-		}
-
-		// Создаём новый TLS record
-		frag := make([]byte, 5+chunkSize)
-		frag[0] = recordType
-		binary.BigEndian.PutUint16(frag[1:3], version)
-		binary.BigEndian.PutUint16(frag[3:5], uint16(chunkSize))
-		copy(frag[5:], packet[pos:pos+chunkSize])
-
-		fragments = append(fragments, frag)
-		pos += chunkSize
-	}
-
-	if len(fragments) <= 1 {
-		log.Printf("DEBUG: TLS split not needed, only 1 fragment")
+	if splitPos <= 0 || splitPos >= totalLen {
 		return [][]byte{packet}, nil
 	}
 
-	log.Printf("DEBUG: TLS record split into %d fragments (size=%d)", len(fragments), recordSize)
-	return fragments, nil
+	part1 := packet[5 : 5+splitPos]
+	part2 := packet[5+splitPos : 5+totalLen]
+
+	rec1 := make([]byte, 5+len(part1))
+	rec1[0] = recordType
+	binary.BigEndian.PutUint16(rec1[1:3], version)
+	binary.BigEndian.PutUint16(rec1[3:5], uint16(len(part1)))
+	copy(rec1[5:], part1)
+
+	rec2 := make([]byte, 5+len(part2))
+	rec2[0] = recordType
+	binary.BigEndian.PutUint16(rec2[1:3], version)
+	binary.BigEndian.PutUint16(rec2[3:5], uint16(len(part2)))
+	copy(rec2[5:], part2)
+
+	return [][]byte{rec1, rec2}, nil
 }
 
 // splitTLSHandshake разделяет TLS Handshake сообщение

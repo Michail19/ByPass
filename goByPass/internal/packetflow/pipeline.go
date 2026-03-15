@@ -88,10 +88,10 @@ func NewPipeline(
 		cfg.Workers = 4
 	}
 	if cfg.PacketQueueSize <= 0 {
-		cfg.PacketQueueSize = 10000
+		cfg.PacketQueueSize = 32768
 	}
 	if cfg.ResultQueueSize <= 0 {
-		cfg.ResultQueueSize = 1000
+		cfg.ResultQueueSize = 4096
 	}
 
 	// Создаём отдельный канал на каждый воркер.
@@ -221,7 +221,7 @@ func (p *Pipeline) packetForwarder() {
 				// ClientHello дропались → TLS handshake не завершался → сайты не грузились.
 				select {
 				case ch <- packet:
-				case <-time.After(5 * time.Millisecond):
+				case <-time.After(20 * time.Millisecond):
 					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
 					log.Printf("WARNING: Worker %d queue full, dropping handshake packet", workerIdx)
 				}
@@ -234,7 +234,7 @@ func (p *Pipeline) packetForwarder() {
 				case ch <- packet:
 				case <-p.ctx.Done():
 					return
-				case <-time.After(1 * time.Millisecond):
+				case <-time.After(5 * time.Millisecond):
 					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
 					log.Printf("WARNING: Worker %d queue full, dropping data packet", workerIdx)
 				}
@@ -395,10 +395,14 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	}
 
 	// Поддерживаем в pipeline только TCP и UDP.
-	// Остальные IPv4-протоколы не трогаем и не пытаемся парсить как TCP.
 	if protocol != 6 && protocol != 17 {
 		p.sendPacket(pkt.Data, pkt.Addr)
 		return
+	}
+
+	// NEW: пассивно разбираем DNS-ответы и seed-им кэши
+	if protocol == 17 && (srcPort == 53 || dstPort == 53) {
+		p.maybeSeedCachesFromDNS(pkt.Data)
 	}
 
 	// Получаем или создаём поток
@@ -543,9 +547,14 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	}
 
 	// 1. Свежий выбор по hostname/IP
+	selectorHostname := flowHostname
+	if selectorHostname == "" && cached != nil && isReusableCachedBypassHostname(cached.Hostname) {
+		selectorHostname = cached.Hostname
+	}
+
 	fresh := p.strategyMgr.SelectStrategy(
 		dstIP.String(),
-		flowHostname,
+		selectorHostname,
 		int(dstPort),
 		"tcp",
 	)
@@ -557,7 +566,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	preferCached := flowHostname == "" &&
 		cached != nil &&
 		cachedStratID > 1 &&
-		isLikelyYouTubeHostname(cached.Hostname)
+		isReusableCachedBypassHostname(cached.Hostname)
 
 	switch {
 	case preferCached && (fresh == nil || fresh.ID == 1):
@@ -693,10 +702,10 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		// Это защищает от слишком раннего fake SYN на bare-IP Google/YouTube flow.
 		// Разрешаем bare-IP SYN-data, если этот IP уже уверенно закэширован
 		// как YouTube-like hostname и кэш указывает на ту же стратегию.
-		cachedYouTube := cached != nil &&
+		cachedKnownBypass := cached != nil &&
 			cachedStratID > 1 &&
 			cachedStratID == strategyID &&
-			isLikelyYouTubeHostname(cached.Hostname)
+			isReusableCachedBypassHostname(cached.Hostname)
 
 		skipBareSynData := isSYN &&
 			flowHostname == "" &&
@@ -705,7 +714,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			strats.ApplyToTLS &&
 			!strats.ApplyToHTTP &&
 			!strats.AnyProtocol &&
-			!cachedYouTube
+			!cachedKnownBypass
 
 		if skipBareSynData {
 			log.Printf(
@@ -841,18 +850,189 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	}
 }
 
-func isLikelyYouTubeHostname(host string) bool {
+func (p *Pipeline) maybeSeedCachesFromDNS(packet []byte) {
+	if p == nil || p.domainCache == nil || p.ipCache == nil {
+		return
+	}
+
+	domain, ips, cname, ttl, ok := parseDNSResponse(packet)
+	if !ok || domain == "" || len(ips) == 0 {
+		return
+	}
+
+	p.domainCache.PutWithTTL(domain, ips, cname, ttl)
+
+	for _, ip := range ips {
+		p.ipCache.SeedHostnameByIP(ip, domain)
+	}
+
+	log.Printf("[DNS] Seeded caches: domain=%s ips=%d ttl=%d cname=%s", domain, len(ips), ttl, cname)
+}
+
+func isReusableCachedBypassHostname(host string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
 		return false
 	}
 
-	return strings.Contains(h, "youtube") ||
-		strings.Contains(h, "googlevideo") ||
-		strings.Contains(h, "ytimg") ||
-		strings.Contains(h, "ggpht") ||
-		strings.Contains(h, "gvt1") ||
-		strings.Contains(h, "gvt2")
+	switch {
+	case h == "youtube.com",
+		h == "www.youtube.com",
+		strings.HasSuffix(h, ".youtube.com"),
+		strings.HasSuffix(h, ".youtubei.googleapis.com"),
+		strings.HasSuffix(h, ".googlevideo.com"),
+		h == "telegram.org",
+		strings.HasSuffix(h, ".telegram.org"),
+		h == "t.me",
+		strings.HasSuffix(h, ".t.me"):
+		return true
+	default:
+		return false
+	}
+}
+
+func parseDNSResponse(packet []byte) (domain string, ips []net.IP, cname string, ttl int, ok bool) {
+	if len(packet) < 20 || packet[0]>>4 != 4 {
+		return "", nil, "", 0, false
+	}
+
+	ihl := int(packet[0]&0x0F) * 4
+	if len(packet) < ihl+8 {
+		return "", nil, "", 0, false
+	}
+
+	proto := packet[9]
+	if proto != 17 { // UDP only
+		return "", nil, "", 0, false
+	}
+
+	udpOffset := ihl
+	srcPort := binary.BigEndian.Uint16(packet[udpOffset : udpOffset+2])
+	dstPort := binary.BigEndian.Uint16(packet[udpOffset+2 : udpOffset+4])
+	if srcPort != 53 && dstPort != 53 {
+		return "", nil, "", 0, false
+	}
+
+	dnsOffset := udpOffset + 8
+	if len(packet) < dnsOffset+12 {
+		return "", nil, "", 0, false
+	}
+
+	flags := binary.BigEndian.Uint16(packet[dnsOffset+2 : dnsOffset+4])
+	qr := (flags & 0x8000) != 0
+	if !qr {
+		return "", nil, "", 0, false
+	}
+
+	qdCount := int(binary.BigEndian.Uint16(packet[dnsOffset+4 : dnsOffset+6]))
+	anCount := int(binary.BigEndian.Uint16(packet[dnsOffset+6 : dnsOffset+8]))
+	if qdCount <= 0 || anCount <= 0 {
+		return "", nil, "", 0, false
+	}
+
+	off := dnsOffset + 12
+
+	var err error
+	domain, off, err = readDNSName(packet, dnsOffset, off)
+	if err != nil || domain == "" {
+		return "", nil, "", 0, false
+	}
+
+	// skip QTYPE + QCLASS
+	if len(packet) < off+4 {
+		return "", nil, "", 0, false
+	}
+	off += 4
+
+	minTTL := 0
+
+	for i := 0; i < anCount; i++ {
+		_, off, err = readDNSName(packet, dnsOffset, off)
+		if err != nil || len(packet) < off+10 {
+			return domain, ips, cname, minTTL, len(ips) > 0
+		}
+
+		rtype := binary.BigEndian.Uint16(packet[off : off+2])
+		// class := binary.BigEndian.Uint16(packet[off+2 : off+4])
+		rttl := int(binary.BigEndian.Uint32(packet[off+4 : off+8]))
+		rdlen := int(binary.BigEndian.Uint16(packet[off+8 : off+10]))
+		off += 10
+
+		if len(packet) < off+rdlen {
+			return domain, ips, cname, minTTL, len(ips) > 0
+		}
+
+		if rttl > 0 && (minTTL == 0 || rttl < minTTL) {
+			minTTL = rttl
+		}
+
+		switch rtype {
+		case 1: // A
+			if rdlen == 4 {
+				ips = append(ips, net.IPv4(packet[off], packet[off+1], packet[off+2], packet[off+3]))
+			}
+		case 5: // CNAME
+			if name, _, err := readDNSName(packet, dnsOffset, off); err == nil {
+				cname = name
+			}
+		}
+
+		off += rdlen
+	}
+
+	return domain, ips, cname, minTTL, len(ips) > 0
+}
+
+func readDNSName(packet []byte, dnsStart, offset int) (string, int, error) {
+	var labels []string
+	start := offset
+	jumped := false
+	seen := 0
+
+	for {
+		if offset >= len(packet) {
+			return "", start, fmt.Errorf("dns name out of bounds")
+		}
+		if seen > 20 {
+			return "", start, fmt.Errorf("dns compression loop")
+		}
+		seen++
+
+		l := int(packet[offset])
+
+		if l == 0 {
+			offset++
+			if !jumped {
+				start = offset
+			}
+			break
+		}
+
+		if l&0xC0 == 0xC0 {
+			if offset+1 >= len(packet) {
+				return "", start, fmt.Errorf("dns pointer truncated")
+			}
+			ptr := int(binary.BigEndian.Uint16(packet[offset:offset+2]) & 0x3FFF)
+			if ptr >= len(packet) {
+				return "", start, fmt.Errorf("dns pointer out of bounds")
+			}
+			if !jumped {
+				start = offset + 2
+			}
+			offset = dnsStart + (ptr - dnsStart)
+			jumped = true
+			continue
+		}
+
+		offset++
+		if offset+l > len(packet) {
+			return "", start, fmt.Errorf("dns label out of bounds")
+		}
+		labels = append(labels, string(packet[offset:offset+l]))
+		offset += l
+	}
+
+	return strings.ToLower(strings.Join(labels, ".")), start, nil
 }
 
 // fixTCPChecksum пересчитывает TCP checksum без аллокаций (#6).

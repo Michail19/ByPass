@@ -79,23 +79,31 @@ func (m *Manager) loadDefaultStrategies() {
 
 	// ── 12. Telegram ──────────────────────────────────────────────────────────
 	mustAdd(&Strategy{
-		ID:                     12,
-		Name:                   "telegram",
-		Description:            "Telegram: safe split 1+5 + fake TS",
-		ApplyToHTTP:            false,
-		ApplyToTLS:             true,
-		SplitMode:              SplitCustom,
-		SplitPositions:         []int{1, 5},
-		SplitSNIOffset:         false,
-		Fooling:                FoolingTS,
-		FakeTTL:                6,
-		FakeRepeats:            1,
-		HTTPModMode:            HTTPModHostCase,
-		HostCase:               true,
-		TLSRecordSplit:         false,
-		TLSRecordSize:          0,
-		Priority:               25,
-		ModifyFirstDataPackets: 1,
+		ID:          12,
+		Name:        "telegram-safe-windows",
+		Description: "Telegram Web: split/tlsrec around SNI, handshake-only",
+
+		ApplyToHTTP: false,
+		ApplyToTLS:  true,
+		ApplyToQUIC: false,
+
+		// После патча modifier/* это станет нормальным 1+s
+		SplitMode:      SplitCustom,
+		SplitPositions: []int{1},
+		SplitSNIOffset: true,
+
+		// После патча tls_split.go / modifier.go это станет 3+s
+		TLSRecordSplit: true,
+		TLSRecordSize:  3,
+
+		// Без тяжёлого multidisorder/fakedsync
+		Fooling:     FoolingTS,
+		FakeTTL:     6,
+		FakeRepeats: 1,
+
+		ApplyToPacketTypes:     []string{"handshake"},
+		Priority:               18,
+		ModifyFirstDataPackets: 0,
 	})
 
 	// ── 20. YouTube legacy/manual ─────────────────────────────────────────────
@@ -213,37 +221,31 @@ func (m *Manager) loadDefaultStrategies() {
 		ModifyFirstDataPackets: 1,
 	})
 
-	// ── 27. yt-multidisorder-2026 — safe YouTube рабочий профиль ────────────
-	//
-	// Это "безопасный" вариант для автоприменения:
-	//   - без SynData
-	//   - только MultiDisorder на ClientHello
-	//   - QUIC fake остаётся
-	//
-	// Нужен потому, что pipeline.go сейчас специально пропускает bare SYN
-	// для TLS-only SynData-стратегий до появления SNI/hostname.
-	// Поэтому автоприменяемая стратегия с SynData в реальности исполняется
-	// не как "syndata+multidisorder", а как "multidisorder-only".
+	// ── 27. YouTube safe Windows TCP ─────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          27,
-		Name:        "yt-multidisorder-2026",
-		Description: "YouTube 2026 SAFE: multidisorder TCP + QUIC fake (handshake-only, no syndata)",
+		Name:        "youtube-safe-windows-2026",
+		Description: "YouTube safe TCP profile for Windows: split/tlsrec around SNI + QUIC fake",
+
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		SynData:       false,
-		MultiDisorder: true,
-		DisorderTTL:   4,
-		DisorderPos:   []int{1, 2, 3, 4, 5},
+		// Мягкий TCP-path вместо постоянного multidisorder
+		SplitMode:      SplitCustom,
+		SplitPositions: []int{1},
+		SplitSNIOffset: true,
+
+		TLSRecordSplit: true,
+		TLSRecordSize:  3,
 
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 		FakeTTL:         6,
 
 		ApplyToPacketTypes:     []string{"handshake"},
-		Priority:               35,
-		ModifyFirstDataPackets: 1,
+		Priority:               14,
+		ModifyFirstDataPackets: 0,
 	})
 
 	// ── 30. QUIC fake x6 ──────────────────────────────────────────────────────
