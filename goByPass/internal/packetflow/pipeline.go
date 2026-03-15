@@ -454,7 +454,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 						fakeTTL = strat.FakeTTL
 					}
 					if fakeTTL <= 0 {
-						fakeTTL = 10 // zapret default: TTL=6
+						fakeTTL = 6 // zapret default: TTL=6
 					}
 					for i := 0; i < repeats; i++ {
 						fakePkt := buildFakeQUICPacket(pkt.Data, strat.FakeQUICFileData, fakeTTL)
@@ -1173,7 +1173,7 @@ func setIPTTL(packet []byte, ttl int) error {
 		return nil
 	}
 	if ttl <= 0 {
-		ttl = 10 // zapret default: достаточно до DPI, умирает до сервера (#BugTTL0)
+		ttl = 6 // zapret default: достаточно до DPI, умирает до сервера (#BugTTL0)
 	}
 	packet[8] = byte(ttl)
 	recalculateIPChecksum(packet)

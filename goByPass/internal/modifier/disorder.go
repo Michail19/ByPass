@@ -31,7 +31,7 @@ func (pm *PacketModifier) ApplyDisorder(
 	if err != nil {
 		return nil, nil
 	}
-	
+
 	payloadLen := len(packet) - payloadOffset
 	if payloadLen <= 0 {
 		return nil, nil
@@ -121,6 +121,9 @@ func (pm *PacketModifier) ApplyDisorder(
 	// в results, а realPkt создавался но никогда не использовался (мёртвая переменная).
 	realPkt := make([]byte, len(packet))
 	copy(realPkt, packet)
+	if err := fixPacketChecksums(realPkt); err != nil {
+		return nil, err
+	}
 	results = append(results, realPkt)
 
 	return results, nil
@@ -137,7 +140,7 @@ func setIPTTL(packet []byte, ttl int) error {
 		return nil
 	}
 	if ttl <= 0 {
-		ttl = 10 // zapret default: достаточно чтобы дойти до DPI, умереть до сервера
+		ttl = 6 // zapret default: достаточно чтобы дойти до DPI, умереть до сервера
 	}
 	packet[8] = byte(ttl)
 	recalculateIPChecksum(packet)
