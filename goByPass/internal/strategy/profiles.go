@@ -80,26 +80,20 @@ func (m *Manager) loadDefaultStrategies() {
 	// ── 12. Telegram ──────────────────────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          12,
-		Name:        "telegram-safe-windows",
-		Description: "Telegram Web: split/tlsrec around SNI, handshake-only",
-
+		Name:        "telegram",
+		Description: "Telegram: safe split 1, no fake",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
-		ApplyToQUIC: false,
 
-		// После патча modifier/* это станет нормальным 1+s
 		SplitMode:      SplitCustom,
 		SplitPositions: []int{1},
-		SplitSNIOffset: true,
+		SplitSNIOffset: false,
 
-		// После патча tls_split.go / modifier.go это станет 3+s
-		TLSRecordSplit: true,
-		TLSRecordSize:  3,
-
-		// Без тяжёлого multidisorder/fakedsync
-		Fooling:     FoolingTS,
-		FakeTTL:     6,
-		FakeRepeats: 1,
+		Fooling:        0,
+		FakeTTL:        0,
+		FakeRepeats:    0,
+		TLSRecordSplit: false,
+		TLSRecordSize:  0,
 
 		ApplyToPacketTypes:     []string{"handshake"},
 		Priority:               18,
@@ -224,27 +218,29 @@ func (m *Manager) loadDefaultStrategies() {
 	// ── 27. YouTube safe Windows TCP ─────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          27,
-		Name:        "youtube-safe-windows-2026",
-		Description: "YouTube safe TCP profile for Windows: split/tlsrec around SNI + QUIC fake",
-
+		Name:        "yt-safe-2026",
+		Description: "YouTube SAFE: seqovl + fake + QUIC fake (handshake-only)",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		// Мягкий TCP-path вместо постоянного multidisorder
-		SplitMode:      SplitCustom,
-		SplitPositions: []int{1},
-		SplitSNIOffset: true,
+		SplitMode:         SplitSeqOvl,
+		SplitPositions:    []int{1},
+		SeqOvlLen:         681,
+		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
 
-		TLSRecordSplit: true,
-		TLSRecordSize:  3,
+		Fooling:     FoolingTS,
+		FakeTTL:     6,
+		FakeRepeats: 6,
+		FakeTLSFiles: []string{
+			"tls_clienthello_www_google_com.bin",
+		},
 
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
-		FakeTTL:         6,
 
 		ApplyToPacketTypes:     []string{"handshake"},
-		Priority:               14,
+		Priority:               35,
 		ModifyFirstDataPackets: 0,
 	})
 

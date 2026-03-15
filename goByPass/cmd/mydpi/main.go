@@ -419,16 +419,19 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 // Порядок: первое совпадение побеждает.
 func defaultHostnameRules() []strategy.HostnameRule {
 	return []strategy.HostnameRule{
-		// YouTube only
-		{Pattern: "*.youtube.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube"},
-		{Pattern: "youtube.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube bare"},
-		{Pattern: "*.googlevideo.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube video CDN"},
-		{Pattern: "*.ytimg.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube static"},
-		{Pattern: "*.ggpht.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube avatars/images"},
-		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube embed"},
-		{Pattern: "*.youtubei.googleapis.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube API"},
-		{Pattern: "*.gvt1.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube CDN"},
-		{Pattern: "*.gvt2.com", StrategyName: "yt-multidisorder-2026", Comment: "YouTube CDN"},
+		// Core YouTube endpoints only
+		{Pattern: "*.youtube.com", StrategyName: "youtube-2026", Comment: "YouTube"},
+		{Pattern: "youtube.com", StrategyName: "youtube-2026", Comment: "YouTube bare"},
+		{Pattern: "accounts.youtube.com", StrategyName: "youtube-2026", Comment: "YouTube accounts"},
+		{Pattern: "*.googlevideo.com", StrategyName: "youtube-2026", Comment: "YouTube video CDN"},
+		{Pattern: "*.youtubei.googleapis.com", StrategyName: "youtube-2026", Comment: "YouTube API"},
+		{Pattern: "*.youtube-nocookie.com", StrategyName: "youtube-2026", Comment: "YouTube embed"},
+
+		// Static / avatars / telemetry — не форсируем bypass по умолчанию
+		{Pattern: "*.ytimg.com", StrategyName: "passthrough", Comment: "YouTube static"},
+		{Pattern: "*.ggpht.com", StrategyName: "passthrough", Comment: "Google avatars/images"},
+		{Pattern: "*.gvt1.com", StrategyName: "passthrough", Comment: "GVT passthrough"},
+		{Pattern: "*.gvt2.com", StrategyName: "passthrough", Comment: "GVT passthrough"},
 
 		// Discord
 		{Pattern: "*.discord.com", StrategyName: "discord-2026", Comment: "Discord"},

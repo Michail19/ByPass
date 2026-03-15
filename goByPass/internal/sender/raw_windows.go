@@ -97,7 +97,7 @@ func openWinDivertWithDLL(dll *syscall.DLL) (WinDivertHandle, error) {
 	// UDP 443 нужен для инжекции fake QUIC Initial перед реальным пакетом.
 	// Реальный QUIC-пакет реинжектируется как есть — только fake-пакеты создаются из .bin.
 	// WinDivert ожидает полный пакет (IP+UDP+payload) — fake строится с нуля в pipeline.
-	filter := "outbound and !loopback and (tcp.DstPort == 443 or tcp.DstPort == 80 or (udp.DstPort == 443))"
+	filter := "((outbound and !loopback and (tcp.DstPort == 443 or tcp.DstPort == 80 or udp.DstPort == 443 or udp.DstPort == 53)) or (!outbound and !loopback and udp.SrcPort == 53))"
 	log.Printf("DEBUG: Opening WinDivert with filter: %s", filter)
 
 	filterPtr, err := syscall.BytePtrFromString(filter)

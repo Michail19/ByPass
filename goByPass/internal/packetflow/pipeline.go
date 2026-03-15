@@ -582,8 +582,8 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		shouldBypass = fresh.ID != 1
 
 		// Обновляем IP cache только когда hostname уже известен
-		if flowHostname != "" && (strategyID != cachedStratID || cached == nil) {
-			p.ipCache.PutByIP(dstIP, flowHostname, shouldBypass, strategyID)
+		if selectorHostname != "" && (strategyID != cachedStratID || cached == nil) {
+			p.ipCache.PutByIP(dstIP, selectorHostname, shouldBypass, strategyID)
 		}
 
 	case cached != nil && cachedStratID > 0:
@@ -878,10 +878,12 @@ func isReusableCachedBypassHostname(host string) bool {
 	switch {
 	case h == "youtube.com",
 		h == "www.youtube.com",
+		h == "accounts.youtube.com",
 		strings.HasSuffix(h, ".youtube.com"),
-		strings.HasSuffix(h, ".youtubei.googleapis.com"),
 		strings.HasSuffix(h, ".googlevideo.com"),
+		strings.HasSuffix(h, ".youtubei.googleapis.com"),
 		h == "telegram.org",
+		h == "web.telegram.org",
 		strings.HasSuffix(h, ".telegram.org"),
 		h == "t.me",
 		strings.HasSuffix(h, ".t.me"):

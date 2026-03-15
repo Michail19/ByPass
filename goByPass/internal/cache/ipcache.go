@@ -144,7 +144,8 @@ func (c *IPCache) Put(ip, hostname string, shouldBypass bool, strategyID int) {
 			entry.Hostname = hostname
 		}
 
-		// strategyID <= 0 => это hostname hint из DNS, стратегию не меняем
+		// strategyID <= 0 = DNS seed / hostname hint.
+		// hostname обновляем, но стратегию не трогаем.
 		if strategyID > 0 {
 			if !(hostname == "" && entry.Hostname != "" && strategyID != entry.StrategyID) {
 				entry.ShouldBypass = shouldBypass
@@ -184,6 +185,7 @@ func (c *IPCache) SeedHostnameByIP(ip net.IP, hostname string) {
 	if ip == nil || hostname == "" {
 		return
 	}
+
 	c.Put(ip.String(), hostname, false, 0)
 	log.Printf("[CACHE] Seeded hostname for IP %s: hostname=%s", ip.String(), hostname)
 }

@@ -70,8 +70,15 @@ func (pm *PacketModifier) ApplyDisorder(
 		results = append(results, reversed...)
 
 	default:
-		// настоящий multidisorder
-		results = append(results, reversed...)
+		segs, err := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
+		if err != nil {
+			return nil, err
+		}
+
+		// Настоящий multidisorder: реальные сегменты в обратном порядке.
+		for i := len(segs) - 1; i >= 0; i-- {
+			results = append(results, segs[i])
+		}
 	}
 
 	return results, nil
