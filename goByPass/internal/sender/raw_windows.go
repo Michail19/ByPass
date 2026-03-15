@@ -386,24 +386,37 @@ func fixUDPChecksum(packet []byte) {
 	if len(packet) < 28 {
 		return
 	}
+
 	ipHeaderLen := int((packet[0] & 0x0F) * 4)
-	if len(packet) < ipHeaderLen+8 {
+	if ipHeaderLen < 20 || len(packet) < ipHeaderLen+8 {
 		return
 	}
+
+	totalLen := int(binary.BigEndian.Uint16(packet[2:4]))
+	if totalLen < ipHeaderLen+8 || totalLen > len(packet) {
+		totalLen = len(packet)
+	}
+
 	udpOffset := ipHeaderLen
+	udpLen := int(binary.BigEndian.Uint16(packet[udpOffset+4 : udpOffset+6]))
+	if udpLen < 8 || udpOffset+udpLen > totalLen {
+		udpLen = totalLen - udpOffset
+	}
+	if udpLen < 8 {
+		return
+	}
 
 	// Обнуляем checksum
 	packet[udpOffset+6] = 0
 	packet[udpOffset+7] = 0
 
-	udpLen := len(packet) - udpOffset
 	pseudo := make([]byte, 12)
 	copy(pseudo[0:4], packet[12:16]) // Source IP
 	copy(pseudo[4:8], packet[16:20]) // Dest IP
-	pseudo[9] = 17                   // Protocol UDP
+	pseudo[9] = 17                   // UDP
 	binary.BigEndian.PutUint16(pseudo[10:12], uint16(udpLen))
 
-	udpData := packet[udpOffset:]
+	udpData := packet[udpOffset : udpOffset+udpLen]
 	fullData := make([]byte, 12+len(udpData))
 	copy(fullData, pseudo)
 	copy(fullData[12:], udpData)
@@ -415,31 +428,43 @@ func fixUDPChecksum(packet []byte) {
 	packet[udpOffset+6] = byte(checksum >> 8)
 	packet[udpOffset+7] = byte(checksum & 0xFF)
 }
+
 func fixTCPChecksum(packet []byte) {
 	if len(packet) < 40 {
 		return
 	}
 
-	ipHeaderLen := (packet[0] & 0x0F) * 4
-	tcpOffset := int(ipHeaderLen)
-
-	if len(packet) < tcpOffset+20 {
+	ipHeaderLen := int((packet[0] & 0x0F) * 4)
+	if ipHeaderLen < 20 {
 		return
 	}
 
+	totalLen := int(binary.BigEndian.Uint16(packet[2:4]))
+	if totalLen < ipHeaderLen+20 || totalLen > len(packet) {
+		totalLen = len(packet)
+	}
+
+	tcpOffset := ipHeaderLen
+	if len(packet) < tcpOffset+20 || totalLen < tcpOffset+20 {
+		return
+	}
+
+	// checksum field
 	packet[tcpOffset+16] = 0
 	packet[tcpOffset+17] = 0
+
+	tcpLen := totalLen - tcpOffset
+	if tcpLen < 20 {
+		return
+	}
 
 	pseudo := make([]byte, 12)
 	copy(pseudo[0:4], packet[12:16]) // Source IP
 	copy(pseudo[4:8], packet[16:20]) // Dest IP
+	pseudo[9] = 6                    // TCP
+	binary.BigEndian.PutUint16(pseudo[10:12], uint16(tcpLen))
 
-	pseudo[9] = 6 // Protocol TCP
-	binary.BigEndian.PutUint16(pseudo[10:12], uint16(len(packet)-tcpOffset))
-
-	tcpData := packet[tcpOffset:]
-	//fullData := append(pseudo, tcpData...)
-
+	tcpData := packet[tcpOffset : tcpOffset+tcpLen]
 	full := make([]byte, 12+len(tcpData))
 	copy(full, pseudo)
 	copy(full[12:], tcpData)

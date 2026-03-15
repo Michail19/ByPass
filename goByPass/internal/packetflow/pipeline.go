@@ -155,21 +155,31 @@ func (p *Pipeline) Start() error {
 
 // Stop останавливает конвейер
 func (p *Pipeline) Stop() {
-	p.cancel()
+	if p == nil {
+		return
+	}
 
+	if p.cancel != nil {
+		p.cancel()
+	}
+
+	// Сначала останавливаем capturer, чтобы packetForwarder перестал читать новые пакеты.
 	if err := p.capturer.Stop(); err != nil {
 		log.Printf("Error stopping capturer: %v", err)
 	}
 
-	p.wgWorkers.Wait()
+	// Ждём завершения ВСЕХ горутин, которые были добавлены через p.wg:
+	//   - workers
+	//   - resultProcessor
+	//   - packetForwarder
+	//
+	// Важно: worker'ы и packetForwarder выходят по p.ctx.Done(), а не по close(workerChans),
+	// поэтому закрывать workerChans тут не нужно и даже опасно — можно словить send on closed channel.
+	p.wg.Wait()
 
-	for _, ch := range p.workerChans {
-		close(ch)
-	}
-
-	close(p.resultChan)
-	p.wgResults.Wait()
-
+	// После остановки producers/consumers resultChan уже никто не использует,
+	// так что закрывать его не требуется.
+	// sender закрываем в самом конце.
 	if err := p.sender.Close(); err != nil {
 		log.Printf("Error closing sender: %v", err)
 	}
@@ -211,18 +221,22 @@ func (p *Pipeline) packetForwarder() {
 				// ClientHello дропались → TLS handshake не завершался → сайты не грузились.
 				select {
 				case ch <- packet:
-				case <-time.After(2 * time.Millisecond):
+				case <-time.After(5 * time.Millisecond):
 					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
 					log.Printf("WARNING: Worker %d queue full, dropping handshake packet", workerIdx)
 				}
 			} else {
+				// Для обычных data-пакетов тоже даём короткое окно ожидания.
+				// Немедленный drop слишком болезнен для интерактивных TLS-сессий
+				// вроде Telegram Web: retransmit есть, но пользователь видит лаги
+				// и "полуживые" чаты.
 				select {
 				case ch <- packet:
 				case <-p.ctx.Done():
 					return
-				default:
-					// data-пакеты дропаем немедленно — TCP retransmit восстановит.
+				case <-time.After(1 * time.Millisecond):
 					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
+					log.Printf("WARNING: Worker %d queue full, dropping data packet", workerIdx)
 				}
 			}
 		}
@@ -507,6 +521,12 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		flow.Mu.Unlock()
 	}
 
+	// Обновляем локальную копию после первого прохода анализа,
+	// иначе ниже bypass-блок может повторно вызвать Analyze() на том же пакете.
+	flow.Mu.RLock()
+	isAnalyzed = flow.IsAnalyzed
+	flow.Mu.RUnlock()
+
 	// Проверяем кэш
 	var shouldBypass bool
 	var strategyID int
@@ -530,8 +550,14 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		"tcp",
 	)
 
-	// 2. Если hostname ещё не известен, а в кэше уже есть non-passthrough — кэш важнее fresh passthrough
-	preferCached := flowHostname == "" && cached != nil && cachedStratID > 1
+	// 2. Если hostname ещё не известен, reuse cached non-passthrough ТОЛЬКО
+	// для явно YouTube-like hostname из IP cache.
+	// Иначе shared Google IP может наследовать прошлую YT-стратегию
+	// и ломать чужие TCP потоки.
+	preferCached := flowHostname == "" &&
+		cached != nil &&
+		cachedStratID > 1 &&
+		isLikelyYouTubeHostname(cached.Hostname)
 
 	switch {
 	case preferCached && (fresh == nil || fresh.ID == 1):
@@ -665,13 +691,21 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		//   - после этого та же стратегия сможет примениться уже по hostname.
 		//
 		// Это защищает от слишком раннего fake SYN на bare-IP Google/YouTube flow.
+		// Разрешаем bare-IP SYN-data, если этот IP уже уверенно закэширован
+		// как YouTube-like hostname и кэш указывает на ту же стратегию.
+		cachedYouTube := cached != nil &&
+			cachedStratID > 1 &&
+			cachedStratID == strategyID &&
+			isLikelyYouTubeHostname(cached.Hostname)
+
 		skipBareSynData := isSYN &&
 			flowHostname == "" &&
 			strats != nil &&
 			strats.SynData &&
 			strats.ApplyToTLS &&
 			!strats.ApplyToHTTP &&
-			!strats.AnyProtocol
+			!strats.AnyProtocol &&
+			!cachedYouTube
 
 		if skipBareSynData {
 			log.Printf(
@@ -805,16 +839,20 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	} else {
 		p.sendPacket(pkt.Data, pkt.Addr)
 	}
+}
 
-	// Статистика
-	processTime := time.Since(startTime)
-	p.updateStats(func(stats *PipelineStats) {
-		stats.PacketsProcessed++
-		stats.TotalProcessTime += processTime
-		if stats.PacketsProcessed > 0 {
-			stats.AvgProcessTime = stats.TotalProcessTime / time.Duration(stats.PacketsProcessed)
-		}
-	})
+func isLikelyYouTubeHostname(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return false
+	}
+
+	return strings.Contains(h, "youtube") ||
+		strings.Contains(h, "googlevideo") ||
+		strings.Contains(h, "ytimg") ||
+		strings.Contains(h, "ggpht") ||
+		strings.Contains(h, "gvt1") ||
+		strings.Contains(h, "gvt2")
 }
 
 // fixTCPChecksum пересчитывает TCP checksum без аллокаций (#6).
@@ -1039,20 +1077,29 @@ func (p *Pipeline) sendModifiedPacket(data []byte, addr []byte) bool {
 func (p *Pipeline) resultProcessor() {
 	defer p.wg.Done()
 
-	for result := range p.resultChan {
-		if p.strategyMgr != nil {
-			success := len(result.ModifiedPackets) > 0 || result.SendOriginal
-
-			strategyResult := &strategy.StrategyResult{
-				StrategyID:   result.StrategyID,
-				Success:      success,
-				ResponseTime: 0,
-				BytesSent:    len(result.ModifiedPackets) * 1500,
-				PacketsSent:  len(result.ModifiedPackets),
-				Timestamp:    time.Now(),
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case result, ok := <-p.resultChan:
+			if !ok {
+				return
 			}
 
-			p.strategyMgr.ReportResult(strategyResult)
+			if p.strategyMgr != nil {
+				success := len(result.ModifiedPackets) > 0 || result.SendOriginal
+
+				strategyResult := &strategy.StrategyResult{
+					StrategyID:   result.StrategyID,
+					Success:      success,
+					ResponseTime: 0,
+					BytesSent:    len(result.ModifiedPackets) * 1500,
+					PacketsSent:  len(result.ModifiedPackets),
+					Timestamp:    time.Now(),
+				}
+
+				p.strategyMgr.ReportResult(strategyResult)
+			}
 		}
 	}
 }

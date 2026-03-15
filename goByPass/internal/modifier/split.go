@@ -6,7 +6,16 @@ import (
 	"log"
 )
 
-var ErrSplitSNIOffsetUnsupported = errors.New("SplitSNIOffset/alignSNI is not implemented")
+var (
+	ErrSplitSNIOffsetUnsupported = errors.New("SplitSNIOffset/alignSNI is not implemented")
+
+	// SeqOvl нельзя silently деградировать в "верни original packet":
+	// иначе modifier сочтёт технику успешно применённой и на wire уйдёт
+	// fake-only + original вместо настоящего seqovl/split.
+	ErrSeqOvlInvalidLen   = errors.New("seqovl_len must be > 0")
+	ErrSeqOvlPatternEmpty = errors.New("seqovl pattern data is empty")
+	ErrSeqOvlNoPayload    = errors.New("seqovl requires TCP payload")
+)
 
 // ApplySplit применяет разбиение пакета на сегменты в указанных позициях.
 // Позиции сортируются — неотсортированный список приводит к перекрытию сегментов.
@@ -69,15 +78,19 @@ func (pm *PacketModifier) ApplySeqOvl(
 ) ([][]byte, error) {
 	ipHdrLen, tcpHdrLen, payloadOffset, err := parseIPv4TCP(packet)
 	if err != nil {
-		return [][]byte{packet}, nil
+		return nil, err
 	}
-	if ovlLen <= 0 || len(pattern) == 0 {
-		return [][]byte{packet}, nil
+
+	if ovlLen <= 0 {
+		return nil, ErrSeqOvlInvalidLen
+	}
+	if len(pattern) == 0 {
+		return nil, ErrSeqOvlPatternEmpty
 	}
 
 	payloadLen := len(packet) - payloadOffset
 	if payloadLen <= 0 {
-		return [][]byte{packet}, nil
+		return nil, ErrSeqOvlNoPayload
 	}
 
 	originalSeq := binary.BigEndian.Uint32(packet[ipHdrLen+4:])
@@ -97,12 +110,8 @@ func (pm *PacketModifier) ApplySeqOvl(
 	binary.BigEndian.PutUint32(ovlPkt[ipHdrLen+4:], ovlSeq)
 	copy(ovlPkt[payloadOffset:], ovlData)
 
-	// DF: сохраняем из оригинала (#6) — ovlPkt скопирован из packet[:payloadOffset],
-	// packet[6] уже содержит оригинальные Flags+FragOffset.
-	//
-	// SeqOvl TTL: ovl-пакет должен умереть до сервера — иначе TCP стек сервера
-	// получает пакет с seq < ISN, который вне TCP-окна → RST или retransmit (#SeqOvlTTL).
-	// Используем seqOvlTTL (обычно DisorderTTL или FakeTTL из стратегии, default 6).
+	// DF сохраняется из оригинала.
+	// ovl-пакет должен умереть до сервера, но дойти до DPI.
 	setIPTTL(ovlPkt, seqOvlTTL)
 	if err := fixPacketChecksums(ovlPkt); err != nil {
 		return nil, err
@@ -110,7 +119,6 @@ func (pm *PacketModifier) ApplySeqOvl(
 	results = append(results, ovlPkt)
 
 	// 2. Реальные сегменты в прямом порядке
-	// Dedup без map-аллокации (#10)
 	var validPos []int
 	for _, pos := range splitPositions {
 		if pos > 0 && pos < payloadLen {

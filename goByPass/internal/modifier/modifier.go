@@ -84,9 +84,16 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	}
 
 	// IPIDZero (для Google/Cloudflare)
+	// Меняем поле IP ID у исходного пакета, поэтому сразу чиним IPv4 checksum.
+	// Иначе при SendOriginal=true наружу может уйти оригинальный пакет
+	// с уже изменённым IP ID, но со старой checksum.
+	//
+	// TCP checksum трогать НЕ нужно:
+	// pseudo-header включает src/dst/proto/len, но не включает IP ID.
 	if strat.IPIDZero {
 		packet[4] = 0
 		packet[5] = 0
+		recalculateIPChecksum(packet)
 	}
 
 	isClientHello := isClientHelloPacket(packet, payloadOffset, payloadLen)

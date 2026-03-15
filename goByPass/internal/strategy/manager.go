@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -556,6 +557,35 @@ func (m *Manager) passthroughStrategy() *Strategy {
 	return m.strategies[1]
 }
 
+// activeStrategyForKnownService возвращает текущую active-стратегию,
+// если она существует, не является passthrough и подходит под protocol/port.
+//
+// ВАЖНО: используем activeID только для уже распознанных сервисов
+// (builtin hostname mapping / Google IP special-case), а не как глобальный fallback.
+// Так discovery реально начинает влиять на боевой трафик,
+// но direct-by-default для неизвестных сайтов сохраняется.
+func (m *Manager) activeStrategyForKnownService(protocol string, port int) *Strategy {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.activeID <= 0 {
+		return nil
+	}
+
+	s := m.strategies[m.activeID]
+	if s == nil {
+		return nil
+	}
+	if isPassthrough(s) {
+		return nil
+	}
+	if !protocolMatches(s, protocol, port) {
+		return nil
+	}
+
+	return s
+}
+
 // selectByHints ищет лучшую (минимальный Priority, потом минимальный ID)
 // НЕ-passthrough стратегию, имя которой содержит любой из hints и которая
 // подходит для protocol/port.
@@ -658,26 +688,33 @@ func (m *Manager) bestForProtocol(protocol string, port int) *Strategy {
 
 // SelectStrategy выбирает стратегию для пакета.
 //
-// Новый порядок:
-//  0. HostnameRules — абсолютный приоритет
-//  1. testOverrides — форсирование от Discovery
-//  2. builtinHostnameMappings — только для узко известных сервисов
-//  3. Google IP special-case для hostname-less QUIC YouTube CDN
-//  4. Всё неизвестное — passthrough (strategy 1)
+// Порядок:
+//  0. Discovery override — абсолютный приоритет только во время discovery
+//  1. HostnameRules — абсолютный приоритет среди постоянных правил
+//  2. Обычный test override (если используется вне discovery)
+//  3. builtinHostnameMappings — для известных сервисов;
+//     сначала пробуем active strategy, затем встроенные hints
+//  4. Google IP special-case для hostname-less QUIC/TLS YouTube CDN;
+//     сначала active strategy, затем YouTube/QUIC hints
+//  5. Всё неизвестное — passthrough (strategy 1)
 //
 // Идея: direct-by-default.
 // Неизвестный сайт НЕ должен получать light/medium/hard автоматически.
 func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string) *Strategy {
+	normalizedHostname := strings.ToLower(strings.TrimSuffix(hostname, "."))
+
 	// 0. Discovery override — абсолютный приоритет только во время discovery
 	if m.isDiscoveryRunning() {
 		m.testOverridesMu.RLock()
 		var overrideStratID int
 		var hasOverride bool
-		if hostname != "" {
-			overrideStratID, hasOverride = m.testOverrides[strings.ToLower(hostname)]
+
+		if normalizedHostname != "" {
+			overrideStratID, hasOverride = m.testOverrides[normalizedHostname]
 		} else if protocol == "udp" {
 			overrideStratID, hasOverride = m.testOverrides["ip:"+ip]
 		}
+
 		m.testOverridesMu.RUnlock()
 
 		if hasOverride {
@@ -691,8 +728,8 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 	}
 
 	// 1. Hostname rules
-	if hostname != "" {
-		if s := m.hostnameRuleStrategy(hostname); s != nil {
+	if normalizedHostname != "" {
+		if s := m.hostnameRuleStrategy(normalizedHostname); s != nil {
 			return s
 		}
 	} else if protocol == "udp" {
@@ -705,15 +742,17 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// 2. Обычный test override, если он тебе вообще нужен вне discovery
+	// 2. Обычный override вне discovery
 	m.testOverridesMu.RLock()
 	var overrideStratID int
 	var hasOverride bool
-	if hostname != "" {
-		overrideStratID, hasOverride = m.testOverrides[strings.ToLower(hostname)]
+
+	if normalizedHostname != "" {
+		overrideStratID, hasOverride = m.testOverrides[normalizedHostname]
 	} else if protocol == "udp" {
 		overrideStratID, hasOverride = m.testOverrides["ip:"+ip]
 	}
+
 	m.testOverridesMu.RUnlock()
 
 	if hasOverride {
@@ -725,34 +764,72 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// 3. Google IP special-case
-	// Только когда hostname ещё не известен.
-	if hostname == "" && m.isGoogleIP(ip) {
-		if protocol == "udp" {
-			if s := m.selectByHintOrder([]string{"quic-fake", "yt-discord", "yt-syndata", "youtube"}, protocol, port); s != nil {
-				log.Printf("[SELECT] Google QUIC IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
+	// 3. builtinHostnameMappings — теперь реально используются
+	if normalizedHostname != "" {
+		for _, mapping := range builtinHostnameMappings {
+			if !strings.Contains(normalizedHostname, mapping.hostnameContains) {
+				continue
+			}
+
+			// Если discovery уже выбрал лучшую стратегию — используем её
+			// для распознанного сервиса.
+			if s := m.activeStrategyForKnownService(protocol, port); s != nil {
+				log.Printf("[SELECT] Active strategy for known service hostname=%q ip=%s:%d → strategy %d (%s)",
+					normalizedHostname, ip, port, s.ID, s.Name)
 				return s
 			}
+
+			// Иначе fallback на встроенные hints.
+			if s := m.selectByHintOrder(mapping.strategyHints, protocol, port); s != nil {
+				log.Printf("[SELECT] Builtin hostname mapping hostname=%q ip=%s:%d → strategy %d (%s)",
+					normalizedHostname, ip, port, s.ID, s.Name)
+				return s
+			}
+
+			// hostname распознан, но подходящей non-passthrough стратегии нет.
+			break
 		}
-		if protocol == "tcp" && port == 443 {
-			if s := m.selectByHintOrder([]string{"yt-discord", "yt-syndata", "youtube"}, protocol, port); s != nil {
-				log.Printf("[SELECT] Google TCP IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
+	}
+
+	// 4. Google IP special-case
+	// ОСТАВЛЯЕМ ТОЛЬКО ДЛЯ UDP/QUIC.
+	//
+	// Для TCP: bare Google IP слишком часто относится не только к YouTube,
+	// но и к shared Google frontends / API / auth / вспомогательным сервисам.
+	// Агрессивный fallback "любой Google TCP:443 -> YouTube strategy"
+	// ломает часть потоков и даёт симптомы вроде "нет интернета" в YouTube UI.
+	//
+	// Для TCP мы теперь полагаемся на:
+	//   - HostnameRules после анализа ClientHello/SNI
+	//   - direct-by-default, если hostname ещё не известен
+	if normalizedHostname == "" && m.isGoogleIP(ip) {
+		// Если discovery уже выбрал лучшую стратегию — используем её
+		// только для QUIC/UDP case.
+		if protocol == "udp" {
+			if s := m.activeStrategyForKnownService(protocol, port); s != nil {
+				log.Printf("[SELECT] Active strategy for Google QUIC IP %s:%d → strategy %d (%s)",
+					ip, port, s.ID, s.Name)
+				return s
+			}
+
+			if s := m.selectByHintOrder([]string{"quic-fake", "yt-multidisorder", "yt-syndata", "youtube"}, protocol, port); s != nil {
+				log.Printf("[SELECT] Google QUIC IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
 				return s
 			}
 		}
 	}
 
-	// 4. Direct-by-default
+	// 5. Direct-by-default
 	if ps := m.passthroughStrategy(); ps != nil {
-		if hostname != "" {
-			log.Printf("[SELECT] Direct-by-default hostname=%q ip=%s:%d → passthrough", hostname, ip, port)
+		if normalizedHostname != "" {
+			log.Printf("[SELECT] Direct-by-default hostname=%q ip=%s:%d → passthrough", normalizedHostname, ip, port)
 		} else {
 			log.Printf("[SELECT] Direct-by-default ip=%s:%d → passthrough", ip, port)
 		}
 		return ps
 	}
 
-	log.Printf("[SELECT] No passthrough strategy configured for %s:%d (hostname=%q)", ip, port, hostname)
+	log.Printf("[SELECT] No passthrough strategy configured for %s:%d (hostname=%q)", ip, port, normalizedHostname)
 	return nil
 }
 
@@ -933,6 +1010,176 @@ func (m *Manager) ListStrategies() []*Strategy {
 	})
 
 	return strategies
+}
+
+// ValidateRuntimeAssets проверяет, что стратегии, которым нужны runtime-asset'ы,
+// действительно имеют загруженные данные, а не только имена файлов в конфиге.
+//
+// Это fail-fast защита: лучше упасть на старте с понятной ошибкой,
+// чем silently сломать TLS/QUIC в рантайме.
+func (m *Manager) ValidateRuntimeAssets() error {
+	strategies := m.ListStrategies()
+
+	for _, s := range strategies {
+		if s == nil {
+			continue
+		}
+
+		if s.NeedsSeqOvl() {
+			if strings.TrimSpace(s.SeqOvlPatternFile) == "" {
+				return fmt.Errorf("strategy %d (%s): split_mode=seqovl but seqovl_pattern_file is empty", s.ID, s.Name)
+			}
+			if len(s.SeqOvlPatternData) == 0 {
+				return fmt.Errorf(
+					"strategy %d (%s): seqovl_pattern_file=%q configured but SeqOvlPatternData is empty (asset not loaded)",
+					s.ID, s.Name, s.SeqOvlPatternFile,
+				)
+			}
+		}
+
+		if len(s.FakeTLSFiles) > 0 {
+			if len(s.FakeTLSFilesData) != len(s.FakeTLSFiles) {
+				return fmt.Errorf(
+					"strategy %d (%s): fake_tls_files configured=%d but loaded fake TLS assets=%d",
+					s.ID, s.Name, len(s.FakeTLSFiles), len(s.FakeTLSFilesData),
+				)
+			}
+
+			for i, data := range s.FakeTLSFilesData {
+				if len(data) == 0 {
+					return fmt.Errorf(
+						"strategy %d (%s): fake_tls_files[%d]=%q loaded as empty data",
+						s.ID, s.Name, i, s.FakeTLSFiles[i],
+					)
+				}
+			}
+		}
+
+		if strings.TrimSpace(s.FakeHTTPFile) != "" && len(s.FakeHTTPFileData) == 0 {
+			return fmt.Errorf(
+				"strategy %d (%s): fake_http_file=%q configured but FakeHTTPFileData is empty",
+				s.ID, s.Name, s.FakeHTTPFile,
+			)
+		}
+
+		if strings.TrimSpace(s.FakeQUICFile) != "" && len(s.FakeQUICFileData) == 0 {
+			return fmt.Errorf(
+				"strategy %d (%s): fake_quic_file=%q configured but FakeQUICFileData is empty",
+				s.ID, s.Name, s.FakeQUICFile,
+			)
+		}
+
+		if strings.TrimSpace(s.FakeUnknownUDPFile) != "" && len(s.FakeUnknownUDPFileData) == 0 {
+			return fmt.Errorf(
+				"strategy %d (%s): fake_unknown_udp_file=%q configured but FakeUnknownUDPFileData is empty",
+				s.ID, s.Name, s.FakeUnknownUDPFile,
+			)
+		}
+	}
+
+	return nil
+}
+
+func readStrategyAsset(baseDir, name string) ([]byte, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("empty asset name")
+	}
+
+	assetPath := name
+	if !filepath.IsAbs(assetPath) {
+		assetPath = filepath.Join(baseDir, name)
+	}
+	assetPath = filepath.Clean(assetPath)
+
+	data, err := os.ReadFile(assetPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %q: %w", assetPath, err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("asset %q is empty", assetPath)
+	}
+
+	return data, nil
+}
+
+func (m *Manager) loadAssetsIntoStrategy(s *Strategy, baseDir string) error {
+	if s == nil {
+		return nil
+	}
+
+	// SeqOvl pattern
+	if strings.TrimSpace(s.SeqOvlPatternFile) != "" {
+		data, err := readStrategyAsset(baseDir, s.SeqOvlPatternFile)
+		if err != nil {
+			return fmt.Errorf("seqovl_pattern_file=%q: %w", s.SeqOvlPatternFile, err)
+		}
+		s.SeqOvlPatternData = append(s.SeqOvlPatternData[:0], data...)
+	}
+
+	// Fake TLS files
+	if len(s.FakeTLSFiles) > 0 {
+		s.FakeTLSFilesData = make([][]byte, 0, len(s.FakeTLSFiles))
+		for _, name := range s.FakeTLSFiles {
+			data, err := readStrategyAsset(baseDir, name)
+			if err != nil {
+				return fmt.Errorf("fake_tls_file=%q: %w", name, err)
+			}
+			s.FakeTLSFilesData = append(s.FakeTLSFilesData, append([]byte(nil), data...))
+		}
+	}
+
+	// Fake HTTP
+	if strings.TrimSpace(s.FakeHTTPFile) != "" {
+		data, err := readStrategyAsset(baseDir, s.FakeHTTPFile)
+		if err != nil {
+			return fmt.Errorf("fake_http_file=%q: %w", s.FakeHTTPFile, err)
+		}
+		s.FakeHTTPFileData = append(s.FakeHTTPFileData[:0], data...)
+	}
+
+	// Fake QUIC
+	if strings.TrimSpace(s.FakeQUICFile) != "" {
+		data, err := readStrategyAsset(baseDir, s.FakeQUICFile)
+		if err != nil {
+			return fmt.Errorf("fake_quic_file=%q: %w", s.FakeQUICFile, err)
+		}
+		s.FakeQUICFileData = append(s.FakeQUICFileData[:0], data...)
+	}
+
+	// Fake unknown UDP
+	if strings.TrimSpace(s.FakeUnknownUDPFile) != "" {
+		data, err := readStrategyAsset(baseDir, s.FakeUnknownUDPFile)
+		if err != nil {
+			return fmt.Errorf("fake_unknown_udp_file=%q: %w", s.FakeUnknownUDPFile, err)
+		}
+		s.FakeUnknownUDPFileData = append(s.FakeUnknownUDPFileData[:0], data...)
+	}
+
+	return nil
+}
+
+// LoadRuntimeAssets загружает все file-backed runtime asset'ы для уже активных стратегий.
+// Вызывать на старте ПОСЛЕ loadDefaultStrategies()/LoadFromFile() и ДО ValidateRuntimeAssets().
+func (m *Manager) LoadRuntimeAssets(baseDir string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		baseDir = "."
+	}
+
+	for _, s := range m.strategies {
+		if s == nil {
+			continue
+		}
+		if err := m.loadAssetsIntoStrategy(s, baseDir); err != nil {
+			return fmt.Errorf("strategy %d (%s): %w", s.ID, s.Name, err)
+		}
+	}
+
+	return nil
 }
 
 // SaveToFile сохраняет стратегии в файл

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -82,35 +83,82 @@ func main() {
 		cfg.Capture.QueueNum = *queueNum
 	}
 	if *ports != "" {
-		cfg.Firewall.Ports = parsePorts(*ports)
+		parsedPorts, err := parsePorts(*ports)
+		if err != nil {
+			log.Fatalf("Invalid --ports value: %v", err)
+		}
+		cfg.Firewall.Ports = parsedPorts
 	}
 	if *workers > 0 {
 		cfg.Pipeline.Workers = *workers
 	}
 
-	setupLogging(cfg.Logging)
+	// Повторно валидируем конфиг после CLI overrides.
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Invalid configuration after CLI overrides: %v", err)
+	}
+
+	logFile := setupLogging(cfg.Logging)
 
 	log.Printf("Starting %s version %s", cfg.App.Name, cfg.App.Version)
 	log.Printf("  OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
 	log.Printf("  Config: queue=%d, ports=%v, workers=%d",
 		cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Pipeline.Workers)
 
+	if cfg.Strategy.DefaultStrategy != "" {
+		log.Printf("WARNING: strategy.default_strategy=%q is currently informational only; runtime selection is still direct-by-default + hostname rules", cfg.Strategy.DefaultStrategy)
+	}
+
+	if !cfg.Cache.IPCache.Enabled {
+		log.Printf("WARNING: cache.ip_cache.enabled=false is not fully implemented yet; IPCache will still be created")
+	}
+	if !cfg.Cache.DomainCache.Enabled {
+		log.Printf("WARNING: cache.domain_cache.enabled=false is not fully implemented yet; DomainCache will still be created")
+	}
+	if cfg.Sender.Type != "" && cfg.Sender.Type != "raw" {
+		log.Printf("WARNING: sender.type=%q is not used by initializeComponents; raw sender will still be created", cfg.Sender.Type)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	components, err := initializeComponents(ctx, cfg)
 	if err != nil {
-		log.Fatalf("Failed to initialize components: %v", err)
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		log.Printf("Failed to initialize components: %v", err)
+		os.Exit(1)
+	}
+	components.logFile = logFile
+
+	cleanupOnError := func() {
+		if components.pipeline != nil {
+			components.pipeline.Stop()
+		}
+		if components.conntrack != nil {
+			components.conntrack.Stop()
+		}
+		if components.strategyMgr != nil {
+			components.strategyMgr.Stop()
+		}
+		if components.firewall != nil {
+			_ = components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
+		}
+		components.cleanup()
 	}
 
 	// Firewall в components
 	if err := components.firewall.AddRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction); err != nil {
-		log.Fatalf("Failed to setup firewall: %v", err)
+		log.Printf("Failed to setup firewall: %v", err)
+		cleanupOnError()
+		os.Exit(1)
 	}
 
 	if err := components.pipeline.Start(); err != nil {
-		_ = components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
-		log.Fatalf("Failed to start pipeline: %v", err)
+		log.Printf("Failed to start pipeline: %v", err)
+		cleanupOnError()
+		os.Exit(1)
 	}
 
 	// Запускаем авто-дискавери если нужно.
@@ -164,19 +212,59 @@ type Components struct {
 }
 
 // initializeComponents создает все необходимые компоненты
-func initializeComponents(ctx context.Context, cfg *config.Config) (*Components, error) {
+func initializeComponents(ctx context.Context, cfg *config.Config) (components *Components, err error) {
+	components = &Components{}
+
+	defer func() {
+		if err == nil || components == nil {
+			return
+		}
+		if components.pipeline != nil {
+			components.pipeline.Stop()
+		}
+		if components.capturer != nil {
+			_ = components.capturer.Stop()
+		}
+		if components.sender != nil {
+			_ = components.sender.Close()
+		}
+		if components.conntrack != nil {
+			components.conntrack.Stop()
+		}
+		if components.strategyMgr != nil {
+			components.strategyMgr.Stop()
+		}
+		if components.ipCache != nil {
+			components.ipCache.Stop()
+		}
+		if components.domainCache != nil {
+			components.domainCache.Stop()
+		}
+		if components.firewall != nil && cfg.Firewall.CleanupOnExit {
+			_ = components.firewall.RemoveRule(cfg.Capture.QueueNum, cfg.Firewall.Ports, cfg.Firewall.Direction)
+		}
+		if components.logFile != nil {
+			_ = components.logFile.Close()
+		}
+	}()
+
 	ipCache := cache.NewIPCache(
 		cfg.Cache.IPCache.TTL,
 		cfg.Cache.IPCache.MaxSize,
 	)
+	components.ipCache = ipCache
+
 	domainCache := cache.NewDomainCache(
 		cfg.Cache.DomainCache.TTL,
 		cfg.Cache.DomainCache.MaxSize,
 	)
+	components.domainCache = domainCache
 	if len(cfg.Cache.DomainCache.Preload) > 0 {
 		// Preload уже запускает горутины внутри (semaphore, до 5 одновременно).
 		// Вызываем без внешнего `go` — иначе double goroutine spawn.
-		domainCache.Preload(cfg.Cache.DomainCache.Preload)
+		if err := domainCache.Preload(cfg.Cache.DomainCache.Preload); err != nil {
+			log.Printf("WARNING: domain cache preload failed: %v", err)
+		}
 	}
 
 	connManager := conntrack.NewManager(
@@ -188,15 +276,6 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	// Менеджер стратегий: сначала встроенные, затем из файла (если задан).
 	// LoadFromFile добавляет/обновляет стратегии по ID — встроенные не удаляются.
 	strategyMgr := strategy.NewManager()
-
-	//if s, ok := strategyMgr.GetStrategy(12); ok {
-	//	log.Printf("[DEBUG] strategy12: SplitSNIOffset=%v TLSRecordSplit=%v ModifyFirstDataPackets=%d",
-	//		s.SplitSNIOffset, s.TLSRecordSplit, s.ModifyFirstDataPackets)
-	//}
-	//if s, ok := strategyMgr.GetStrategy(26); ok {
-	//	log.Printf("[DEBUG] strategy26: MultiDisorder=%v ModifyFirstDataPackets=%d",
-	//		s.MultiDisorder, s.ModifyFirstDataPackets)
-	//}
 
 	if cfg.Strategy.StrategyFile != "" {
 		// сначала merge из JSON
@@ -215,7 +294,23 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 			log.Printf("[DEBUG] ACTIVE strategy26: MultiDisorder=%v ModifyFirstDataPackets=%d",
 				s.MultiDisorder, s.ModifyFirstDataPackets)
 		}
+	}
 
+	// Runtime asset'ы (.bin) живут отдельно от JSON-описания стратегий.
+	// Сначала грузим их с диска, потом уже валидируем.
+	assetBaseDir := "configs/strategies"
+	if strings.TrimSpace(cfg.Strategy.StrategyFile) != "" {
+		assetBaseDir = filepath.Dir(cfg.Strategy.StrategyFile)
+	}
+
+	if err := strategyMgr.LoadRuntimeAssets(assetBaseDir); err != nil {
+		return components, fmt.Errorf("failed to load strategy runtime assets from %s: %w", assetBaseDir, err)
+	}
+
+	// Fail-fast: если стратегия ссылается на asset'ы, но runtime-данные всё ещё пустые,
+	// лучше упасть на старте, чем silently ломать handshake/QUIC.
+	if err := strategyMgr.ValidateRuntimeAssets(); err != nil {
+		return components, fmt.Errorf("strategy runtime assets validation failed: %w", err)
 	}
 
 	// ── Hostname Rules ────────────────────────────────────────────────────────
@@ -248,7 +343,7 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 	packetModifier := modifier.NewPacketModifier(strategyMgr, ipCache)
 
 	var s sender.Sender
-	s, err := sender.NewSender(sender.Config{
+	s, err = sender.NewSender(sender.Config{
 		Interface:   cfg.Sender.Interface,
 		BufferSize:  cfg.Sender.BufferSize,
 		SendTimeout: cfg.Sender.SendTimeout,
@@ -306,22 +401,16 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 		},
 	)
 
-	return &Components{
-		ipCache:     ipCache,
-		domainCache: domainCache,
-		conntrack:   connManager,
-		analyzer:    analyzer,
-		strategyMgr: strategyMgr,
-		modifier:    packetModifier,
-		sender:      s,
-		capturer:    capturer,
-		pipeline:    pipeline,
-		firewall:    fw,
-		logFile:     nil,
-		queueNum:    cfg.Capture.QueueNum,
-		ports:       cfg.Firewall.Ports,
-		direction:   cfg.Firewall.Direction,
-	}, nil
+	components.conntrack = connManager
+	components.analyzer = analyzer
+	components.strategyMgr = strategyMgr
+	components.modifier = packetModifier
+	components.sender = s
+	components.capturer = capturer
+	components.firewall = fw
+	components.pipeline = pipeline
+
+	return components, nil
 }
 
 // defaultHostnameRules возвращает встроенные правила hostname→strategy.
@@ -331,15 +420,15 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (*Components,
 func defaultHostnameRules() []strategy.HostnameRule {
 	return []strategy.HostnameRule{
 		// YouTube only
-		{Pattern: "*.youtube.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube"},
-		{Pattern: "youtube.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube bare"},
-		{Pattern: "*.googlevideo.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube video CDN"},
-		{Pattern: "*.ytimg.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube static"},
-		{Pattern: "*.ggpht.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube avatars/images"},
-		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube embed"},
-		{Pattern: "*.youtubei.googleapis.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube API"},
-		{Pattern: "*.gvt1.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube CDN"},
-		{Pattern: "*.gvt2.com", StrategyName: "yt-discord-2026-zapret", Comment: "YouTube CDN"},
+		{Pattern: "*.youtube.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube"},
+		{Pattern: "youtube.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube bare"},
+		{Pattern: "*.googlevideo.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube video CDN"},
+		{Pattern: "*.ytimg.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube static"},
+		{Pattern: "*.ggpht.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube avatars/images"},
+		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube embed"},
+		{Pattern: "*.youtubei.googleapis.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube API"},
+		{Pattern: "*.gvt1.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube CDN"},
+		{Pattern: "*.gvt2.com", StrategyName: "yt-alt5-tcp", Comment: "YouTube CDN"},
 
 		// Discord
 		{Pattern: "*.discord.com", StrategyName: "discord-2026", Comment: "Discord"},
@@ -386,14 +475,20 @@ func (c *Components) cleanup() {
 }
 
 // setupLogging настраивает логирование
-func setupLogging(cfg config.LoggingConfig) {
+func setupLogging(cfg config.LoggingConfig) *os.File {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+
 	if cfg.Output == "file" && cfg.FilePath != "" {
 		f, err := os.OpenFile(cfg.FilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			log.SetOutput(f)
+		if err != nil {
+			log.Printf("WARNING: failed to open log file %s: %v", cfg.FilePath, err)
+			return nil
 		}
+		log.SetOutput(f)
+		return f
 	}
+
+	return nil
 }
 
 // runManualDiscovery запускает авто-подбор стратегий.
@@ -491,15 +586,32 @@ func waitForShutdown() {
 }
 
 // parsePorts парсит строку с портами
-func parsePorts(portsStr string) []int {
-	if portsStr == "" {
-		return nil
+func parsePorts(portsStr string) ([]int, error) {
+	if strings.TrimSpace(portsStr) == "" {
+		return nil, fmt.Errorf("empty ports string")
 	}
+
 	var ports []int
-	for _, p := range strings.Split(portsStr, ",") {
-		if port, err := strconv.Atoi(strings.TrimSpace(p)); err == nil && port > 0 && port < 65536 {
-			ports = append(ports, port)
+	for _, raw := range strings.Split(portsStr, ",") {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			return nil, fmt.Errorf("empty port entry")
 		}
+
+		port, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port %q", p)
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("port out of range: %d", port)
+		}
+
+		ports = append(ports, port)
 	}
-	return ports
+
+	if len(ports) == 0 {
+		return nil, fmt.Errorf("no valid ports provided")
+	}
+
+	return ports, nil
 }

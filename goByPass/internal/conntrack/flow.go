@@ -161,10 +161,15 @@ func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
 	f.UpdatedAt = now
 	f.LastPacket = now
 
-	copyLen := length
-	if copyLen < 0 {
-		copyLen = 0
+	// length может прийти некорректным (< 0), поэтому:
+	// 1) для статистики байт зажимаем его в [0..]
+	// 2) для копирования payload дополнительно ограничиваем len(data)
+	safeLen := length
+	if safeLen < 0 {
+		safeLen = 0
 	}
+
+	copyLen := safeLen
 	if data != nil && copyLen > len(data) {
 		copyLen = len(data)
 	}
@@ -173,7 +178,7 @@ func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
 		f.SeqClient = seq
 		f.AckClient = ack
 		f.PacketsOut++
-		f.BytesOut += uint64(length)
+		f.BytesOut += uint64(safeLen)
 
 		if copyLen > 0 {
 			dataCopy := make([]byte, copyLen)
@@ -189,7 +194,7 @@ func (f *Flow) Update(isClient bool, seq, ack uint32, length int, data []byte) {
 		f.SeqServer = seq
 		f.AckServer = ack
 		f.PacketsIn++
-		f.BytesIn += uint64(length)
+		f.BytesIn += uint64(safeLen)
 
 		if copyLen > 0 {
 			dataCopy := make([]byte, copyLen)

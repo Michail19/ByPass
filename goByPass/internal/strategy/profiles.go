@@ -259,6 +259,28 @@ func (m *Manager) loadDefaultStrategies() {
 		Priority: 10,
 	})
 
+	mustAdd(&Strategy{
+		ID:          31,
+		Name:        "yt-alt5-tcp",
+		Description: "YouTube ALT5-like: syndata + multidisorder TCP, QUIC fake",
+		ApplyToHTTP: false,
+		ApplyToTLS:  true,
+		ApplyToQUIC: true,
+
+		SynData:       true,
+		MultiDisorder: true,
+		DisorderTTL:   4,
+		DisorderPos:   []int{1, 2, 3, 4, 5},
+
+		FakeQUICFile:    "quic_initial_www_google_com.bin",
+		FakeQUICRepeats: 6,
+		FakeTTL:         6,
+
+		ApplyToPacketTypes:     []string{"handshake"},
+		Priority:               36,
+		ModifyFirstDataPackets: 0,
+	})
+
 	// ── 35. Game UDP fake x14 ────────────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          35,
