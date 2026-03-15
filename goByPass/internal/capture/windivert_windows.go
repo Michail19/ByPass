@@ -31,7 +31,9 @@ type WinDivert struct {
 // NewWinDivert создает новый захватчик для Windows
 func NewWinDivert(cfg Config) (*WinDivert, error) {
 	if cfg.BufferSize <= 0 {
-		cfg.BufferSize = 65535
+		cfg.BufferSize = 262144
+	} else if cfg.BufferSize < 262144 {
+		cfg.BufferSize = 262144
 	}
 	if cfg.MaxPacketLen <= 0 {
 		cfg.MaxPacketLen = 65535
@@ -210,16 +212,19 @@ func (w *WinDivert) processPackets(ctx context.Context) {
 				Addr:      addrCopy,
 			}
 
-			// Неблокирующая отправка с подсчетом дропов
+			// Короткое ожидание лучше, чем мгновенный drop на capture-уровне:
+			// иначе пакет вообще не доходит до pipeline/conntrack.
 			select {
 			case w.packets <- packet:
 				if dropCount > 0 {
 					log.Printf("Recovered from drop, %d packets were dropped", dropCount)
 					dropCount = 0
 				}
-			default:
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
 				dropCount++
-				if dropCount%100 == 0 {
+				if dropCount%25 == 0 {
 					log.Printf("WARNING: Packet channel full, dropped %d packets so far", dropCount)
 				}
 			}

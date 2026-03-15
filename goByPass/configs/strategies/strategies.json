@@ -1,6 +1,6 @@
 [
   {
-    "id": 31,
+    "id": 32,
     "name": "quic-fake-11",
     "description": "QUIC fake: 11 повторов quic_initial (ALT11, FAKE TLS AUTO*)",
     "apply_to_quic": true,

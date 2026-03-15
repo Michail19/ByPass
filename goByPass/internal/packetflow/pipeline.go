@@ -95,10 +95,10 @@ func NewPipeline(
 	}
 
 	// Создаём отдельный канал на каждый воркер.
-	// Размер каждого канала = PacketQueueSize / workers, минимум 256.
+	// Размер каждого канала = PacketQueueSize / workers, минимум 1024.
 	perWorkerQueue := cfg.PacketQueueSize / cfg.Workers
-	if perWorkerQueue < 256 {
-		perWorkerQueue = 256
+	if perWorkerQueue < 1024 {
+		perWorkerQueue = 1024
 	}
 	workerChans := make([]chan capture.Packet, cfg.Workers)
 	for i := range workerChans {
@@ -234,7 +234,7 @@ func (p *Pipeline) packetForwarder() {
 				case ch <- packet:
 				case <-p.ctx.Done():
 					return
-				case <-time.After(5 * time.Millisecond):
+				case <-time.After(10 * time.Millisecond):
 					p.updateStats(func(stats *PipelineStats) { stats.PacketsDropped++ })
 					log.Printf("WARNING: Worker %d queue full, dropping data packet", workerIdx)
 				}
@@ -882,6 +882,8 @@ func isReusableCachedBypassHostname(host string) bool {
 		strings.HasSuffix(h, ".youtube.com"),
 		strings.HasSuffix(h, ".googlevideo.com"),
 		strings.HasSuffix(h, ".youtubei.googleapis.com"),
+		strings.HasSuffix(h, ".ytimg.com"),
+		strings.HasSuffix(h, ".ggpht.com"),
 		h == "telegram.org",
 		h == "web.telegram.org",
 		strings.HasSuffix(h, ".telegram.org"),

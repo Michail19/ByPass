@@ -81,17 +81,19 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          12,
 		Name:        "telegram",
-		Description: "Telegram: safe split 1, no fake",
+		Description: "Telegram Windows/RU: split 1+s + fake TS x1",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
+		ApplyToQUIC: false,
 
 		SplitMode:      SplitCustom,
 		SplitPositions: []int{1},
-		SplitSNIOffset: false,
+		SplitSNIOffset: true,
 
-		Fooling:        0,
-		FakeTTL:        0,
-		FakeRepeats:    0,
+		Fooling:     FoolingTS,
+		FakeTTL:     6,
+		FakeRepeats: 1,
+
 		TLSRecordSplit: false,
 		TLSRecordSize:  0,
 
@@ -100,27 +102,22 @@ func (m *Manager) loadDefaultStrategies() {
 		ModifyFirstDataPackets: 0,
 	})
 
-	// ── 20. YouTube legacy/manual ─────────────────────────────────────────────
+	// ── 20. YouTube safe-first Windows ────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          20,
 		Name:        "youtube-2026",
-		Description: "YouTube legacy: seqovl + fake + disorder OOB",
+		Description: "YouTube Windows safe-first: split 1+s + fake TS x1 + QUIC fake",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		SplitMode:         SplitSeqOvl,
-		SplitPositions:    []int{1},
-		SeqOvlLen:         681,
-		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
-
-		DisorderMode: DisorderOutOfBand,
-		DisorderPos:  []int{1},
-		DisorderTTL:  4,
+		SplitMode:      SplitCustom,
+		SplitPositions: []int{1},
+		SplitSNIOffset: true,
 
 		Fooling:     FoolingTS,
 		FakeTTL:     6,
-		FakeRepeats: 6,
+		FakeRepeats: 1,
 		FakeTLSFiles: []string{
 			"tls_clienthello_www_google_com.bin",
 		},
@@ -128,9 +125,12 @@ func (m *Manager) loadDefaultStrategies() {
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 
+		TLSRecordSplit: false,
+		TLSRecordSize:  0,
+
 		ApplyToPacketTypes:     []string{"handshake"},
 		Priority:               35,
-		ModifyFirstDataPackets: 4,
+		ModifyFirstDataPackets: 0,
 	})
 
 	// ── 21. Discord ───────────────────────────────────────────────────────────

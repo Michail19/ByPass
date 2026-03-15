@@ -428,8 +428,8 @@ func defaultHostnameRules() []strategy.HostnameRule {
 		{Pattern: "*.youtube-nocookie.com", StrategyName: "youtube-2026", Comment: "YouTube embed"},
 
 		// Static / avatars / telemetry — не форсируем bypass по умолчанию
-		{Pattern: "*.ytimg.com", StrategyName: "passthrough", Comment: "YouTube static"},
-		{Pattern: "*.ggpht.com", StrategyName: "passthrough", Comment: "Google avatars/images"},
+		{Pattern: "*.ytimg.com", StrategyName: "youtube-2026", Comment: "YouTube static"},
+		{Pattern: "*.ggpht.com", StrategyName: "youtube-2026", Comment: "Google avatars/images"},
 		{Pattern: "*.gvt1.com", StrategyName: "passthrough", Comment: "GVT passthrough"},
 		{Pattern: "*.gvt2.com", StrategyName: "passthrough", Comment: "GVT passthrough"},
 
