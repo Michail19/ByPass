@@ -49,9 +49,14 @@ func resolveSplitPositions(payload []byte, splitPos []int, alignSNI bool) ([]int
 	if alignSNI {
 		sniPos, err := protocol.FindSNI(payload)
 		if err != nil {
-			return nil, err
+			// Best-effort fallback: если SNI не найден, делаем split по абсолютным позициям.
+			// Это позволяет стратегиям вида SplitPositions=[1] продолжать работать
+			// даже при нестандартных/неполных ClientHello.
+			alignSNI = false
+			base = 0
+		} else {
+			base = sniPos
 		}
-		base = sniPos
 	}
 
 	for _, pos := range splitPos {

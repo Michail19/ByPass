@@ -65,7 +65,7 @@ func (w *WinDivert) Start(ctx context.Context) error {
 	}
 
 	// Проверяем, что фильтр корректен
-	const winDivertFilter = "((outbound and !loopback and (tcp.DstPort == 80 or tcp.DstPort == 443 or udp.DstPort == 443 or udp.DstPort == 53)) or (!outbound and !loopback and udp.SrcPort == 53))"
+	const winDivertFilter = "((outbound and !loopback and !impostor and (tcp.DstPort == 80 or tcp.DstPort == 443 or udp.DstPort == 443 or udp.DstPort == 53)) or (!outbound and !loopback and !impostor and udp.SrcPort == 53))"
 	filter := winDivertFilter
 	filterPtr, err := syscall.BytePtrFromString(filter)
 	if err != nil {

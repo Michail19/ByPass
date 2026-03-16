@@ -342,18 +342,6 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 
 	packetModifier := modifier.NewPacketModifier(strategyMgr, ipCache)
 
-	var s sender.Sender
-	s, err = sender.NewSender(sender.Config{
-		Interface:   cfg.Sender.Interface,
-		BufferSize:  cfg.Sender.BufferSize,
-		SendTimeout: cfg.Sender.SendTimeout,
-		BatchSize:   cfg.Sender.BatchSize,
-	})
-	if err != nil {
-		log.Printf("Failed to create sender: %v", err)
-		return nil, err
-	}
-
 	capturer, err := capture.New(capture.Config{
 		QueueNum:     cfg.Capture.QueueNum,
 		BufferSize:   cfg.Capture.BufferSize,
@@ -361,14 +349,42 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 		MaxPacketLen: cfg.Capture.MaxPacketLen,
 	})
 	if err != nil {
-		s.Close()
 		return nil, fmt.Errorf("failed to create capturer: %v", err)
 	}
 
 	if err := capturer.Start(ctx); err != nil {
-		s.Close()
 		capturer.Stop()
 		return nil, fmt.Errorf("failed to start capturer: %v", err)
+	}
+
+	// ── sender: prefer using existing WinDivert handle (Windows) ─────────────
+	var s sender.Sender
+	if h := capturer.GetHandle(); h != 0 {
+		s, err = sender.NewSenderWithHandle(h, sender.Config{
+			Interface:   cfg.Sender.Interface,
+			BufferSize:  cfg.Sender.BufferSize,
+			SendTimeout: cfg.Sender.SendTimeout,
+			BatchSize:   cfg.Sender.BatchSize,
+		})
+		if err != nil {
+			// Not supported on non-Windows or if handle reuse fails.
+			log.Printf("WARNING: NewSenderWithHandle(%d) failed: %v; falling back to NewSender", h, err)
+			s = nil
+		} else {
+			log.Printf("Sender initialized using capturer handle=%d", h)
+		}
+	}
+	if s == nil {
+		s, err = sender.NewSender(sender.Config{
+			Interface:   cfg.Sender.Interface,
+			BufferSize:  cfg.Sender.BufferSize,
+			SendTimeout: cfg.Sender.SendTimeout,
+			BatchSize:   cfg.Sender.BatchSize,
+		})
+		if err != nil {
+			capturer.Stop()
+			return nil, err
+		}
 	}
 
 	fw, err := firewall.NewManager(firewall.Config{

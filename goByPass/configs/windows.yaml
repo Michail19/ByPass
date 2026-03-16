@@ -40,8 +40,20 @@ cache:
             - discord.com
             - telegram.org
 strategy:
-    default_strategy: "moderate"
     strategy_file: "configs/strategies/strategies.json"
+    hostname_rules:
+        - pattern: "*.youtube.com"
+          strategy_id: 26
+          comment: "YouTube ALT5-like"
+        - pattern: "*.googlevideo.com"
+          strategy_id: 26
+          comment: "YouTube CDN ALT5-like"
+        - pattern: "*.youtubei.googleapis.com"
+          strategy_id: 26
+          comment: "YouTube API ALT5-like"
+        - pattern: "youtube.com"
+          strategy_id: 26
+          comment: "YouTube bare"
     auto_discovery:
         enabled: false
         test_domains:
