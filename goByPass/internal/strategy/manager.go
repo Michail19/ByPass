@@ -819,7 +819,17 @@ func (m *Manager) SelectStrategy(ip, hostname string, port int, protocol string)
 		}
 	}
 
-	// 5. Direct-by-default
+	// 5. Telegram observed-IP fallback
+	// Часть Telegram Web backend-потоков в текущих прогонах приходит без hostname
+	// и успевает уйти в passthrough до того, как SNI/кэш доедут до селектора.
+	if normalizedHostname == "" && protocol == "tcp" && port == 443 && isTelegramObservedFallbackIP(ip) {
+		if s, ok := m.GetStrategy(12); ok && s != nil {
+			log.Printf("[SELECT] Telegram observed IP %s:%d → strategy %d (%s)", ip, port, s.ID, s.Name)
+			return s
+		}
+	}
+
+	// 6. Direct-by-default
 	if ps := m.passthroughStrategy(); ps != nil {
 		if normalizedHostname != "" {
 			log.Printf("[SELECT] Direct-by-default hostname=%q ip=%s:%d → passthrough", normalizedHostname, ip, port)
@@ -859,6 +869,18 @@ func (m *Manager) inferHostnameForIP(ip string) string {
 		return "youtube.com"
 	}
 	return ""
+}
+
+var telegramObservedFallbackIPs = map[string]struct{}{
+	// Наблюдаемые backend IP Telegram Web из последних логов/pcap.
+	"149.154.167.99": {},
+	"79.133.168.12":  {},
+	"108.181.1.241":  {},
+}
+
+func isTelegramObservedFallbackIP(ip string) bool {
+	_, ok := telegramObservedFallbackIPs[ip]
+	return ok
 }
 
 // SetDefault устанавливает стратегию по умолчанию

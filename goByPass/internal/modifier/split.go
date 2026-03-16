@@ -380,7 +380,9 @@ func buildTCPSegments(packet []byte, ipHdrLen, tcpHdrLen, payloadOffset int, val
 		flags := packet[ipHdrLen+13]
 		if i != len(chunks)-1 {
 			flags &^= 0x01 // FIN
-			flags &^= 0x08 // PSH
+			// Не сбрасываем PSH на промежуточных сегментах.
+			// Для части Google/YouTube путей ACK+payload без PSH на первом
+			// split-сегменте ведёт к лишним ретрансмитам и отсутствию ответа.
 		}
 		newPkt[ipHdrLen+13] = flags
 
