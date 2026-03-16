@@ -221,23 +221,24 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          27,
 		Name:        "yt-safe-2026",
-		Description: "YouTube safer TCP: syndata + multidisorder; QUIC fake kept",
+		Description: "YouTube conservative TCP: split pos=1 only; QUIC fake kept",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		SynData:       true,
-		MultiDisorder: true,
-		DisorderTTL:   4,
-		DisorderPos:   []int{1, 2, 3, 4, 5},
+		SplitMode:      SplitCustom,
+		SplitPositions: []int{1},
+		SplitSNIOffset: false,
+
+		TLSRecordSplit: false,
+		TLSRecordSize:  0,
 
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
-		FakeTTL:         6,
 
 		ApplyToPacketTypes:     []string{"handshake"},
 		Priority:               35,
-		ModifyFirstDataPackets: 1,
+		ModifyFirstDataPackets: 0,
 	})
 
 	// ── 30. QUIC fake x6 ──────────────────────────────────────────────────────

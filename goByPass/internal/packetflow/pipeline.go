@@ -999,16 +999,22 @@ func shouldPersistBypassStrategyByIP(host string, strategyID int) bool {
 	}
 
 	switch {
-	case h == "telegram.org",
-		h == "web.telegram.org",
-		strings.HasSuffix(h, ".telegram.org"),
-		h == "t.me",
-		strings.HasSuffix(h, ".t.me"),
+	case h == "youtube.com",
+		h == "www.youtube.com",
+		h == "accounts.youtube.com",
+		strings.HasSuffix(h, ".youtube.com"),
 		strings.HasSuffix(h, ".googlevideo.com"),
 		strings.HasSuffix(h, ".youtubei.googleapis.com"),
 		strings.HasSuffix(h, ".youtube-nocookie.com"),
+		strings.HasSuffix(h, ".ytimg.com"),
+		strings.HasSuffix(h, ".ggpht.com"),
 		strings.HasSuffix(h, ".gvt1.com"),
-		strings.HasSuffix(h, ".gvt2.com"):
+		strings.HasSuffix(h, ".gvt2.com"),
+		h == "telegram.org",
+		h == "web.telegram.org",
+		strings.HasSuffix(h, ".telegram.org"),
+		h == "t.me",
+		strings.HasSuffix(h, ".t.me"):
 		return true
 	default:
 		return false
