@@ -364,4 +364,22 @@ func (m *Manager) loadDefaultStrategies() {
 		Cutoff:                 4,
 		Priority:               61,
 	})
+
+	mustAdd(&Strategy{
+		ID:          112,
+		Name:        "telegram-appdata-2026",
+		Description: "Telegram: split first TLS packets + first appdata packets",
+		ApplyToTLS:  true,
+		ApplyToQUIC: false,
+		AnyProtocol: true,
+
+		SplitMode:      SplitCustom,
+		SplitPositions: []int{1},
+		SplitSNIOffset: false,
+
+		ApplyToPacketTypes:     []string{"handshake", "data"},
+		ModifyFirstDataPackets: 2,
+		Cutoff:                 2,
+		Priority:               17,
+	})
 }
