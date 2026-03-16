@@ -27,9 +27,12 @@ cache:
       - youtube.com
       - www.youtube.com
       - accounts.youtube.com
-      - discord.com
-      - telegram.org
+      - i.ytimg.com
+      - beacons.gcp.gvt2.com
+      - beacons.gvt2.com
       - web.telegram.org
+      - kws2.web.telegram.org
+      - venus.web.telegram.org
 
 strategy:
   strategy_file: strategies/strategies.json

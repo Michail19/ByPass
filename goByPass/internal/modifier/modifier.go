@@ -160,7 +160,12 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	}
 
 	// ── 2. Fake ───────────────────────────────────────────────────────────────
-	if hasFooling && !fakedSplitEnabled && (isClientHello || strat.AnyProtocol) {
+	effectiveFooling := strat.Fooling
+	if effectiveFooling == strategy.FoolingTS && !hasTCPTimestampOption(packet, ipHdrLen) {
+		effectiveFooling = 0
+	}
+
+	if effectiveFooling != 0 && hasFooling && !fakedSplitEnabled && (isClientHello || strat.AnyProtocol) {
 		for rep := 0; rep < fakeRepeats; rep++ {
 			fakePayload := pm.selectFakeTLSPayload(strat, rep, isClientHello, packet, ipHdrLen)
 			fakePkts, err := pm.ApplyFake(packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload)
@@ -435,6 +440,40 @@ finalize:
 		//     DPI видит unmodified ORIGINAL и анализирует его вместо разрозненных частей.
 		SendOriginal: !originalReplaced,
 	}, nil
+}
+
+func hasTCPTimestampOption(packet []byte, ipHdrLen int) bool {
+	if len(packet) < ipHdrLen+20 {
+		return false
+	}
+	tcpHdrLen := int((packet[ipHdrLen+12] >> 4) * 4)
+	if tcpHdrLen <= 20 || len(packet) < ipHdrLen+tcpHdrLen {
+		return false
+	}
+
+	opts := packet[ipHdrLen+20 : ipHdrLen+tcpHdrLen]
+	for i := 0; i < len(opts); {
+		kind := opts[i]
+		switch kind {
+		case 0:
+			return false
+		case 1:
+			i++
+			continue
+		}
+		if i+1 >= len(opts) {
+			return false
+		}
+		l := int(opts[i+1])
+		if l < 2 || i+l > len(opts) {
+			return false
+		}
+		if kind == 8 && l == 10 {
+			return true
+		}
+		i += l
+	}
+	return false
 }
 
 func rebuildPacketWithPayload(packet []byte, ipHdrLen, tcpHdrLen int, payload []byte) ([]byte, error) {

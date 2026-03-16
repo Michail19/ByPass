@@ -219,7 +219,7 @@ func (m *Manager) loadDefaultStrategies() {
 
 	// ── 60. YouTube fake-only main/web ───────────────────────────────────────
 	mustAdd(&Strategy{
-		ID:          60,
+		ID:          160,
 		Name:        "yt-fake-only-2026",
 		Description: "YouTube main/web: fake TLS only + QUIC fake, no real TCP split",
 		ApplyToHTTP: false,
@@ -235,6 +235,27 @@ func (m *Manager) loadDefaultStrategies() {
 
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
+
+		ApplyToPacketTypes:     []string{"handshake"},
+		Priority:               34,
+		ModifyFirstDataPackets: 0,
+	})
+
+	mustAdd(&Strategy{
+		ID:          60,
+		Name:        "yt-seqovl-only-681",
+		Description: "YouTube TCP: seqovl only, no fake",
+		ApplyToHTTP: false,
+		ApplyToTLS:  true,
+		ApplyToQUIC: false,
+
+		SplitMode:         SplitSeqOvl,
+		SplitPositions:    []int{1},
+		SeqOvlLen:         681,
+		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
+
+		// чтобы overlap-пакет умер раньше
+		DisorderTTL: 3,
 
 		ApplyToPacketTypes:     []string{"handshake"},
 		Priority:               34,
