@@ -408,6 +408,13 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// Получаем или создаём поток
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
 
+	// --- Минимальный reassembly для TLS ClientHello ---
+	// Сохраняем только TLS-похожие фрагменты, чтобы при фрагментации ClientHello
+	// попытаться извлечь SNI из нескольких TCP сегментов.
+	if protocol == 6 {
+		p.maybeBufferTLSFragments(flow, pkt.Data)
+	}
+
 	// Читаем flow.Hostname один раз под RLock — устраняет data race с SetHostname().
 	// Все последующие обращения к hostname используют эту локальную копию.
 	flow.Mu.RLock()
@@ -506,6 +513,21 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 				flow.DataPacketsModified = 0
 				flow.Mu.Unlock()
 			}
+
+			// Если это TLS handshake, но SNI не извлечён (PossibleFragment / разрыв по TCP),
+			// пробуем собрать буфер из сохранённых фрагментов.
+			if flowHostname == "" && info.IsTLS && info.IsHandshake {
+				if sni := tryExtractSNIFromFlowBuffer(flow); sni != "" {
+					flow.SetHostname(sni)
+					flowHostname = sni
+					flow.Mu.Lock()
+					flow.IsAnalyzed = true
+					flow.AnalyzeMisses = 0
+					flow.DataPacketsModified = 0
+					flow.Mu.Unlock()
+				}
+			}
+
 			if info.IsTLS {
 				flow.SetTLS()
 			}
@@ -848,6 +870,105 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	} else {
 		p.sendPacket(pkt.Data, pkt.Addr)
 	}
+}
+
+// maybeBufferTLSFragments сохраняет в flow.ClientData только фрагменты,
+// похожие на TLS ClientHello record / handshake fragment.
+// Это снижает память по сравнению с буферизацией всего TCP payload (видео/стрим).
+func (p *Pipeline) maybeBufferTLSFragments(flow *conntrack.Flow, ipPacket []byte) {
+	if flow == nil || len(ipPacket) < 40 || (ipPacket[0]>>4 != 4) {
+		return
+	}
+
+	ipHdrLen := int(ipPacket[0]&0x0F) * 4
+	if len(ipPacket) < ipHdrLen+20 {
+		return
+	}
+
+	tcpHdrLen := int(ipPacket[ipHdrLen+12]>>4) * 4
+	payloadOffset := ipHdrLen + tcpHdrLen
+	if payloadOffset < 0 || payloadOffset >= len(ipPacket) {
+		return
+	}
+
+	payload := ipPacket[payloadOffset:]
+	if len(payload) == 0 {
+		return
+	}
+
+	looksTLSRecord := len(payload) >= 6 && payload[0] == 0x16 && payload[1] == 0x03
+	looksTLSFrag := len(payload) >= 4 && payload[0] == 0x01 // ClientHello handshake fragment heuristic
+	if !looksTLSRecord && !looksTLSFrag {
+		return
+	}
+
+	// Не буферизуем бесконечно — только до 4096 байт фрагмента.
+	if len(payload) > 4096 {
+		payload = payload[:4096]
+	}
+
+	seq := binary.BigEndian.Uint32(ipPacket[ipHdrLen+4 : ipHdrLen+8])
+	ack := binary.BigEndian.Uint32(ipPacket[ipHdrLen+8 : ipHdrLen+12])
+	flow.Update(true, seq, ack, len(payload), payload)
+}
+
+// tryExtractSNIFromFlowBuffer пытается собрать до 4KB TLS-данных из flow.ClientData
+// и извлечь SNI по protocol.FindSNI().
+func tryExtractSNIFromFlowBuffer(flow *conntrack.Flow) string {
+	if flow == nil {
+		return ""
+	}
+
+	flow.Mu.RLock()
+	frags := append([][]byte(nil), flow.ClientData...)
+	flow.Mu.RUnlock()
+
+	if len(frags) == 0 {
+		return ""
+	}
+
+	// Найти первый полноценный TLS record header (0x16 0x03)
+	start := -1
+	for i := range frags {
+		if len(frags[i]) >= 6 && frags[i][0] == 0x16 && frags[i][1] == 0x03 {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+
+	// Собираем буфер до 4096 байт
+	bufLen := 0
+	for i := start; i < len(frags) && bufLen < 4096; i++ {
+		bufLen += len(frags[i])
+	}
+	if bufLen > 4096 {
+		bufLen = 4096
+	}
+
+	buf := make([]byte, 0, bufLen)
+	for i := start; i < len(frags) && len(buf) < 4096; i++ {
+		need := 4096 - len(buf)
+		chunk := frags[i]
+		if len(chunk) > need {
+			chunk = chunk[:need]
+		}
+		buf = append(buf, chunk...)
+	}
+
+	namePos, err := protocol.FindSNI(buf)
+	if err != nil || namePos < 2 || namePos >= len(buf) {
+		return ""
+	}
+
+	nameLen := int(binary.BigEndian.Uint16(buf[namePos-2 : namePos]))
+	if nameLen <= 0 || namePos+nameLen > len(buf) {
+		return ""
+	}
+
+	return string(buf[namePos : namePos+nameLen])
 }
 
 func (p *Pipeline) maybeSeedCachesFromDNS(packet []byte) {

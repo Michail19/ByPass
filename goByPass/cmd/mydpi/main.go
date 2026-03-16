@@ -265,6 +265,11 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 		if err := domainCache.Preload(cfg.Cache.DomainCache.Preload); err != nil {
 			log.Printf("WARNING: domain cache preload failed: %v", err)
 		}
+
+		// ВАЖНО: preload заполняет только DomainCache (domain -> ips).
+		// Для раннего выбора стратегии по hostname_rules нужен IPCache hint (ip -> hostname),
+		// иначе первые пакеты могут уйти passthrough до момента извлечения SNI.
+		seedIPCacheFromDomainCache(domainCache, ipCache, cfg.Cache.DomainCache.Preload)
 	}
 
 	connManager := conntrack.NewManager(
@@ -427,6 +432,26 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 	components.pipeline = pipeline
 
 	return components, nil
+}
+
+// seedIPCacheFromDomainCache добавляет ip->hostname подсказки в IPCache для доменов,
+// которые уже были preloaded в DomainCache.
+// Это помогает в сценариях, где DNS-пакеты не видны (DoH) или SNI извлекается нестабильно
+// из-за фрагментации ClientHello.
+func seedIPCacheFromDomainCache(domainCache *cache.DomainCache, ipCache *cache.IPCache, domains []string) {
+	if domainCache == nil || ipCache == nil || len(domains) == 0 {
+		return
+	}
+
+	for _, d := range domains {
+		entry, ok := domainCache.Get(d)
+		if !ok || entry == nil || len(entry.IPs) == 0 {
+			continue
+		}
+		for _, ip := range entry.IPs {
+			ipCache.SeedHostnameByIP(ip, d)
+		}
+	}
 }
 
 // defaultHostnameRules возвращает встроенные правила hostname→strategy.
