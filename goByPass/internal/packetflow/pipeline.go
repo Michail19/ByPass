@@ -573,7 +573,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 	// 1. Свежий выбор по hostname/IP
 	selectorHostname := flowHostname
-	if selectorHostname == "" && cached != nil && shouldUseHostnameHintForSelection(cached.Hostname) {
+	if selectorHostname == "" && cached != nil && cached.Hostname != "" {
 		selectorHostname = cached.Hostname
 	}
 
@@ -975,52 +975,14 @@ func (p *Pipeline) maybeSeedCachesFromDNS(packet []byte) {
 	p.domainCache.PutWithTTL(domain, ips, cname, ttl)
 
 	for _, ip := range ips {
-		if p.strategyMgr != nil && shouldUseHostnameHintForSelection(domain) {
-			if s := p.strategyMgr.SelectStrategy(ip.String(), domain, 443, "tcp"); s != nil && s.ID > 1 {
-				p.ipCache.PutByIP(ip, domain, true, s.ID)
-				continue
-			}
+		if s := p.strategyMgr.SelectStrategy(ip.String(), domain, 443, "tcp"); s != nil && s.ID > 1 {
+			p.ipCache.PutByIP(ip, domain, true, s.ID)
+		} else {
+			p.ipCache.SeedHostnameByIP(ip, domain)
 		}
-		p.ipCache.SeedHostnameByIP(ip, domain)
 	}
 
 	log.Printf("[DNS] Seeded caches: domain=%s ips=%d ttl=%d cname=%s", domain, len(ips), ttl, cname)
-}
-
-// shouldUseHostnameHintForSelection ограничивает раннее использование DNS/IP-cache hostname
-// только известными доменами, для которых допустима привязка стратегии к IP.
-func shouldUseHostnameHintForSelection(host string) bool {
-	h := strings.ToLower(strings.TrimSpace(host))
-	if h == "" {
-		return false
-	}
-
-	switch {
-	case h == "youtube.com",
-		h == "www.youtube.com",
-		h == "accounts.youtube.com",
-		strings.HasSuffix(h, ".youtube.com"),
-		strings.HasSuffix(h, ".googlevideo.com"),
-		strings.HasSuffix(h, ".youtubei.googleapis.com"),
-		strings.HasSuffix(h, ".youtube-nocookie.com"),
-		strings.HasSuffix(h, ".ytimg.com"),
-		strings.HasSuffix(h, ".ggpht.com"),
-		strings.HasSuffix(h, ".gvt1.com"),
-		strings.HasSuffix(h, ".gvt2.com"),
-		h == "telegram.org",
-		h == "web.telegram.org",
-		strings.HasSuffix(h, ".telegram.org"),
-		h == "t.me",
-		strings.HasSuffix(h, ".t.me"),
-		h == "discord.com",
-		strings.HasSuffix(h, ".discord.com"),
-		strings.HasSuffix(h, ".discordapp.com"),
-		strings.HasSuffix(h, ".discord.gg"),
-		strings.HasSuffix(h, ".discord.media"):
-		return true
-	default:
-		return false
-	}
 }
 
 func shouldReuseBypassFromIPCache(host string, strategyID int) bool {

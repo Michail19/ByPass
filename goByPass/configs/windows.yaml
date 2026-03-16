@@ -25,44 +25,46 @@ cache:
     preload:
       - google.com
       - youtube.com
+      - www.youtube.com
+      - accounts.youtube.com
       - discord.com
       - telegram.org
+      - web.telegram.org
 
 strategy:
-  strategy_file: ./strategies/strategies.json
+  strategy_file: strategies/strategies.json
   append_default_rules: true
   hostname_rules:
     - pattern: "*.youtube.com"
-      strategy_id: 25
-      comment: "YouTube TCP: prefer seqovl+fake profile"
+      strategy_id: 60
+      comment: "YouTube main/web: fake-only TCP"
     - pattern: "youtube.com"
-      strategy_id: 25
-      comment: "Bare YouTube: prefer seqovl+fake profile"
+      strategy_id: 60
+      comment: "YouTube bare: fake-only TCP"
     - pattern: "accounts.youtube.com"
       strategy_id: 27
-      comment: "Accounts: keep conservative split profile"
+      comment: "Accounts: conservative split profile"
     - pattern: "*.googlevideo.com"
-      strategy_id: 25
-      comment: "YouTube video CDN: prefer seqovl+fake profile"
+      strategy_id: 60
+      comment: "Video CDN: fake-only TCP"
     - pattern: "*.youtubei.googleapis.com"
-      strategy_id: 25
-      comment: "YouTube API: prefer seqovl+fake profile"
+      strategy_id: 60
+      comment: "YouTube API: fake-only TCP"
     - pattern: "*.youtube-nocookie.com"
-      strategy_id: 27
-      comment: "Embed: keep conservative split profile"
+      strategy_id: 60
+      comment: "Embed: fake-only TCP"
     - pattern: "*.ytimg.com"
-      strategy_id: 27
-      comment: "Static assets: conservative split profile"
+      strategy_id: 60
+      comment: "Static assets: fake-only TCP"
     - pattern: "*.ggpht.com"
-      strategy_id: 27
-      comment: "Images/avatars: conservative split profile"
+      strategy_id: 60
+      comment: "Images/avatars: fake-only TCP"
     - pattern: "*.gvt1.com"
-      strategy_id: 25
-      comment: "GVT1: prefer seqovl+fake profile"
+      strategy_id: 20
+      comment: "GVT1: seqovl+fake profile"
     - pattern: "*.gvt2.com"
-      strategy_id: 25
-      comment: "GVT2: prefer seqovl+fake profile"
-
+      strategy_id: 20
+      comment: "GVT2: seqovl+fake profile"
 
     - pattern: "*.discord.com"
       strategy_id: 21
@@ -79,6 +81,9 @@ strategy:
     - pattern: "*.discordapp.net"
       strategy_id: 21
       comment: "Discord CDN/API"
+    - pattern: "*.discordapp.com"
+      strategy_id: 21
+      comment: "Discord CDN/API"
     - pattern: "*.discord.media"
       strategy_id: 21
       comment: "Discord media"
@@ -89,6 +94,9 @@ strategy:
     - pattern: "telegram.org"
       strategy_id: 12
       comment: "Telegram bare"
+    - pattern: "web.telegram.org"
+      strategy_id: 12
+      comment: "Telegram web frontend"
     - pattern: "*.t.me"
       strategy_id: 12
       comment: "Telegram short links"

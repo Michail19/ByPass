@@ -267,10 +267,6 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 	)
 	components.ipCache = ipCache
 
-	// Менеджер стратегий: сначала встроенные, затем из файла (если задан).
-	// LoadFromFile добавляет/обновляет стратегии по ID — встроенные не удаляются.
-	strategyMgr := strategy.NewManager()
-
 	domainCache := cache.NewDomainCache(
 		cfg.Cache.DomainCache.TTL,
 		cfg.Cache.DomainCache.MaxSize,
@@ -283,10 +279,6 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 			log.Printf("WARNING: domain cache preload failed: %v", err)
 		}
 
-		// ВАЖНО: preload заполняет только DomainCache (domain -> ips).
-		// Для раннего выбора стратегии по hostname_rules нужен IPCache hint (ip -> hostname),
-		// иначе первые пакеты могут уйти passthrough до момента извлечения SNI.
-		seedIPCacheFromDomainCache(domainCache, ipCache, strategyMgr, cfg.Cache.DomainCache.Preload)
 	}
 
 	connManager := conntrack.NewManager(
@@ -294,6 +286,10 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 		cfg.Conntrack.MaxFlows,
 	)
 	analyzer := protocol.NewAnalyzer()
+
+	// Менеджер стратегий: сначала встроенные, затем из файла (если задан).
+	// LoadFromFile добавляет/обновляет стратегии по ID — встроенные не удаляются.
+	strategyMgr := strategy.NewManager()
 
 	if cfg.Strategy.StrategyFile != "" {
 		// сначала merge из JSON
@@ -344,12 +340,12 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 
 	switch {
 	case len(cfg.Strategy.HostnameRules) == 0:
-		stratRules = normalizeHostnameRules(defaultHostnameRules())
+		stratRules = defaultHostnameRules()
 		log.Printf("Using built-in hostname rules (%d rules)", len(stratRules))
 
 	case cfg.Strategy.AppendDefaultRules:
-		cfgOnly := normalizeHostnameRules(buildHostnameRules(cfg.Strategy.HostnameRules))
-		defOnly := normalizeHostnameRules(defaultHostnameRules())
+		cfgOnly := buildHostnameRules(cfg.Strategy.HostnameRules)
+		defOnly := defaultHostnameRules()
 
 		stratRules = make([]strategy.HostnameRule, 0, len(cfgOnly)+len(defOnly))
 		stratRules = append(stratRules, cfgOnly...)
@@ -359,11 +355,19 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 			len(cfgOnly), len(defOnly))
 
 	default:
-		stratRules = normalizeHostnameRules(buildHostnameRules(cfg.Strategy.HostnameRules))
+		stratRules = buildHostnameRules(cfg.Strategy.HostnameRules)
 		log.Printf("Using hostname rules from config only (%d rules)", len(stratRules))
 	}
 
 	strategyMgr.SetHostnameRules(stratRules)
+
+	// После того как hostname rules уже загружены, можно безопасно seed-ить IPCache
+	// не только hostname hint'ами, но и готовыми strategyID для preloaded доменов.
+	// Это убирает ситуацию, когда первый TCP ClientHello уходит direct-by-default,
+	// хотя domain уже известен из preload.
+	if len(cfg.Cache.DomainCache.Preload) > 0 {
+		seedIPCacheFromDomainCache(domainCache, ipCache, strategyMgr, cfg.Cache.DomainCache.Preload)
+	}
 
 	packetModifier := modifier.NewPacketModifier(strategyMgr, ipCache)
 
@@ -454,86 +458,12 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 	return components, nil
 }
 
-// shouldUseHostnameHintForSelection ограничивает раннее использование DNS/IP-cache hostname
-// только известными доменами, для которых допустима привязка стратегии к IP.
-func shouldUseHostnameHintForSelection(host string) bool {
-	h := strings.ToLower(strings.TrimSpace(host))
-	if h == "" {
-		return false
-	}
-
-	switch {
-	case h == "youtube.com",
-		h == "www.youtube.com",
-		h == "accounts.youtube.com",
-		strings.HasSuffix(h, ".youtube.com"),
-		strings.HasSuffix(h, ".googlevideo.com"),
-		strings.HasSuffix(h, ".youtubei.googleapis.com"),
-		strings.HasSuffix(h, ".youtube-nocookie.com"),
-		strings.HasSuffix(h, ".ytimg.com"),
-		strings.HasSuffix(h, ".ggpht.com"),
-		strings.HasSuffix(h, ".gvt1.com"),
-		strings.HasSuffix(h, ".gvt2.com"),
-		h == "telegram.org",
-		h == "web.telegram.org",
-		strings.HasSuffix(h, ".telegram.org"),
-		h == "t.me",
-		strings.HasSuffix(h, ".t.me"),
-		h == "discord.com",
-		strings.HasSuffix(h, ".discord.com"),
-		strings.HasSuffix(h, ".discordapp.com"),
-		strings.HasSuffix(h, ".discord.gg"),
-		strings.HasSuffix(h, ".discord.media"):
-		return true
-	default:
-		return false
-	}
-}
-
-func normalizeHostnameRule(r strategy.HostnameRule) strategy.HostnameRule {
-	pattern := strings.ToLower(strings.TrimSpace(r.Pattern))
-	if pattern == "" {
-		return r
-	}
-
-	isYouTubeFamily := false
-	switch pattern {
-	case "*.youtube.com", "youtube.com", "accounts.youtube.com", "*.googlevideo.com",
-		"*.youtubei.googleapis.com", "*.youtube-nocookie.com", "*.ytimg.com",
-		"*.ggpht.com", "*.gvt1.com", "*.gvt2.com":
-		isYouTubeFamily = true
-	}
-
-	if isYouTubeFamily {
-		r.StrategyName = "yt-safe-2026"
-		r.StrategyID = 27
-		if strings.TrimSpace(r.Comment) == "" {
-			r.Comment = "Normalized to safe YouTube profile"
-		} else if !strings.Contains(strings.ToLower(r.Comment), "safe") {
-			r.Comment += " (normalized to SAFE profile)"
-		}
-	}
-
-	return r
-}
-
-func normalizeHostnameRules(in []strategy.HostnameRule) []strategy.HostnameRule {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]strategy.HostnameRule, 0, len(in))
-	for _, r := range in {
-		out = append(out, normalizeHostnameRule(r))
-	}
-	return out
-}
-
 // seedIPCacheFromDomainCache добавляет ip->hostname подсказки в IPCache для доменов,
 // которые уже были preloaded в DomainCache.
-// Для известных bypass-доменов дополнительно сохраняет и strategyID,
-// чтобы самый первый ClientHello не уходил passthrough.
+// Это помогает в сценариях, где DNS-пакеты не видны (DoH) или SNI извлекается нестабильно
+// из-за фрагментации ClientHello.
 func seedIPCacheFromDomainCache(domainCache *cache.DomainCache, ipCache *cache.IPCache, strategyMgr *strategy.Manager, domains []string) {
-	if domainCache == nil || ipCache == nil || len(domains) == 0 {
+	if domainCache == nil || ipCache == nil || strategyMgr == nil || len(domains) == 0 {
 		return
 	}
 
@@ -543,13 +473,11 @@ func seedIPCacheFromDomainCache(domainCache *cache.DomainCache, ipCache *cache.I
 			continue
 		}
 		for _, ip := range entry.IPs {
-			if strategyMgr != nil && shouldUseHostnameHintForSelection(d) {
-				if s := strategyMgr.SelectStrategy(ip.String(), d, 443, "tcp"); s != nil && s.ID > 1 {
-					ipCache.PutByIP(ip, d, true, s.ID)
-					continue
-				}
+			if s := strategyMgr.SelectStrategy(ip.String(), d, 443, "tcp"); s != nil && s.ID > 1 {
+				ipCache.PutByIP(ip, d, true, s.ID)
+			} else {
+				ipCache.SeedHostnameByIP(ip, d)
 			}
-			ipCache.SeedHostnameByIP(ip, d)
 		}
 	}
 }
@@ -561,18 +489,18 @@ func seedIPCacheFromDomainCache(domainCache *cache.DomainCache, ipCache *cache.I
 func defaultHostnameRules() []strategy.HostnameRule {
 	return []strategy.HostnameRule{
 		// Core YouTube endpoints only
-		{Pattern: "*.youtube.com", StrategyName: "youtube-2026", Comment: "YouTube"},
-		{Pattern: "youtube.com", StrategyName: "youtube-2026", Comment: "YouTube bare"},
-		{Pattern: "accounts.youtube.com", StrategyName: "youtube-2026", Comment: "YouTube accounts"},
-		{Pattern: "*.googlevideo.com", StrategyName: "youtube-2026", Comment: "YouTube video CDN"},
-		{Pattern: "*.youtubei.googleapis.com", StrategyName: "youtube-2026", Comment: "YouTube API"},
-		{Pattern: "*.youtube-nocookie.com", StrategyName: "youtube-2026", Comment: "YouTube embed"},
+		{Pattern: "*.youtube.com", StrategyName: "yt-fake-only-2026", Comment: "YouTube main/web"},
+		{Pattern: "youtube.com", StrategyName: "yt-fake-only-2026", Comment: "YouTube bare"},
+		{Pattern: "accounts.youtube.com", StrategyName: "yt-safe-2026", Comment: "YouTube accounts"},
+		{Pattern: "*.googlevideo.com", StrategyName: "yt-fake-only-2026", Comment: "YouTube video CDN"},
+		{Pattern: "*.youtubei.googleapis.com", StrategyName: "yt-fake-only-2026", Comment: "YouTube API"},
+		{Pattern: "*.youtube-nocookie.com", StrategyName: "yt-fake-only-2026", Comment: "YouTube embed"},
 
 		// Static / avatars / telemetry — не форсируем bypass по умолчанию
-		{Pattern: "*.ytimg.com", StrategyName: "youtube-2026", Comment: "YouTube static"},
-		{Pattern: "*.ggpht.com", StrategyName: "youtube-2026", Comment: "Google avatars/images"},
-		{Pattern: "*.gvt1.com", StrategyName: "yt-safe-2026", Comment: "GVT / YouTube CDN"},
-		{Pattern: "*.gvt2.com", StrategyName: "yt-safe-2026", Comment: "GVT / YouTube CDN"},
+		{Pattern: "*.ytimg.com", StrategyName: "yt-fake-only-2026", Comment: "YouTube static"},
+		{Pattern: "*.ggpht.com", StrategyName: "yt-fake-only-2026", Comment: "Google avatars/images"},
+		{Pattern: "*.gvt1.com", StrategyName: "youtube-2026", Comment: "GVT / YouTube CDN"},
+		{Pattern: "*.gvt2.com", StrategyName: "youtube-2026", Comment: "GVT / YouTube CDN"},
 
 		// Discord
 		{Pattern: "*.discord.com", StrategyName: "discord-2026", Comment: "Discord"},

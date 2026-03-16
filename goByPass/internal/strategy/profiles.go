@@ -81,7 +81,7 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          12,
 		Name:        "telegram",
-		Description: "Telegram safer TCP: split pos=1, handshake-only; без агрессивного fake/disorder",
+		Description: "Telegram safer TCP: split pos=1 only, handshake-only",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: false,
@@ -102,7 +102,7 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          20,
 		Name:        "youtube-2026",
-		Description: "YouTube Windows: seqovl=681 + fake TS x6 + QUIC fake (ближе к zapret general/ALT11)",
+		Description: "YouTube Windows safe-first: seqovl + fake TS x6 + QUIC fake",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
@@ -134,7 +134,7 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          21,
 		Name:        "discord-2026",
-		Description: "Discord: seqovl=681 + fake TS x6 + QUIC fake (zapret-like)",
+		Description: "Discord: seqovl + fake TS x6 + QUIC fake (zapret-like)",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
@@ -217,6 +217,30 @@ func (m *Manager) loadDefaultStrategies() {
 		ModifyFirstDataPackets: 1,
 	})
 
+	// ── 60. YouTube fake-only main/web ───────────────────────────────────────
+	mustAdd(&Strategy{
+		ID:          60,
+		Name:        "yt-fake-only-2026",
+		Description: "YouTube main/web: fake TLS only + QUIC fake, no real TCP split",
+		ApplyToHTTP: false,
+		ApplyToTLS:  true,
+		ApplyToQUIC: true,
+
+		Fooling:     FoolingTS,
+		FakeTTL:     6,
+		FakeRepeats: 6,
+		FakeTLSFiles: []string{
+			"tls_clienthello_www_google_com.bin",
+		},
+
+		FakeQUICFile:    "quic_initial_www_google_com.bin",
+		FakeQUICRepeats: 6,
+
+		ApplyToPacketTypes:     []string{"handshake"},
+		Priority:               34,
+		ModifyFirstDataPackets: 0,
+	})
+
 	// ── 27. YouTube safe Windows TCP ─────────────────────────────────────────
 	mustAdd(&Strategy{
 		ID:          27,
@@ -293,7 +317,7 @@ func (m *Manager) loadDefaultStrategies() {
 
 	// ── 60. General TCP ALT5 ──────────────────────────────────────────────────
 	mustAdd(&Strategy{
-		ID:            60,
+		ID:            601,
 		Name:          "syndata-multidisorder",
 		Description:   "TCP ALT5: syndata+multidisorder",
 		ApplyToHTTP:   true,
