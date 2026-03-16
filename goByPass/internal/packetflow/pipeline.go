@@ -573,7 +573,7 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 	// 1. Свежий выбор по hostname/IP
 	selectorHostname := flowHostname
-	if selectorHostname == "" && cached != nil && isReusableCachedBypassHostname(cached.Hostname) {
+	if selectorHostname == "" && cached != nil && shouldReuseBypassFromIPCache(cached.Hostname, cachedStratID) {
 		selectorHostname = cached.Hostname
 	}
 
@@ -585,13 +585,11 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	)
 
 	// 2. Если hostname ещё не известен, reuse cached non-passthrough ТОЛЬКО
-	// для явно YouTube-like hostname из IP cache.
-	// Иначе shared Google IP может наследовать прошлую YT-стратегию
-	// и ломать чужие TCP потоки.
+	// для выделенных bypass-hostname. Shared hostnames не "приклеиваем".
 	preferCached := flowHostname == "" &&
 		cached != nil &&
 		cachedStratID > 1 &&
-		isReusableCachedBypassHostname(cached.Hostname)
+		shouldReuseBypassFromIPCache(cached.Hostname, cachedStratID)
 
 	switch {
 	case preferCached && (fresh == nil || fresh.ID == 1):
@@ -606,8 +604,9 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		strategyID = fresh.ID
 		shouldBypass = fresh.ID != 1
 
-		// Обновляем IP cache только когда hostname уже известен
-		if selectorHostname != "" && (strategyID != cachedStratID || cached == nil) {
+		if selectorHostname != "" &&
+			shouldPersistBypassStrategyByIP(selectorHostname, strategyID) &&
+			(cached == nil || strategyID != cachedStratID || !strings.EqualFold(selectorHostname, cached.Hostname)) {
 			p.ipCache.PutByIP(dstIP, selectorHostname, shouldBypass, strategyID)
 		}
 
@@ -982,26 +981,34 @@ func (p *Pipeline) maybeSeedCachesFromDNS(packet []byte) {
 	log.Printf("[DNS] Seeded caches: domain=%s ips=%d ttl=%d cname=%s", domain, len(ips), ttl, cname)
 }
 
-func isReusableCachedBypassHostname(host string) bool {
+func shouldReuseBypassFromIPCache(host string, strategyID int) bool {
+	if strategyID <= 1 {
+		return false
+	}
+	return shouldPersistBypassStrategyByIP(host, strategyID)
+}
+
+func shouldPersistBypassStrategyByIP(host string, strategyID int) bool {
+	if strategyID <= 1 {
+		return false
+	}
+
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
 		return false
 	}
 
 	switch {
-	case h == "youtube.com",
-		h == "www.youtube.com",
-		h == "accounts.youtube.com",
-		strings.HasSuffix(h, ".youtube.com"),
-		strings.HasSuffix(h, ".googlevideo.com"),
-		strings.HasSuffix(h, ".youtubei.googleapis.com"),
-		strings.HasSuffix(h, ".ytimg.com"),
-		strings.HasSuffix(h, ".ggpht.com"),
-		h == "telegram.org",
+	case h == "telegram.org",
 		h == "web.telegram.org",
 		strings.HasSuffix(h, ".telegram.org"),
 		h == "t.me",
-		strings.HasSuffix(h, ".t.me"):
+		strings.HasSuffix(h, ".t.me"),
+		strings.HasSuffix(h, ".googlevideo.com"),
+		strings.HasSuffix(h, ".youtubei.googleapis.com"),
+		strings.HasSuffix(h, ".youtube-nocookie.com"),
+		strings.HasSuffix(h, ".gvt1.com"),
+		strings.HasSuffix(h, ".gvt2.com"):
 		return true
 	default:
 		return false

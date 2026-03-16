@@ -81,7 +81,7 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          12,
 		Name:        "telegram",
-		Description: "Telegram Windows/RU: split pos=1 + fake TS x1 (no SNI offset)",
+		Description: "Telegram safer TCP: split pos=1 only, handshake-only",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: false,
@@ -89,10 +89,6 @@ func (m *Manager) loadDefaultStrategies() {
 		SplitMode:      SplitCustom,
 		SplitPositions: []int{1},
 		SplitSNIOffset: false,
-
-		Fooling:     FoolingTS,
-		FakeTTL:     6,
-		FakeRepeats: 1,
 
 		TLSRecordSplit: false,
 		TLSRecordSize:  0,
@@ -225,29 +221,23 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          27,
 		Name:        "yt-safe-2026",
-		Description: "YouTube SAFE: seqovl + fake + QUIC fake (handshake-only)",
+		Description: "YouTube safer TCP: syndata + multidisorder; QUIC fake kept",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		SplitMode:         SplitSeqOvl,
-		SplitPositions:    []int{1},
-		SeqOvlLen:         681,
-		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
-
-		Fooling:     FoolingTS,
-		FakeTTL:     6,
-		FakeRepeats: 6,
-		FakeTLSFiles: []string{
-			"tls_clienthello_www_google_com.bin",
-		},
+		SynData:       true,
+		MultiDisorder: true,
+		DisorderTTL:   4,
+		DisorderPos:   []int{1, 2, 3, 4, 5},
 
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
+		FakeTTL:         6,
 
 		ApplyToPacketTypes:     []string{"handshake"},
 		Priority:               35,
-		ModifyFirstDataPackets: 0,
+		ModifyFirstDataPackets: 1,
 	})
 
 	// ── 30. QUIC fake x6 ──────────────────────────────────────────────────────

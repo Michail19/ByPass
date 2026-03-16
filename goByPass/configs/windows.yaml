@@ -29,7 +29,7 @@ cache:
       - telegram.org
 
 strategy:
-  strategy_file: configs/strategies/strategies.json
+  strategy_file: /strategies/strategies.json
   append_default_rules: true
   hostname_rules:
     - pattern: "*.youtube.com"
@@ -56,6 +56,12 @@ strategy:
     - pattern: "*.ggpht.com"
       strategy_id: 27
       comment: "Override built-in avatars/images"
+    - pattern: "*.gvt1.com"
+      strategy_id: 27
+      comment: "Override built-in GVT1 with SAFE profile"
+    - pattern: "*.gvt2.com"
+      strategy_id: 27
+      comment: "Override built-in GVT2 with SAFE profile"
 
     - pattern: "*.telegram.org"
       strategy_id: 12

@@ -491,8 +491,8 @@ func defaultHostnameRules() []strategy.HostnameRule {
 		// Static / avatars / telemetry — не форсируем bypass по умолчанию
 		{Pattern: "*.ytimg.com", StrategyName: "youtube-2026", Comment: "YouTube static"},
 		{Pattern: "*.ggpht.com", StrategyName: "youtube-2026", Comment: "Google avatars/images"},
-		{Pattern: "*.gvt1.com", StrategyName: "passthrough", Comment: "GVT passthrough"},
-		{Pattern: "*.gvt2.com", StrategyName: "passthrough", Comment: "GVT passthrough"},
+		{Pattern: "*.gvt1.com", StrategyName: "yt-safe-2026", Comment: "GVT / YouTube CDN"},
+		{Pattern: "*.gvt2.com", StrategyName: "yt-safe-2026", Comment: "GVT / YouTube CDN"},
 
 		// Discord
 		{Pattern: "*.discord.com", StrategyName: "discord-2026", Comment: "Discord"},
