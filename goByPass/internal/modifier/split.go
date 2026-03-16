@@ -2,6 +2,7 @@ package modifier
 
 import (
 	"ByPass/internal/protocol"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"log"
@@ -18,7 +19,7 @@ var (
 
 // ApplySplit применяет разбиение пакета на сегменты в указанных позициях.
 // Позиции сортируются — неотсортированный список приводит к перекрытию сегментов.
-func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI bool) ([][]byte, error) {
+func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI, addMidSLD, addSNIExt bool) ([][]byte, error) {
 	if len(splitPos) == 0 {
 		return nil, nil
 	}
@@ -29,7 +30,7 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 	}
 
 	payload := packet[payloadOffset:]
-	validPos, err := resolveSplitPositions(payload, splitPos, alignSNI)
+	validPos, err := resolveSplitPositions(payload, splitPos, alignSNI, addMidSLD, addSNIExt)
 	if err != nil {
 		return nil, err
 	}
@@ -40,16 +41,14 @@ func (pm *PacketModifier) ApplySplit(packet []byte, splitPos []int, alignSNI boo
 	return buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
 }
 
-func resolveSplitPositions(payload []byte, splitPos []int, alignSNI bool) ([]int, error) {
+func resolveSplitPositions(payload []byte, splitPos []int, alignSNI, addMidSLD, addSNIExt bool) ([]int, error) {
 	var validPos []int
 
 	base := 0
+	sniPos, sniLen, err := findTLSClientHelloSNI(payload)
 	if alignSNI {
-		sniPos, err := protocol.FindSNI(payload)
 		if err != nil {
 			// Best-effort fallback: если SNI не найден, делаем split по абсолютным позициям.
-			// Это позволяет стратегиям вида SplitPositions=[1] продолжать работать
-			// даже при нестандартных/неполных ClientHello.
 			alignSNI = false
 			base = 0
 		} else {
@@ -67,11 +66,73 @@ func resolveSplitPositions(payload []byte, splitPos []int, alignSNI bool) ([]int
 		}
 	}
 
+	if err == nil {
+		if addMidSLD {
+			if mid, ok := findMidSLDPosition(payload[sniPos : sniPos+sniLen]); ok {
+				resolved := sniPos + mid
+				if resolved > 0 && resolved < len(payload) {
+					validPos = append(validPos, resolved)
+				}
+			}
+		}
+		if addSNIExt {
+			resolved := sniPos + sniLen + 1 // sniext+1
+			if resolved > 0 && resolved < len(payload) {
+				validPos = append(validPos, resolved)
+			}
+		}
+	}
+
 	if len(validPos) == 0 {
 		return nil, nil
 	}
 	sortInts(validPos)
 	return dedupInts(validPos), nil
+}
+
+func findTLSClientHelloSNI(payload []byte) (int, int, error) {
+	sniPos, err := protocol.FindSNI(payload)
+	if err != nil {
+		return 0, 0, err
+	}
+	if sniPos < 2 || sniPos > len(payload) {
+		return 0, 0, errors.New("invalid SNI position")
+	}
+	sniLen := int(binary.BigEndian.Uint16(payload[sniPos-2 : sniPos]))
+	if sniLen <= 0 || sniPos+sniLen > len(payload) {
+		return 0, 0, errors.New("invalid SNI length")
+	}
+	return sniPos, sniLen, nil
+}
+
+func findMidSLDPosition(host []byte) (int, bool) {
+	if len(host) == 0 {
+		return 0, false
+	}
+	labels := bytes.Split(host, []byte{'.'})
+	if len(labels) == 0 {
+		return 0, false
+	}
+
+	labelIdx := 0
+	if len(labels) >= 2 {
+		labelIdx = len(labels) - 2
+	}
+	target := labels[labelIdx]
+	if len(target) == 0 {
+		return 0, false
+	}
+
+	offset := 0
+	for i := 0; i < labelIdx; i++ {
+		offset += len(labels[i]) + 1
+	}
+
+	mid := len(target) / 2
+	if mid <= 0 {
+		mid = 1
+	}
+	return offset + mid, true
 }
 
 // ApplySeqOvl реализует multisplit с sequence overlap (основная техника zapret/general.bat).
@@ -92,6 +153,7 @@ func (pm *PacketModifier) ApplySeqOvl(
 	ovlLen int,
 	pattern []byte,
 	splitPositions []int,
+	alignSNI, addMidSLD, addSNIExt bool,
 	seqOvlTTL int,
 ) ([][]byte, error) {
 	ipHdrLen, tcpHdrLen, payloadOffset, err := parseIPv4TCP(packet)
@@ -137,15 +199,10 @@ func (pm *PacketModifier) ApplySeqOvl(
 	results = append(results, ovlPkt)
 
 	// 2. Реальные сегменты в прямом порядке
-	var validPos []int
-	for _, pos := range splitPositions {
-		if pos > 0 && pos < payloadLen {
-			validPos = append(validPos, pos)
-		}
+	validPos, err := resolveSplitPositions(packet[payloadOffset:], splitPositions, alignSNI, addMidSLD, addSNIExt)
+	if err != nil {
+		return nil, err
 	}
-	sortInts(validPos)
-	validPos = dedupInts(validPos)
-
 	if len(validPos) == 0 {
 		validPos = []int{1}
 	}

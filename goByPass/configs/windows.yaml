@@ -1,9 +1,9 @@
 app:
-    name: ByPass
-    version: 1.0.0
-    pid_file: "bypass.pid"
-    working_dir: "."
-    daemonize: false
+  name: ByPass
+  version: 1.0.0
+  pid_file: "bypass.pid"
+  working_dir: "."
+  daemonize: false
 capture:
   type: windivert
 
@@ -29,39 +29,59 @@ cache:
       - telegram.org
 
 strategy:
-  strategy_file: /strategies/strategies.json
+  strategy_file: ./strategies/strategies.json
   append_default_rules: true
   hostname_rules:
     - pattern: "*.youtube.com"
-      strategy_id: 27
-      comment: "Override built-in YouTube with SAFE profile"
+      strategy_id: 25
+      comment: "YouTube TCP: prefer seqovl+fake profile"
     - pattern: "youtube.com"
-      strategy_id: 27
-      comment: "Override built-in bare YouTube"
+      strategy_id: 25
+      comment: "Bare YouTube: prefer seqovl+fake profile"
     - pattern: "accounts.youtube.com"
       strategy_id: 27
-      comment: "Override built-in accounts.youtube.com"
+      comment: "Accounts: keep conservative split profile"
     - pattern: "*.googlevideo.com"
-      strategy_id: 27
-      comment: "Override built-in video CDN"
+      strategy_id: 25
+      comment: "YouTube video CDN: prefer seqovl+fake profile"
     - pattern: "*.youtubei.googleapis.com"
-      strategy_id: 27
-      comment: "Override built-in YouTube API"
+      strategy_id: 25
+      comment: "YouTube API: prefer seqovl+fake profile"
     - pattern: "*.youtube-nocookie.com"
       strategy_id: 27
-      comment: "Override built-in embed"
+      comment: "Embed: keep conservative split profile"
     - pattern: "*.ytimg.com"
       strategy_id: 27
-      comment: "Override built-in static"
+      comment: "Static assets: conservative split profile"
     - pattern: "*.ggpht.com"
       strategy_id: 27
-      comment: "Override built-in avatars/images"
+      comment: "Images/avatars: conservative split profile"
     - pattern: "*.gvt1.com"
-      strategy_id: 27
-      comment: "Override built-in GVT1 with SAFE profile"
+      strategy_id: 25
+      comment: "GVT1: prefer seqovl+fake profile"
     - pattern: "*.gvt2.com"
-      strategy_id: 27
-      comment: "Override built-in GVT2 with SAFE profile"
+      strategy_id: 25
+      comment: "GVT2: prefer seqovl+fake profile"
+
+
+    - pattern: "*.discord.com"
+      strategy_id: 21
+      comment: "Discord HTTPS/Web"
+    - pattern: "discord.com"
+      strategy_id: 21
+      comment: "Discord bare"
+    - pattern: "*.discord.gg"
+      strategy_id: 21
+      comment: "Discord invites"
+    - pattern: "discord.gg"
+      strategy_id: 21
+      comment: "Discord invites"
+    - pattern: "*.discordapp.net"
+      strategy_id: 21
+      comment: "Discord CDN/API"
+    - pattern: "*.discord.media"
+      strategy_id: 21
+      comment: "Discord media"
 
     - pattern: "*.telegram.org"
       strategy_id: 12

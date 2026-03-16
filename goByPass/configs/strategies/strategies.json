@@ -75,7 +75,7 @@
   {
     "id": 43,
     "name": "multisplit-679-sniext-google",
-    "description": "multisplit seqovl=679 pos=2+sniext+1 google (ALT7)",
+    "description": "multisplit seqovl=679 pos=2+sniext+1 google (ALT7) [requires patched marker support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
@@ -191,7 +191,7 @@
   {
     "id": 49,
     "name": "fake-multisplit-681-badseq-10M-tls-mod",
-    "description": "fake+multisplit seqovl=681 fooling=badseq inc=10000000 tls-mod=rnd,dupsid,sni=google (FAKE TLS AUTO2)",
+    "description": "fake+multisplit seqovl=681 fooling=badseq inc=10000000 tls-mod=rnd,dupsid,sni=google (FAKE TLS AUTO2) [requires patched tls-mod support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
@@ -212,7 +212,7 @@
   {
     "id": 52,
     "name": "fake-multisplit-681-badseq-10M-tls-mod-max_ru",
-    "description": "fake+multisplit seqovl=681 fooling=badseq inc=10000000 tls-mod + max_ru (FAKE TLS AUTO2 общий)",
+    "description": "fake+multisplit seqovl=681 fooling=badseq inc=10000000 tls-mod + max_ru (FAKE TLS AUTO2 общий) [requires patched tls-mod support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
@@ -234,7 +234,7 @@
   {
     "id": 50,
     "name": "fake-multisplit-681-ts-tls-mod-google",
-    "description": "fake+multisplit seqovl=681 fooling=ts repeats=8 tls-mod=rnd,dupsid,sni=google (FAKE TLS AUTO3 discord/google)",
+    "description": "fake+multisplit seqovl=681 fooling=ts repeats=8 tls-mod=rnd,dupsid,sni=google (FAKE TLS AUTO3 discord/google) [requires patched tls-mod support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
@@ -254,7 +254,7 @@
   {
     "id": 51,
     "name": "fake-multisplit-681-ts-tls-mod-max_ru",
-    "description": "fake+multisplit seqovl=681 fooling=ts repeats=8 tls-mod + max_ru (FAKE TLS AUTO3 общий)",
+    "description": "fake+multisplit seqovl=681 fooling=ts repeats=8 tls-mod + max_ru (FAKE TLS AUTO3 общий) [requires patched tls-mod support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 2,
@@ -276,12 +276,12 @@
     "_comment": "=== FAKEDSPLIT (fake + split в позиции, pattern=0x00) ===",
     "id": 55,
     "name": "fake-fakedsplit-ts-google",
-    "description": "fake,fakedsplit fooling=ts pattern=0x00 google x6 (ALT discord/google/ipset)",
+    "description": "fake,fakedsplit fooling=ts pattern=0x00 google x6 (ALT discord/google/ipset) [fixed split_pos=1]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 3,
     "faked_split": true,
-    "faked_split_pos": 0,
+    "faked_split_pos": 1,
     "faked_split_pattern": 0,
     "fooling": 1,
     "fake_repeats": 6,
@@ -294,12 +294,12 @@
   {
     "id": 56,
     "name": "fake-fakedsplit-ts-stun-max_ru",
-    "description": "fake,fakedsplit fooling=ts pattern=0x00 stun+google+max_ru x6 (ALT общий)",
+    "description": "fake,fakedsplit fooling=ts pattern=0x00 stun+google+max_ru x6 (ALT общий) [fixed split_pos=1]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 3,
     "faked_split": true,
-    "faked_split_pos": 0,
+    "faked_split_pos": 1,
     "faked_split_pattern": 0,
     "fooling": 1,
     "fake_repeats": 6,
@@ -314,7 +314,7 @@
   {
     "id": 57,
     "name": "fake-fakedsplit-badseq-2-tls-mod-google",
-    "description": "fake,fakedsplit pos=1 fooling=badseq inc=2 tls-mod=rnd,dupsid,sni=google x8 (FAKE TLS AUTO ALT discord/google)",
+    "description": "fake,fakedsplit pos=1 fooling=badseq inc=2 tls-mod=rnd,dupsid,sni=google x8 (FAKE TLS AUTO ALT discord/google) [requires patched tls-mod support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 3,
@@ -333,7 +333,7 @@
   {
     "id": 58,
     "name": "fake-fakedsplit-badseq-2-tls-mod-max_ru",
-    "description": "fake,fakedsplit pos=1 fooling=badseq inc=2 tls-mod + max_ru x8 (FAKE TLS AUTO ALT общий)",
+    "description": "fake,fakedsplit pos=1 fooling=badseq inc=2 tls-mod + max_ru x8 (FAKE TLS AUTO ALT общий) [requires patched tls-mod support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "split_mode": 3,
@@ -371,7 +371,7 @@
   {
     "id": 64,
     "name": "fake-multidisorder-midsld-badseq-tls-mod",
-    "description": "fake+multidisorder pos=1,midsld fooling=badseq x11 tls=0x0+^!+mod=rnd,dupsid,sni=google (FAKE TLS AUTO main)",
+    "description": "fake+multidisorder pos=1,midsld fooling=badseq x11 tls=0x0+^!+mod=rnd,dupsid,sni=google (FAKE TLS AUTO main) [requires patched marker support] [requires patched tls-mod support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "multi_disorder": true,
@@ -393,7 +393,7 @@
   {
     "id": 65,
     "name": "fake-multidisorder-midsld-badseq-tls-mod-max_ru",
-    "description": "fake+multidisorder pos=1,midsld fooling=badseq x11 tls-mod + max_ru (FAKE TLS AUTO main общий)",
+    "description": "fake+multidisorder pos=1,midsld fooling=badseq x11 tls-mod + max_ru (FAKE TLS AUTO main общий) [requires patched marker support] [requires patched tls-mod support]",
     "apply_to_http": true,
     "apply_to_tls": true,
     "multi_disorder": true,
@@ -427,7 +427,7 @@
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",
-    "priority": 70,
+    "priority": 90,
     "fake_ttl": 6
   },
   {
@@ -444,7 +444,7 @@
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "ya.ru",
     "fake_http_file": "tls_clienthello_max_ru.bin",
-    "priority": 71,
+    "priority": 90,
     "fake_ttl": 6
   },
   {
@@ -457,7 +457,7 @@
     "host_fake_split_host": "www.google.com",
     "fooling": 1,
     "fake_repeats": 4,
-    "priority": 72,
+    "priority": 90,
     "fake_ttl": 6
   },
   {
@@ -470,7 +470,7 @@
     "host_fake_split_host": "ozon.ru",
     "fooling": 3,
     "fake_repeats": 4,
-    "priority": 73,
+    "priority": 90,
     "fake_ttl": 6
   },
   {
@@ -613,7 +613,7 @@
   {
     "id": 89,
     "name": "fake-ts-ip-id-zero-tls-mod",
-    "description": "fake fooling=ts ip_id=zero tls-mod=rnd,dupsid,sni=google x8 (FAKE TLS AUTO ALT2/3 Google)",
+    "description": "fake fooling=ts ip_id=zero tls-mod=rnd,dupsid,sni=google x8 (FAKE TLS AUTO ALT2/3 Google) [requires patched tls-mod support]",
     "apply_to_http": false,
     "apply_to_tls": true,
     "ip_id_zero": true,
@@ -691,7 +691,7 @@
   {
     "id": 94,
     "name": "discord-fakedsplit-ts-badseq-2-tls-mod",
-    "description": "Discord TCP alt-ports: fake+fakedsplit pos=1 badseq=2 tls-mod=rnd,dupsid,sni=google x8 (FAKE TLS AUTO ALT)",
+    "description": "Discord TCP alt-ports: fake+fakedsplit pos=1 badseq=2 tls-mod=rnd,dupsid,sni=google x8 (FAKE TLS AUTO ALT) [requires patched tls-mod support]",
     "apply_to_http": false,
     "apply_to_tls": true,
     "split_mode": 3,
@@ -709,7 +709,7 @@
   {
     "id": 95,
     "name": "discord-multidisorder-midsld-badseq-tls-mod",
-    "description": "Discord TCP alt-ports: fake+multidisorder midsld badseq tls-mod x11 (FAKE TLS AUTO main)",
+    "description": "Discord TCP alt-ports: fake+multidisorder midsld badseq tls-mod x11 (FAKE TLS AUTO main) [requires patched marker support] [requires patched tls-mod support]",
     "apply_to_http": false,
     "apply_to_tls": true,
     "multi_disorder": true,

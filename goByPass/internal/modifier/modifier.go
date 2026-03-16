@@ -6,6 +6,7 @@ import (
 	"ByPass/internal/protocol"
 	"ByPass/internal/strategy"
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"sync/atomic"
@@ -149,6 +150,8 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 		len(strat.FakeTLSFilesData) > 0 ||
 		strat.FakeTLSNullBytes ||
 		strat.FakeTLSPrevPacket ||
+		strat.FakeTLSModRnd ||
+		strat.FakeTLSModDupSID ||
 		strat.FakeTLSModSNI != ""
 
 	fakeRepeats := strat.FakeRepeats
@@ -203,7 +206,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 			// Для HTTP-стратегий тоже применяем обычный TCP split по payload,
 			// если он задан в профиле (light / medium и т.д.).
 			if strat.SplitMode != strategy.SplitNone && len(strat.SplitPositions) > 0 {
-				splitPkts, err := pm.ApplySplit(httpPkt, strat.SplitPositions, false)
+				splitPkts, err := pm.ApplySplit(httpPkt, strat.SplitPositions, false, strat.SplitPosMidSLD, strat.SplitPosSNIExt)
 				if err != nil {
 					pm.stats.Errors.Add(1)
 				} else if len(splitPkts) > 1 {
@@ -252,6 +255,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	if strat.NeedsSeqOvl() && isClientHello {
 		seqPkts, err := pm.ApplySeqOvl(
 			packet, strat.SeqOvlLen, strat.SeqOvlPatternData, strat.SplitPositions,
+			strat.SplitSNIOffset, strat.SplitPosMidSLD, strat.SplitPosSNIExt,
 			// SeqOvl TTL: предпочитаем DisorderTTL (запретовский default=1), fallback FakeTTL.
 			// ovl-пакет идёт с seq < ISN — должен умереть до сервера, но дойти до DPI.
 			func() int {
@@ -348,7 +352,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 
 	// 8. Split обычный
 	if strat.SplitMode != strategy.SplitNone && len(strat.SplitPositions) > 0 && isClientHello {
-		splitPkts, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset)
+		splitPkts, err := pm.ApplySplit(packet, strat.SplitPositions, strat.SplitSNIOffset, strat.SplitPosMidSLD, strat.SplitPosSNIExt)
 		if err == nil && len(splitPkts) > 1 {
 			packets = append(packets, splitPkts...)
 			pm.stats.SplitCount.Add(uint64(len(splitPkts)))
@@ -577,36 +581,132 @@ func (pm *PacketModifier) selectFakeTLSPayload(
 	packet []byte,
 	ipHdrLen int,
 ) []byte {
-
-	if strat.FakeTLSNullBytes {
-		// Минимальный TLS record: ContentType=Handshake(0x16) + TLS1.0 + length=0.
-		// 4 нулевых байта тривиально детектируются как не-TLS (#4).
-		// Пустой Handshake record структурно валиден — сервер дропнет без RST,
-		// DPI принимает как начало Handshake и теряет контекст.
-		return []byte{
-			0x16, 0x03, 0x01, 0x00, 0x05,
-			0x01, 0x00, 0x00, 0x01, 0x00,
-		}
-	}
-
-	if strat.FakeTLSPrevPacket {
-		// Использовать предыдущий ClientHello — пока просто возвращаем оригинал
+	tcpHdrLen := int(packet[ipHdrLen+12]>>4) * 4
+	payloadOffset := ipHdrLen + tcpHdrLen
+	if payloadOffset >= len(packet) {
 		return nil
 	}
 
-	if len(strat.FakeTLSFilesData) > 0 {
-		return strat.FakeTLSData(repIdx)
+	var payload []byte
+	switch {
+	case strat.FakeTLSNullBytes:
+		payload = []byte{0x16, 0x03, 0x01, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00}
+	case strat.FakeTLSPrevPacket:
+		payload = append([]byte(nil), packet[payloadOffset:]...)
+	case len(strat.FakeTLSFilesData) > 0:
+		payload = append([]byte(nil), strat.FakeTLSData(repIdx)...)
+	default:
+		payload = append([]byte(nil), packet[payloadOffset:]...)
 	}
 
-	if strat.FakeTLSModSNI != "" && isClientHello {
-		tcpHdrLen := int(packet[ipHdrLen+12]>>4) * 4
-		payloadOffset := ipHdrLen + tcpHdrLen
-		if payloadOffset < len(packet) {
-			return modifyClientHelloSNI(packet[payloadOffset:], strat.FakeTLSModSNI)
+	if !strat.FakeTLSModNone && (strat.FakeTLSModRnd || strat.FakeTLSModDupSID || strat.FakeTLSModSNI != "") {
+		if modified := applyClientHelloMods(payload, strat); modified != nil {
+			payload = modified
 		}
 	}
 
-	return nil
+	// Если payload совпадает с оригинальным и модификации не нужны — пусть ApplyFake
+	// просто клонирует исходный packet без лишней аллокации.
+	if !strat.FakeTLSNullBytes &&
+		!strat.FakeTLSPrevPacket &&
+		len(strat.FakeTLSFilesData) == 0 &&
+		!strat.FakeTLSModRnd &&
+		!strat.FakeTLSModDupSID &&
+		strat.FakeTLSModSNI == "" {
+		return nil
+	}
+
+	if len(payload) == 0 && !isClientHello {
+		return nil
+	}
+	return payload
+}
+
+func applyClientHelloMods(payload []byte, strat *strategy.Strategy) []byte {
+	if len(payload) < 44 || payload[0] != 0x16 || payload[5] != 0x01 {
+		return payload
+	}
+
+	out := append([]byte(nil), payload...)
+
+	if strat.FakeTLSModRnd && len(out) >= 43 {
+		_, _ = rand.Read(out[11:43])
+	}
+
+	if strat.FakeTLSModDupSID {
+		if modified := rewriteClientHelloSessionID(out, buildDupSessionID(out)); modified != nil {
+			out = modified
+		}
+	}
+
+	if strat.FakeTLSModSNI != "" {
+		if modified := modifyClientHelloSNI(out, strat.FakeTLSModSNI); modified != nil {
+			out = modified
+		}
+	}
+
+	return out
+}
+
+func buildDupSessionID(payload []byte) []byte {
+	if len(payload) < 44 {
+		return nil
+	}
+	sidLen := int(payload[43])
+	if 44+sidLen > len(payload) {
+		return nil
+	}
+	if sidLen == 0 {
+		buf := make([]byte, 32)
+		_, _ = rand.Read(buf[:16])
+		copy(buf[16:], buf[:16])
+		return buf
+	}
+	orig := payload[44 : 44+sidLen]
+	outLen := sidLen * 2
+	if outLen > 32 {
+		outLen = 32
+	}
+	out := make([]byte, outLen)
+	for i := 0; i < outLen; i++ {
+		out[i] = orig[i%sidLen]
+	}
+	return out
+}
+
+func rewriteClientHelloSessionID(payload []byte, newSID []byte) []byte {
+	if len(payload) < 44 || len(newSID) > 32 {
+		return nil
+	}
+	oldSIDLen := int(payload[43])
+	oldStart := 44
+	oldEnd := oldStart + oldSIDLen
+	if oldEnd > len(payload) {
+		return nil
+	}
+	delta := len(newSID) - oldSIDLen
+	out := make([]byte, len(payload)+delta)
+	copy(out, payload[:43])
+	out[43] = byte(len(newSID))
+	copy(out[44:], newSID)
+	copy(out[44+len(newSID):], payload[oldEnd:])
+
+	if len(out) >= 5 {
+		recLen := int(binary.BigEndian.Uint16(out[3:5])) + delta
+		if recLen >= 0 && recLen <= 0xFFFF {
+			binary.BigEndian.PutUint16(out[3:5], uint16(recLen))
+		}
+	}
+	if len(out) >= 9 {
+		hsLen := int(out[6])<<16 | int(out[7])<<8 | int(out[8])
+		hsLen += delta
+		if hsLen >= 0 && hsLen <= 0xFFFFFF {
+			out[6] = byte(hsLen >> 16)
+			out[7] = byte(hsLen >> 8)
+			out[8] = byte(hsLen)
+		}
+	}
+	return out
 }
 
 // ApplyHostFakeSplit применяет hostfakesplit для HTTP трафика:

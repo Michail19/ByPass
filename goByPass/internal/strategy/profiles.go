@@ -81,7 +81,7 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          12,
 		Name:        "telegram",
-		Description: "Telegram safer TCP: split pos=1 only, handshake-only",
+		Description: "Telegram safer TCP: split pos=1, handshake-only; без агрессивного fake/disorder",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: false,
@@ -102,7 +102,7 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          20,
 		Name:        "youtube-2026",
-		Description: "YouTube Windows safe-first: seqovl + fake TS x6 + QUIC fake",
+		Description: "YouTube Windows: seqovl=681 + fake TS x6 + QUIC fake (ближе к zapret general/ALT11)",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
@@ -134,7 +134,7 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          21,
 		Name:        "discord-2026",
-		Description: "Discord: seqovl + fake TS x6 + QUIC fake (zapret-like)",
+		Description: "Discord: seqovl=681 + fake TS x6 + QUIC fake (zapret-like)",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
