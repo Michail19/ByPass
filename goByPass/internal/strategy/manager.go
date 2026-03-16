@@ -876,6 +876,7 @@ var telegramObservedFallbackIPs = map[string]struct{}{
 	"149.154.167.99": {},
 	"79.133.168.12":  {},
 	"108.181.1.241":  {},
+	"193.41.141.68":  {},
 }
 
 func isTelegramObservedFallbackIP(ip string) bool {

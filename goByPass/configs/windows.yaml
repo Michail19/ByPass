@@ -4,6 +4,7 @@ app:
   pid_file: "bypass.pid"
   working_dir: "."
   daemonize: false
+
 capture:
   type: windivert
 
@@ -43,35 +44,35 @@ strategy:
   append_default_rules: false
   hostname_rules:
     - pattern: "*.youtube.com"
-      strategy_id: 60
-      comment: "YouTube main/web: seqovl-only TCP"
+      strategy_id: 31
+      comment: "YouTube main/web: ALT5-like TCP"
     - pattern: "youtube.com"
-      strategy_id: 60
-      comment: "YouTube bare: seqovl-only TCP"
+      strategy_id: 31
+      comment: "YouTube bare: ALT5-like TCP"
     - pattern: "accounts.youtube.com"
       strategy_id: 27
       comment: "Accounts: conservative split profile"
     - pattern: "*.googlevideo.com"
-      strategy_id: 60
-      comment: "Video CDN: seqovl-only TCP"
+      strategy_id: 31
+      comment: "Video CDN: ALT5-like TCP"
     - pattern: "*.youtubei.googleapis.com"
-      strategy_id: 60
-      comment: "YouTube API: seqovl-only TCP"
+      strategy_id: 31
+      comment: "YouTube API: ALT5-like TCP"
     - pattern: "*.youtube-nocookie.com"
-      strategy_id: 60
-      comment: "Embed: seqovl-only TCP"
+      strategy_id: 31
+      comment: "Embed: ALT5-like TCP"
     - pattern: "*.ytimg.com"
-      strategy_id: 60
-      comment: "Static assets: seqovl-only TCP"
+      strategy_id: 31
+      comment: "Static assets: ALT5-like TCP"
     - pattern: "*.ggpht.com"
-      strategy_id: 60
-      comment: "Images/avatars: seqovl-only TCP"
+      strategy_id: 31
+      comment: "Images/avatars: ALT5-like TCP"
     - pattern: "*.gvt1.com"
-      strategy_id: 20
-      comment: "GVT1: seqovl+fake profile"
+      strategy_id: 31
+      comment: "GVT1: ALT5-like TCP"
     - pattern: "*.gvt2.com"
-      strategy_id: 20
-      comment: "GVT2: seqovl+fake profile"
+      strategy_id: 31
+      comment: "GVT2: ALT5-like TCP"
 
     - pattern: "*.discord.com"
       strategy_id: 21
