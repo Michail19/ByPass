@@ -97,6 +97,8 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	}
 
 	isClientHello := isClientHelloPacket(packet, payloadOffset, payloadLen)
+	fakedSplitEnabled := strat.FakedSplit || strat.SplitMode == strategy.SplitFakedSplit
+	multiDisorderEnabled := strat.MultiDisorder || strat.SplitMode == strategy.SplitMultiDisorder
 
 	var packets [][]byte
 
@@ -155,8 +157,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	}
 
 	// ── 2. Fake ───────────────────────────────────────────────────────────────
-	// Fake
-	if hasFooling && !strat.FakedSplit && (isClientHello || strat.AnyProtocol) {
+	if hasFooling && !fakedSplitEnabled && (isClientHello || strat.AnyProtocol) {
 		for rep := 0; rep < fakeRepeats; rep++ {
 			fakePayload := pm.selectFakeTLSPayload(strat, rep, isClientHello, packet, ipHdrLen)
 			fakePkts, err := pm.ApplyFake(packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload)
@@ -275,7 +276,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	}
 
 	// 4. FakedSplit
-	if strat.FakedSplit && isClientHello {
+	if fakedSplitEnabled && isClientHello {
 		var fakeTLSForFaked []byte
 		if len(strat.FakeTLSFilesData) > 0 {
 			fakeTLSForFaked = strat.FakeTLSFilesData[0]
@@ -306,7 +307,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 	}
 
 	// 5+6. MultiDisorder / Disorder
-	if strat.MultiDisorder || strat.DisorderMode != strategy.DisorderNone {
+	if multiDisorderEnabled || strat.DisorderMode != strategy.DisorderNone {
 		disorderPos := strat.DisorderPos
 		if len(disorderPos) == 0 {
 			disorderPos = strat.SplitPositions

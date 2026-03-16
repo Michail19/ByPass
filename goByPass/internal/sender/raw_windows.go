@@ -266,7 +266,8 @@ func (s *RawSender) Close() error {
 		return nil
 	}
 
-	if s.handle != 0 {
+	// shared handle от capturer закрывать нельзя
+	if s.handle != 0 && s.ownDLL {
 		if s.closeProc == nil {
 			s.closed = true
 			s.handle = 0
@@ -277,8 +278,8 @@ func (s *RawSender) Close() error {
 		if ret == 0 {
 			return fmt.Errorf("failed to close WinDivert handle")
 		}
-		s.handle = 0
 	}
+	s.handle = 0
 
 	if s.ownDLL && s.dll != nil {
 		_ = s.dll.Release()

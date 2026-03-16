@@ -408,10 +408,13 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 	// Получаем или создаём поток
 	flow := p.conntrack.GetOrCreate(srcIP, dstIP, srcPort, dstPort, protocol)
 
+	// Буферизуем TLS fragments только для client->server
+	isClientDir := srcIP.String() == flow.SrcIPStr && srcPort == flow.Key.SrcPort
+
 	// --- Минимальный reassembly для TLS ClientHello ---
 	// Сохраняем только TLS-похожие фрагменты, чтобы при фрагментации ClientHello
 	// попытаться извлечь SNI из нескольких TCP сегментов.
-	if protocol == 6 {
+	if protocol == 6 && isClientDir {
 		p.maybeBufferTLSFragments(flow, pkt.Data)
 	}
 
@@ -436,27 +439,27 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			// Передаём flow.Hostname вместо "":
 			//   - Если flow уже имеет hostname (из предыдущего TCP-соединения к тому же IP,
 			//     или если QUIC-поток позже обновит hostname) — testOverride из Discovery
-			//     корректно применится (#5).
+			//     корректно применится.
 			//   - SelectStrategy приоритет: testOverride (по hostname) → isGoogleIP (по IP) →
 			//     bestForProtocol. Если hostname пуст — isGoogleIP всё равно сработает.
 			strat := p.strategyMgr.SelectStrategy(dstIP.String(), flowHostname, 443, "udp")
 			if strat != nil && strat.NeedsQUICFake() {
-				// Inject fake QUIC Initial только для первых пакетов handshake (#5).
+				// Inject fake QUIC Initial только для первых пакетов handshake.
 				// QUIC-соединение: 1-2 Initial пакета → handshake → тысячи data пакетов.
 				// Без ограничения: 6 fake × тысячи пакетов = throughput collapse.
 				flow.Mu.Lock()
-				alreadyInjected := flow.QUICFakeInjected
-				if !alreadyInjected {
-					flow.QUICFakeInjected = true
+				doBurst := flow.QUICFakeBursts < 2
+				if doBurst {
+					flow.QUICFakeBursts++
 				}
 				flow.Mu.Unlock()
 
-				if !alreadyInjected {
+				if doBurst {
 					repeats := strat.FakeQUICRepeats
 					if repeats <= 0 {
 						repeats = 6
 					}
-					// TTL для fake QUIC (#2): используем QUICttl если задан, иначе FakeTTL.
+					// TTL для fake QUIC: используем QUICttl если задан, иначе FakeTTL.
 					// Без TTL ограничения fake пакет доходит до Google QUIC сервера (TTL=64/128),
 					// Google может ответить Stateless Reset → connection retry → slow start.
 					// Цель: пакет доходит до DPI (1-3 hop), умирает до сервера (~6-10 hop).
@@ -711,36 +714,25 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		isData := len(pkt.Data) > payloadOffset
 		isClientHello := isData &&
 			len(pkt.Data) >= payloadOffset+6 &&
-			pkt.Data[payloadOffset] == 0x16
+			pkt.Data[payloadOffset] == 0x16 && // TLS Handshake record
+			pkt.Data[payloadOffset+1] == 0x03 && // TLS major version
+			pkt.Data[payloadOffset+5] == 0x01 // ClientHello
 
-		// Для TLS-only syndata профилей (например, yt-syndata-2026) не применяем
-		// SYN-data до тех пор, пока hostname/SNI ещё не известен.
-		//
-		// Идея:
-		//   - bare SYN отправляем как есть;
-		//   - первый ClientHello анализатор уже разберёт, выставит flowHostname;
-		//   - после этого та же стратегия сможет примениться уже по hostname.
-		//
-		// Это защищает от слишком раннего fake SYN на bare-IP Google/YouTube flow.
-		// Разрешаем bare-IP SYN-data, если этот IP уже уверенно закэширован
-		// как YouTube-like hostname и кэш указывает на ту же стратегию.
-		cachedKnownBypass := cached != nil &&
-			cachedStratID > 1 &&
-			cachedStratID == strategyID &&
-			isReusableCachedBypassHostname(cached.Hostname)
-
+		// Для TLS-only syndata профилей никогда не применяем SYN-data,
+		// пока у flow ещё нет hostname/SNI.
+		// Даже если IP уже был в кеше как bypass-hostname, это слишком ранняя
+		// модификация и она ломает часть YouTube TCP flow ещё до нормального ClientHello.
 		skipBareSynData := isSYN &&
 			flowHostname == "" &&
 			strats != nil &&
 			strats.SynData &&
 			strats.ApplyToTLS &&
 			!strats.ApplyToHTTP &&
-			!strats.AnyProtocol &&
-			!cachedKnownBypass
+			!strats.AnyProtocol
 
 		if skipBareSynData {
 			log.Printf(
-				"[PIPELINE] Skip bare-IP SYN-data for strategy %d (%s) ip=%s:%d; waiting for SNI/Host",
+				"[PIPELINE] Skip bare-IP SYN-data for strategy %d (%s) ip=%s:%d; waiting for SNI/Host (cache not enough)",
 				strats.ID, strats.Name, dstIP.String(), dstPort,
 			)
 			p.sendPacket(pkt.Data, pkt.Addr)

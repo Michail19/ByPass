@@ -103,20 +103,17 @@ type CacheConfig struct {
 
 // StrategyConfig конфигурация стратегий
 type StrategyConfig struct {
-	DefaultStrategy string `yaml:"default_strategy" json:"default_strategy"`
-	StrategyFile    string `yaml:"strategy_file" json:"strategy_file"`
+	DefaultStrategy    string `yaml:"default_strategy" json:"default_strategy"`
+	StrategyFile       string `yaml:"strategy_file" json:"strategy_file"`
+	AppendDefaultRules bool   `yaml:"append_default_rules" json:"append_default_rules"`
 
-	// HostnameRules — статические правила hostname→стратегия.
-	// FIX #12: поле добавлено — main.go ссылается на cfg.Strategy.HostnameRules.
-	// Если список пуст — main.go использует встроенные дефолты (defaultHostnameRules()).
-	// Тип: []HostnameRuleConfig (не strategy.HostnameRule) во избежание циклического импорта.
 	HostnameRules []HostnameRuleConfig `yaml:"hostname_rules" json:"hostname_rules"`
 
 	AutoDiscovery struct {
 		Enabled        bool     `yaml:"enabled" json:"enabled"`
 		TestDomains    []string `yaml:"test_domains" json:"test_domains"`
 		TestPorts      []int    `yaml:"test_ports" json:"test_ports"`
-		TestInterval   int      `yaml:"test_interval" json:"test_interval"` // секунды
+		TestInterval   int      `yaml:"test_interval" json:"test_interval"`
 		MinSuccessRate float64  `yaml:"min_success_rate" json:"min_success_rate"`
 	} `yaml:"auto_discovery" json:"auto_discovery"`
 }

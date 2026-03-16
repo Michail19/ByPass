@@ -3,70 +3,66 @@ package config
 import (
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
-// Validate проверяет конфигурацию на корректность
+// Validate проверяет всю конфигурацию целиком.
 func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("config is nil")
+	}
+
 	if err := c.Capture.Validate(); err != nil {
-		return fmt.Errorf("capture: %v", err)
+		return fmt.Errorf("capture: %w", err)
 	}
-
 	if err := c.Firewall.Validate(); err != nil {
-		return fmt.Errorf("firewall: %v", err)
+		return fmt.Errorf("firewall: %w", err)
 	}
-
 	if err := c.Conntrack.Validate(); err != nil {
-		return fmt.Errorf("conntrack: %v", err)
+		return fmt.Errorf("conntrack: %w", err)
 	}
-
 	if err := c.Cache.Validate(); err != nil {
-		return fmt.Errorf("cache: %v", err)
+		return fmt.Errorf("cache: %w", err)
 	}
-
 	if err := c.Strategy.Validate(); err != nil {
-		return fmt.Errorf("strategy: %v", err)
+		return fmt.Errorf("strategy: %w", err)
 	}
-
 	if err := c.Pipeline.Validate(); err != nil {
-		return fmt.Errorf("pipeline: %v", err)
+		return fmt.Errorf("pipeline: %w", err)
 	}
-
 	if err := c.Sender.Validate(); err != nil {
-		return fmt.Errorf("sender: %v", err)
+		return fmt.Errorf("sender: %w", err)
 	}
-
 	if err := c.Logging.Validate(); err != nil {
-		return fmt.Errorf("logging: %v", err)
+		return fmt.Errorf("logging: %w", err)
 	}
 
 	return nil
 }
 
-// Validate проверяет конфигурацию захвата
+// Validate проверяет конфигурацию захвата.
 func (c *CaptureConfig) Validate() error {
 	validTypes := map[string]bool{
 		"nfqueue":   true,
 		"windivert": true,
 		"pcap":      true,
+		"":          true,
 	}
 
 	if !validTypes[c.Type] {
 		return fmt.Errorf("invalid capture type: %s", c.Type)
 	}
-
 	if c.QueueNum < 0 || c.QueueNum > 65535 {
 		return fmt.Errorf("queue_num must be between 0 and 65535")
 	}
-
 	if c.BufferSize < 1024 {
 		return fmt.Errorf("buffer_size too small")
 	}
-
 	if c.MaxPacketLen < 64 {
 		return fmt.Errorf("max_packet_len too small")
 	}
-
 	if c.Timeout < 0 {
 		return fmt.Errorf("timeout must be non-negative")
 	}
@@ -74,7 +70,7 @@ func (c *CaptureConfig) Validate() error {
 	return nil
 }
 
-// Validate проверяет конфигурацию файрвола
+// Validate проверяет конфигурацию файрвола.
 func (f *FirewallConfig) Validate() error {
 	validBackends := map[string]bool{
 		"iptables": true,
@@ -82,22 +78,20 @@ func (f *FirewallConfig) Validate() error {
 		"windows":  true,
 		"winfw":    true,
 		"auto":     true,
+		"":         true,
 	}
 
 	if !validBackends[f.Backend] {
 		return fmt.Errorf("invalid firewall backend: %s", f.Backend)
 	}
-
 	if len(f.Ports) == 0 {
 		return fmt.Errorf("at least one port must be specified")
 	}
-
 	for _, port := range f.Ports {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("invalid port: %d", port)
 		}
 	}
-
 	for _, port := range f.ExcludePorts {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("invalid exclude port: %d", port)
@@ -108,8 +102,8 @@ func (f *FirewallConfig) Validate() error {
 		"outgoing": true,
 		"incoming": true,
 		"both":     true,
+		"":         true,
 	}
-
 	if !validDirections[f.Direction] {
 		return fmt.Errorf("invalid direction: %s", f.Direction)
 	}
@@ -123,7 +117,7 @@ func (f *FirewallConfig) Validate() error {
 	return nil
 }
 
-// Validate проверяет конфигурацию conntrack
+// Validate проверяет конфигурацию conntrack.
 func (c *ConntrackConfig) Validate() error {
 	if c.Timeout <= 0 {
 		return fmt.Errorf("timeout must be positive")
@@ -137,7 +131,7 @@ func (c *ConntrackConfig) Validate() error {
 	return nil
 }
 
-// Validate проверяет конфигурацию кэшей
+// Validate проверяет конфигурацию кэшей.
 func (c *CacheConfig) Validate() error {
 	if c.IPCache.Enabled {
 		if c.IPCache.TTL <= 0 {
@@ -165,36 +159,52 @@ func (c *CacheConfig) Validate() error {
 	return nil
 }
 
-// Validate проверяет конфигурацию стратегий
+// Validate проверяет конфигурацию стратегий.
 func (s *StrategyConfig) Validate() error {
+	if sf := strings.TrimSpace(s.StrategyFile); sf != "" {
+		st, err := os.Stat(sf)
+		if err != nil {
+			return fmt.Errorf("strategy_file: %w", err)
+		}
+		if st.IsDir() {
+			return fmt.Errorf("strategy_file must point to a file, got directory: %s", sf)
+		}
+		if ext := strings.ToLower(filepath.Ext(sf)); ext != ".json" {
+			return fmt.Errorf("strategy_file must be a .json file: %s", sf)
+		}
+	}
+
+	seen := make(map[string]int)
+
 	for i, r := range s.HostnameRules {
-		if strings.TrimSpace(r.Pattern) == "" {
+		pattern := strings.ToLower(strings.TrimSpace(r.Pattern))
+		if pattern == "" {
 			return fmt.Errorf("hostname_rules[%d]: pattern is required", i)
 		}
 		if strings.TrimSpace(r.Strategy) == "" && r.StrategyID <= 0 {
 			return fmt.Errorf("hostname_rules[%d]: strategy or strategy_id is required", i)
 		}
+		if prev, ok := seen[pattern]; ok {
+			return fmt.Errorf("hostname_rules[%d]: duplicate pattern %q (already used in hostname_rules[%d])", i, pattern, prev)
+		}
+		seen[pattern] = i
 	}
 
 	if s.AutoDiscovery.Enabled {
 		if len(s.AutoDiscovery.TestDomains) == 0 {
 			return fmt.Errorf("test_domains required for auto-discovery")
 		}
-
 		if len(s.AutoDiscovery.TestPorts) == 0 {
 			return fmt.Errorf("test_ports required for auto-discovery")
 		}
-
 		for _, p := range s.AutoDiscovery.TestPorts {
 			if p < 1 || p > 65535 {
 				return fmt.Errorf("invalid auto_discovery test port: %d", p)
 			}
 		}
-
 		if s.AutoDiscovery.TestInterval <= 0 {
 			return fmt.Errorf("test_interval must be positive")
 		}
-
 		if s.AutoDiscovery.MinSuccessRate < 0 || s.AutoDiscovery.MinSuccessRate > 1 {
 			return fmt.Errorf("min_success_rate must be between 0 and 1")
 		}
@@ -203,28 +213,24 @@ func (s *StrategyConfig) Validate() error {
 	return nil
 }
 
-// Validate проверяет конфигурацию конвейера
+// Validate проверяет конфигурацию конвейера.
 func (p *PipelineConfig) Validate() error {
 	if p.Workers < 1 {
 		return fmt.Errorf("workers must be at least 1")
 	}
-
 	if p.PacketQueueSize < 100 {
 		return fmt.Errorf("packet_queue_size too small")
 	}
-
 	if p.ResultQueueSize < 1 {
 		return fmt.Errorf("result_queue_size must be at least 1")
 	}
-
 	if p.ProcessTimeout < 0 {
 		return fmt.Errorf("process_timeout must be non-negative")
 	}
-
 	return nil
 }
 
-// Validate проверяет конфигурацию отправителя
+// Validate проверяет конфигурацию отправителя.
 func (s *SenderConfig) Validate() error {
 	if s.Type != "" && s.Type != "raw" {
 		return fmt.Errorf("unsupported sender type: %s", s.Type)
@@ -241,7 +247,7 @@ func (s *SenderConfig) Validate() error {
 	return nil
 }
 
-// Validate проверяет конфигурацию логирования
+// Validate проверяет конфигурацию логирования.
 func (l *LoggingConfig) Validate() error {
 	validOutputs := map[string]bool{
 		"":       true,
@@ -249,15 +255,23 @@ func (l *LoggingConfig) Validate() error {
 		"stderr": true,
 		"file":   true,
 	}
+	validLevels := map[string]bool{
+		"":      true,
+		"debug": true,
+		"info":  true,
+		"warn":  true,
+		"error": true,
+	}
 
 	if !validOutputs[l.Output] {
 		return fmt.Errorf("invalid output: %s", l.Output)
 	}
-
+	if !validLevels[strings.ToLower(strings.TrimSpace(l.Level))] {
+		return fmt.Errorf("invalid level: %s", l.Level)
+	}
 	if l.Output == "file" && strings.TrimSpace(l.FilePath) == "" {
 		return fmt.Errorf("file_path is required when output=file")
 	}
-
 	if l.MaxSize < 0 {
 		return fmt.Errorf("max_size must be non-negative")
 	}
@@ -268,8 +282,8 @@ func (l *LoggingConfig) Validate() error {
 	return nil
 }
 
-// Merge объединяет две конфигурации (значения из other перезаписывают)
+// Merge объединяет две конфигурации.
+// Пока можно оставить заглушкой.
 func (c *Config) Merge(other *Config) {
-	// Здесь можно реализовать глубокое слияние конфигураций
-	// Для простоты пока оставляем как есть
+	// TODO: deep merge при необходимости.
 }

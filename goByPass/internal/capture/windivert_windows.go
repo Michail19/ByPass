@@ -73,7 +73,7 @@ func (w *WinDivert) Start(ctx context.Context) error {
 	}
 
 	// Пробуем открыть с разными флагами
-	flags := []int{0, 1} // 0=normal, 1=sniff
+	flags := []int{0} // для divert/reinject sniff здесь вреден
 
 	for _, flag := range flags {
 		log.Printf("DEBUG: Trying to open WinDivert with flag=%d", flag)

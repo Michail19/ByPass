@@ -1,9 +1,20 @@
 package config
 
-import "time"
+import (
+	"runtime"
+	"time"
+)
 
 // DefaultConfig возвращает конфигурацию по умолчанию
 func DefaultConfig() *Config {
+	captureType := "nfqueue"
+	logPath := "var/log/bypass.log"
+
+	if runtime.GOOS == "windows" {
+		captureType = "windivert"
+		logPath = "bypass.log"
+	}
+
 	return &Config{
 		App: AppConfig{
 			Name:       "ByPass",
@@ -14,7 +25,7 @@ func DefaultConfig() *Config {
 		},
 
 		Capture: CaptureConfig{
-			Type:         "nfqueue",
+			Type:         captureType,
 			QueueNum:     0,
 			BufferSize:   65535,
 			Interface:    "any",
@@ -67,8 +78,9 @@ func DefaultConfig() *Config {
 		},
 
 		Strategy: StrategyConfig{
-			DefaultStrategy: "moderate",
-			StrategyFile:    "configs/strategies/strategies.json",
+			DefaultStrategy:    "",
+			StrategyFile:       "configs/strategies/strategies.json",
+			AppendDefaultRules: false,
 			AutoDiscovery: struct {
 				Enabled        bool     `yaml:"enabled" json:"enabled"`
 				TestDomains    []string `yaml:"test_domains" json:"test_domains"`
@@ -107,7 +119,7 @@ func DefaultConfig() *Config {
 		Logging: LoggingConfig{
 			Level:      "info",
 			Output:     "stdout",
-			FilePath:   "var/log/bypass.log",
+			FilePath:   logPath,
 			MaxSize:    10,
 			MaxBackups: 3,
 			Compress:   true,

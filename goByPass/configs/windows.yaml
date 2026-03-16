@@ -5,104 +5,82 @@ app:
     working_dir: "."
     daemonize: false
 capture:
-    type: windivert
-    queue_num: 0
-    buffer_size: 65535
-    interface: any
-    max_packet_len: 65535
-    promiscuous: false
-    timeout: 100ms
-firewall:
-    backend: auto
-    ports:
-        - 80
-        - 443
-    direction: "outgoing"
-    exclude_ips: []
-    exclude_ports: []
-    cleanup_on_exit: true
-conntrack:
-    timeout: 5m0s
-    max_flows: 100000
-    cleanup_interval: 30s
-cache:
-    ip_cache:
-        enabled: true
-        ttl: 1h0m0s
-        max_size: 10000
-    domain_cache:
-        enabled: true
-        ttl: 1h0m0s
-        max_size: 5000
-        preload:
-            - google.com
-            - youtube.com
-            - discord.com
-            - telegram.org
-strategy:
-    strategy_file: "configs/strategies/strategies.json"
-    hostname_rules:
-        - pattern: "*.youtube.com"
-          strategy_id: 26
-          comment: "YouTube ALT5-like"
-        - pattern: "*.googlevideo.com"
-          strategy_id: 26
-          comment: "YouTube CDN ALT5-like"
-        - pattern: "*.youtubei.googleapis.com"
-          strategy_id: 26
-          comment: "YouTube API ALT5-like"
-        - pattern: "youtube.com"
-          strategy_id: 26
-          comment: "YouTube bare"
-          
-            # YouTube превью/аватарки/статик (часто именно они "пустые" при блокировке)
-        - pattern: "*.ytimg.com"
-          strategy_id: 26
-          comment: "YouTube thumbnails/static"
-        - pattern: "*.ggpht.com"
-          strategy_id: 26
-          comment: "YouTube avatars/images"
+  type: windivert
 
-            # Telegram Web (включая venus/kws* субдомены)
-        - pattern: "*.telegram.org"
-          strategy_id: 12
-          comment: "Telegram Web"
-        - pattern: "telegram.org"
-          strategy_id: 12
-          comment: "Telegram bare"
-        - pattern: "*.t.me"
-          strategy_id: 12
-          comment: "Telegram short links"
-        - pattern: "t.me"
-          strategy_id: 12
-          comment: "Telegram short links"
-    auto_discovery:
-        enabled: false
-        test_domains:
-            - google.com
-            - youtube.com
-            - discord.com
-            - telegram.org
-            - github.com
-        test_ports:
-            - 443
-        test_interval: 3600
-        min_success_rate: 0.7
+firewall:
+  backend: auto
+  ports: [80, 443]
+  direction: outgoing
+  cleanup_on_exit: true
+
+cache:
+  ip_cache:
+    enabled: true
+    ttl: 1h
+    max_size: 10000
+  domain_cache:
+    enabled: true
+    ttl: 1h
+    max_size: 5000
+    preload:
+      - google.com
+      - youtube.com
+      - discord.com
+      - telegram.org
+
+strategy:
+  strategy_file: configs/strategies/strategies.json
+  append_default_rules: true
+  hostname_rules:
+    - pattern: "*.youtube.com"
+      strategy_id: 27
+      comment: "Override built-in YouTube with SAFE profile"
+    - pattern: "youtube.com"
+      strategy_id: 27
+      comment: "Override built-in bare YouTube"
+    - pattern: "accounts.youtube.com"
+      strategy_id: 27
+      comment: "Override built-in accounts.youtube.com"
+    - pattern: "*.googlevideo.com"
+      strategy_id: 27
+      comment: "Override built-in video CDN"
+    - pattern: "*.youtubei.googleapis.com"
+      strategy_id: 27
+      comment: "Override built-in YouTube API"
+    - pattern: "*.youtube-nocookie.com"
+      strategy_id: 27
+      comment: "Override built-in embed"
+    - pattern: "*.ytimg.com"
+      strategy_id: 27
+      comment: "Override built-in static"
+    - pattern: "*.ggpht.com"
+      strategy_id: 27
+      comment: "Override built-in avatars/images"
+
+    - pattern: "*.telegram.org"
+      strategy_id: 12
+      comment: "Telegram Web"
+    - pattern: "telegram.org"
+      strategy_id: 12
+      comment: "Telegram bare"
+    - pattern: "*.t.me"
+      strategy_id: 12
+      comment: "Telegram short links"
+    - pattern: "t.me"
+      strategy_id: 12
+      comment: "Telegram short links"
+
 pipeline:
-    workers: 4
-    packet_queue_size: 10000
-    result_queue_size: 1000
-    process_timeout: 100ms
+  workers: 4
+  packet_queue_size: 10000
+  result_queue_size: 1000
+  process_timeout: 100ms
+
 sender:
-    type: raw
-    interface: ""
-    buffer_size: 65535
-    send_timeout: 1s
-    batch_size: 10
+  buffer_size: 65535
+  send_timeout: 1s
+  batch_size: 10
+
 logging:
-    level: info
-    output: stdout
-    file_path: "bypass.log"
-    max_size: 10
-    max_backups: 3
-    compress: true
+  output: stdout
+  level: info

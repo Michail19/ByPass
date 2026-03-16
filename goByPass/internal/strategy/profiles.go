@@ -81,14 +81,14 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          12,
 		Name:        "telegram",
-		Description: "Telegram Windows/RU: split 1+s + fake TS x1",
+		Description: "Telegram Windows/RU: split pos=1 + fake TS x1 (no SNI offset)",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: false,
 
 		SplitMode:      SplitCustom,
 		SplitPositions: []int{1},
-		SplitSNIOffset: true,
+		SplitSNIOffset: false,
 
 		Fooling:     FoolingTS,
 		FakeTTL:     6,
@@ -106,18 +106,19 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          20,
 		Name:        "youtube-2026",
-		Description: "YouTube Windows safe-first: split 1+s + fake TS x1 + QUIC fake",
+		Description: "YouTube Windows safe-first: seqovl + fake TS x6 + QUIC fake",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		SplitMode:      SplitCustom,
-		SplitPositions: []int{1},
-		SplitSNIOffset: true,
+		SplitMode:         SplitSeqOvl,
+		SplitPositions:    []int{1},
+		SeqOvlLen:         681,
+		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
 
 		Fooling:     FoolingTS,
 		FakeTTL:     6,
-		FakeRepeats: 1,
+		FakeRepeats: 6,
 		FakeTLSFiles: []string{
 			"tls_clienthello_www_google_com.bin",
 		},

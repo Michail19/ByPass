@@ -193,6 +193,19 @@ func main() {
 	log.Println("Shutdown complete")
 }
 
+func buildHostnameRules(cfgRules []config.HostnameRuleConfig) []strategy.HostnameRule {
+	out := make([]strategy.HostnameRule, 0, len(cfgRules))
+	for _, r := range cfgRules {
+		out = append(out, strategy.HostnameRule{
+			Pattern:      r.Pattern,
+			StrategyName: r.Strategy,
+			StrategyID:   r.StrategyID,
+			Comment:      r.Comment,
+		})
+	}
+	return out
+}
+
 // Components содержит все инициализированные компоненты
 type Components struct {
 	ipCache     *cache.IPCache
@@ -328,21 +341,28 @@ func initializeComponents(ctx context.Context, cfg *config.Config) (components *
 	// во избежание циклического импорта config↔strategy.
 	// Конвертируем в []strategy.HostnameRule здесь, в main.go.
 	var stratRules []strategy.HostnameRule
-	if len(cfg.Strategy.HostnameRules) > 0 {
-		stratRules = make([]strategy.HostnameRule, 0, len(cfg.Strategy.HostnameRules))
-		for _, r := range cfg.Strategy.HostnameRules {
-			stratRules = append(stratRules, strategy.HostnameRule{
-				Pattern:      r.Pattern,
-				StrategyName: r.Strategy,
-				StrategyID:   r.StrategyID,
-				Comment:      r.Comment,
-			})
-		}
-		log.Printf("Using hostname rules from config (%d rules)", len(stratRules))
-	} else {
+
+	switch {
+	case len(cfg.Strategy.HostnameRules) == 0:
 		stratRules = defaultHostnameRules()
 		log.Printf("Using built-in hostname rules (%d rules)", len(stratRules))
+
+	case cfg.Strategy.AppendDefaultRules:
+		cfgOnly := buildHostnameRules(cfg.Strategy.HostnameRules)
+		defOnly := defaultHostnameRules()
+
+		stratRules = make([]strategy.HostnameRule, 0, len(cfgOnly)+len(defOnly))
+		stratRules = append(stratRules, cfgOnly...)
+		stratRules = append(stratRules, defOnly...)
+
+		log.Printf("Using hostname rules: config overrides (%d) + built-in tail (%d)",
+			len(cfgOnly), len(defOnly))
+
+	default:
+		stratRules = buildHostnameRules(cfg.Strategy.HostnameRules)
+		log.Printf("Using hostname rules from config only (%d rules)", len(stratRules))
 	}
+
 	strategyMgr.SetHostnameRules(stratRules)
 
 	packetModifier := modifier.NewPacketModifier(strategyMgr, ipCache)

@@ -53,12 +53,47 @@ func (pm *PacketModifier) ApplyDisorder(
 	case strategy.DisorderOutOfBand:
 		oobPkt := make([]byte, len(packet))
 		copy(oobPkt, packet)
-		binary.BigEndian.PutUint32(oobPkt[ipHdrLen+4:], originalSeq-512)
+
+		shift := uint32(512)
+		if badSeqIncrement > 0 {
+			shift = uint32(badSeqIncrement)
+		}
+		binary.BigEndian.PutUint32(oobPkt[ipHdrLen+4:], originalSeq-shift)
 		_ = setIPTTL(oobPkt, ttl)
 		if err := fixPacketChecksums(oobPkt); err != nil {
 			return nil, err
 		}
 		results = append(results, oobPkt)
+		results = append(results, reversed...)
+
+	case strategy.DisorderTTLZero:
+		decoy := make([]byte, len(packet))
+		copy(decoy, packet)
+		_ = setIPTTL(decoy, ttl)
+		if err := fixPacketChecksums(decoy); err != nil {
+			return nil, err
+		}
+		results = append(results, decoy)
+		results = append(results, reversed...)
+
+	case strategy.DisorderBadSeq:
+		decoy := make([]byte, len(packet))
+		copy(decoy, packet)
+
+		shift := badSeqIncrement
+		if shift == 0 {
+			shift = 4096
+		}
+		seq := binary.BigEndian.Uint32(decoy[ipHdrLen+4:])
+		binary.BigEndian.PutUint32(decoy[ipHdrLen+4:], seq+uint32(shift))
+
+		if ttl > 0 {
+			_ = setIPTTL(decoy, ttl)
+		}
+		if err := fixPacketChecksums(decoy); err != nil {
+			return nil, err
+		}
+		results = append(results, decoy)
 		results = append(results, reversed...)
 
 	case strategy.DisorderFakedDisorder:
@@ -70,15 +105,7 @@ func (pm *PacketModifier) ApplyDisorder(
 		results = append(results, reversed...)
 
 	default:
-		segs, err := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, validPos)
-		if err != nil {
-			return nil, err
-		}
-
-		// Настоящий multidisorder: реальные сегменты в обратном порядке.
-		for i := len(segs) - 1; i >= 0; i-- {
-			results = append(results, segs[i])
-		}
+		results = append(results, reversed...)
 	}
 
 	return results, nil
