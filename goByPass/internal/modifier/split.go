@@ -8,8 +8,6 @@ import (
 )
 
 var (
-	ErrSplitSNIOffsetUnsupported = errors.New("SplitSNIOffset/alignSNI is not implemented")
-
 	// SeqOvl нельзя silently деградировать в "верни original packet":
 	// иначе modifier сочтёт технику успешно применённой и на wire уйдёт
 	// fake-only + original вместо настоящего seqovl/split.

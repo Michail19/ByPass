@@ -33,6 +33,7 @@ func (pm *PacketModifier) ApplyTLSSplit(packet []byte, splitPos int) ([][]byte, 
 
 	part1 := packet[5 : 5+splitPos]
 	part2 := packet[5+splitPos : 5+totalLen]
+	tail := packet[5+totalLen:]
 
 	rec1 := make([]byte, 5+len(part1))
 	rec1[0] = recordType
@@ -40,11 +41,13 @@ func (pm *PacketModifier) ApplyTLSSplit(packet []byte, splitPos int) ([][]byte, 
 	binary.BigEndian.PutUint16(rec1[3:5], uint16(len(part1)))
 	copy(rec1[5:], part1)
 
-	rec2 := make([]byte, 5+len(part2))
+	// Во второй TCP payload кладём второй record + весь хвост после первого record.
+	rec2 := make([]byte, 5+len(part2)+len(tail))
 	rec2[0] = recordType
 	binary.BigEndian.PutUint16(rec2[1:3], version)
 	binary.BigEndian.PutUint16(rec2[3:5], uint16(len(part2)))
 	copy(rec2[5:], part2)
+	copy(rec2[5+len(part2):], tail)
 
 	return [][]byte{rec1, rec2}, nil
 }

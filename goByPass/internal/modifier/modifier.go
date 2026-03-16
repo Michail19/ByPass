@@ -340,9 +340,8 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 			packets = append(packets, hfPkts...)
 			pm.stats.SplitCount.Add(uint64(len(hfPkts)))
 
-			// HostFakeSplit здесь даёт только fake-пакеты.
-			// Оригинал должен уйти отдельно обычным Send().
-			originalReplaced = false
+			// Если есть реальные сегменты, оригинал больше не нужен.
+			originalReplaced = len(hfPkts) > 1
 			goto finalize
 		}
 	}
@@ -617,7 +616,7 @@ func (pm *PacketModifier) ApplyHostFakeSplit(packet []byte, strat *strategy.Stra
 		return nil, fmt.Errorf("hostfakesplit not configured")
 	}
 
-	_, _, payloadOffset, err := parseIPv4TCP(packet)
+	ipHdrLen, tcpHdrLen, payloadOffset, err := parseIPv4TCP(packet)
 	if err != nil {
 		return nil, err
 	}
@@ -627,13 +626,73 @@ func (pm *PacketModifier) ApplyHostFakeSplit(packet []byte, strat *strategy.Stra
 
 	payload := packet[payloadOffset:]
 
-	// Создаём fake-пакет с подменённым Host:
+	// 1. Fake payload с подменённым Host
 	fakePayload := replaceHTTPHost(payload, strat.HostFakeSplitHost)
 	if fakePayload == nil {
 		return nil, fmt.Errorf("host header not found")
 	}
 
-	return pm.ApplyFake(packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload)
+	fakePkts, err := pm.ApplyFake(packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Реальный split внутри Host value: "exa|mple.com"
+	splitPos := findHTTPHostValueSplitPos(payload)
+	if splitPos <= 0 || splitPos >= len(payload) {
+		return fakePkts, nil
+	}
+
+	realSegs, err := buildTCPSegments(packet, ipHdrLen, tcpHdrLen, payloadOffset, []int{splitPos})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([][]byte, 0, len(fakePkts)+len(realSegs))
+	if strat.HostFakeSplitAltOrder != 0 {
+		out = append(out, realSegs...)
+		out = append(out, fakePkts...)
+	} else {
+		out = append(out, fakePkts...)
+		out = append(out, realSegs...)
+	}
+	return out, nil
+}
+
+func findHTTPHostValueSplitPos(payload []byte) int {
+	lower := bytes.ToLower(payload)
+
+	hostIdx := bytes.Index(lower, []byte("\r\nhost:"))
+	if hostIdx >= 0 {
+		hostIdx += 2
+	} else if bytes.HasPrefix(lower, []byte("host:")) {
+		hostIdx = 0
+	} else {
+		return 0
+	}
+
+	lineEnd := hostIdx
+	for lineEnd < len(payload) && payload[lineEnd] != '\r' && payload[lineEnd] != '\n' {
+		lineEnd++
+	}
+
+	colon := bytes.IndexByte(payload[hostIdx:lineEnd], ':')
+	if colon < 0 {
+		return 0
+	}
+
+	valueStart := hostIdx + colon + 1
+	for valueStart < lineEnd && (payload[valueStart] == ' ' || payload[valueStart] == '\t') {
+		valueStart++
+	}
+	if valueStart >= lineEnd {
+		return 0
+	}
+
+	if valueStart+1 < lineEnd {
+		return valueStart + 1
+	}
+	return valueStart
 }
 
 // modifyClientHelloSNI заменяет SNI в TLS ClientHello.
@@ -911,4 +970,36 @@ func validatePacket(packet []byte) error {
 		return fmt.Errorf("length mismatch: header=%d, actual=%d", totalLen, len(packet))
 	}
 	return nil
+}
+
+func toAlternatingCaseASCII(b []byte) []byte {
+	out := append([]byte(nil), b...)
+	upper := false
+	for i := range out {
+		c := out[i]
+		if c >= 'a' && c <= 'z' {
+			if upper {
+				out[i] = c - ('a' - 'A')
+			}
+			upper = !upper
+		} else if c >= 'A' && c <= 'Z' {
+			if !upper {
+				out[i] = c + ('a' - 'A')
+			}
+			upper = !upper
+		}
+	}
+	return out
+}
+
+func replaceFirstMethodSpace(payload []byte, repl []byte) []byte {
+	sp := bytes.IndexByte(payload, ' ')
+	if sp <= 0 {
+		return nil
+	}
+	out := make([]byte, 0, len(payload)-1+len(repl))
+	out = append(out, payload[:sp]...)
+	out = append(out, repl...)
+	out = append(out, payload[sp+1:]...)
+	return out
 }
