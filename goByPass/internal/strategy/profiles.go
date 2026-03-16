@@ -205,6 +205,11 @@ func (m *Manager) loadDefaultStrategies() {
 		MultiDisorder: true,
 		DisorderTTL:   4,
 
+		// Усиливаем multidisorder: несколько позиций как в ALT5-подобных профилях,
+		// и ограничиваем только handshake, чтобы не трогать лишний appdata.
+		DisorderPos:        []int{1, 2, 3, 4, 5},
+		ApplyToPacketTypes: []string{"handshake"},
+
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
 		FakeTTL:         6,

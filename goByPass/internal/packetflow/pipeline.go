@@ -1017,13 +1017,17 @@ func readDNSName(packet []byte, dnsStart, offset int) (string, int, error) {
 				return "", start, fmt.Errorf("dns pointer truncated")
 			}
 			ptr := int(binary.BigEndian.Uint16(packet[offset:offset+2]) & 0x3FFF)
-			if ptr >= len(packet) {
+
+			abs := dnsStart + ptr
+			if abs >= len(packet) {
 				return "", start, fmt.Errorf("dns pointer out of bounds")
 			}
+
 			if !jumped {
 				start = offset + 2
 			}
-			offset = dnsStart + (ptr - dnsStart)
+
+			offset = abs
 			jumped = true
 			continue
 		}

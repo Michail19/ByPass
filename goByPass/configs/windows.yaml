@@ -54,6 +54,28 @@ strategy:
         - pattern: "youtube.com"
           strategy_id: 26
           comment: "YouTube bare"
+          
+            # YouTube превью/аватарки/статик (часто именно они "пустые" при блокировке)
+        - pattern: "*.ytimg.com"
+          strategy_id: 26
+          comment: "YouTube thumbnails/static"
+        - pattern: "*.ggpht.com"
+          strategy_id: 26
+          comment: "YouTube avatars/images"
+
+            # Telegram Web (включая venus/kws* субдомены)
+        - pattern: "*.telegram.org"
+          strategy_id: 12
+          comment: "Telegram Web"
+        - pattern: "telegram.org"
+          strategy_id: 12
+          comment: "Telegram bare"
+        - pattern: "*.t.me"
+          strategy_id: 12
+          comment: "Telegram short links"
+        - pattern: "t.me"
+          strategy_id: 12
+          comment: "Telegram short links"
     auto_discovery:
         enabled: false
         test_domains:
