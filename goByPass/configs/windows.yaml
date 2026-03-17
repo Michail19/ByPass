@@ -74,35 +74,40 @@ strategy:
       strategy_id: 31
       comment: "GVT2: ALT5-like TCP"
 
-    - pattern: "*.discord.com"
-      strategy_id: 221
-    - pattern: "discord.com"
-      strategy_id: 221
-    - pattern: "*.discord.gg"
-      strategy_id: 221
-    - pattern: "discord.gg"
-      strategy_id: 221
-    - pattern: "*.discordapp.net"
-      strategy_id: 221
-    - pattern: "*.discordapp.com"
-      strategy_id: 221
-    - pattern: "*.discord.media"
-      strategy_id: 221
+    - pattern: "updates.discord.com"
+      strategy_id: 222
+      comment: "Discord updater: alt5-like"
 
+    - pattern: "*.discord.com"
+      strategy_id: 222
+    - pattern: "discord.com"
+      strategy_id: 222
+    - pattern: "*.discord.gg"
+      strategy_id: 222
+    - pattern: "discord.gg"
+      strategy_id: 222
+    - pattern: "*.discordapp.net"
+      strategy_id: 222
+    - pattern: "*.discordapp.com"
+      strategy_id: 222
+    - pattern: "*.discord.media"
+      strategy_id: 222
+
+    - pattern: "*.web.telegram.org"
+      strategy_id: 213
+      comment: "Telegram Web: handshake+data fallback"
     - pattern: "web.telegram.org"
-      strategy_id: 212
-    - pattern: "kws2.web.telegram.org"
-      strategy_id: 212
-    - pattern: "venus.web.telegram.org"
-      strategy_id: 212
+      strategy_id: 213
+      comment: "Telegram Web root"
     - pattern: "*.telegram.org"
-      strategy_id: 212
+      strategy_id: 12
+      comment: "Telegram generic: safe split"
     - pattern: "telegram.org"
-      strategy_id: 212
+      strategy_id: 12
     - pattern: "*.t.me"
-      strategy_id: 212
+      strategy_id: 12
     - pattern: "t.me"
-      strategy_id: 212
+      strategy_id: 12
 
 pipeline:
   workers: 4

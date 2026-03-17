@@ -771,15 +771,24 @@
   },
   {
     "id": 222,
-    "name": "discord-udp-voice-fake",
-    "description": "Discord voice/STUN UDP fake",
+    "name": "discord-alt5-like",
+    "description": "Discord TCP: alt5-like syndata + multidisorder, no ts fake dependency",
     "apply_to_http": false,
-    "apply_to_tls": false,
-    "apply_to_quic": false,
-    "any_protocol": true,
-    "fake_unknown_udp_file": "quic_initial_www_google_com.bin",
-    "fake_repeats": 6,
-    "cutoff": 4,
-    "priority": 27
+    "apply_to_tls": true,
+    "apply_to_quic": true,
+
+    "syn_data": true,
+    "multi_disorder": true,
+    "disorder_ttl": 4,
+    "disorder_pos": [1, 2, 3, 4, 5],
+
+    "apply_to_packet_types": ["handshake"],
+
+    "fake_quic_file": "quic_initial_www_google_com.bin",
+    "fake_quic_repeats": 6,
+    "fake_ttl": 6,
+
+    "priority": 27,
+    "modify_first_data_packets": 0
   }
 ]
