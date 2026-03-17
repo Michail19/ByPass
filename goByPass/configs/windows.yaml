@@ -75,35 +75,34 @@ strategy:
       comment: "GVT2: ALT5-like TCP"
 
     - pattern: "*.discord.com"
-      strategy_id: 223
+      strategy_id: 92
     - pattern: "discord.com"
-      strategy_id: 223
+      strategy_id: 92
     - pattern: "*.discord.gg"
-      strategy_id: 223
+      strategy_id: 92
     - pattern: "discord.gg"
-      strategy_id: 223
+      strategy_id: 92
     - pattern: "*.discordapp.net"
-      strategy_id: 223
+      strategy_id: 92
     - pattern: "*.discordapp.com"
-      strategy_id: 223
+      strategy_id: 92
     - pattern: "*.discord.media"
-      strategy_id: 223
+      strategy_id: 92
 
-    - pattern: "*.telegram.org"
-      strategy_id: 213
-      comment: "Telegram Web"
-    - pattern: "telegram.org"
-      strategy_id: 213
-      comment: "Telegram bare"
     - pattern: "web.telegram.org"
-      strategy_id: 213
-      comment: "Telegram web frontend"
+      strategy_id: 112
+    - pattern: "kws2.web.telegram.org"
+      strategy_id: 112
+    - pattern: "venus.web.telegram.org"
+      strategy_id: 112
+    - pattern: "*.telegram.org"
+      strategy_id: 112
+    - pattern: "telegram.org"
+      strategy_id: 112
     - pattern: "*.t.me"
-      strategy_id: 213
-      comment: "Telegram short links"
+      strategy_id: 112
     - pattern: "t.me"
-      strategy_id: 213
-      comment: "Telegram short links"
+      strategy_id: 112
 
 pipeline:
   workers: 4
