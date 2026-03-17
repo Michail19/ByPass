@@ -573,16 +573,29 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 
 	// 1. Свежий выбор по hostname/IP
 	selectorHostname := flowHostname
+	selectorFromCache := false
+
 	if selectorHostname == "" && cached != nil && cached.Hostname != "" {
 		selectorHostname = cached.Hostname
+		selectorFromCache = true
 	}
 
-	fresh := p.strategyMgr.SelectStrategy(
-		dstIP.String(),
-		selectorHostname,
-		int(dstPort),
-		"tcp",
-	)
+	var fresh *strategy.Strategy
+	if selectorFromCache {
+		fresh = p.strategyMgr.SelectStrategyForBareIPCachedHost(
+			dstIP.String(),
+			selectorHostname,
+			int(dstPort),
+			"tcp",
+		)
+	} else {
+		fresh = p.strategyMgr.SelectStrategy(
+			dstIP.String(),
+			selectorHostname,
+			int(dstPort),
+			"tcp",
+		)
+	}
 
 	// 2. Если hostname ещё не известен, reuse cached non-passthrough ТОЛЬКО
 	// для выделенных bypass-hostname. Shared hostnames не "приклеиваем".
@@ -717,22 +730,44 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			pkt.Data[payloadOffset+1] == 0x03 && // TLS major version
 			pkt.Data[payloadOffset+5] == 0x01 // ClientHello
 
-		// Для TLS-only syndata профилей никогда не применяем SYN-data,
+		// Для TLS-only syndata профилей по умолчанию не применяем SYN-data,
 		// пока у flow ещё нет hostname/SNI.
-		// Даже если IP уже был в кеше как bypass-hostname, это слишком ранняя
-		// модификация и она ломает часть YouTube TCP flow ещё до нормального ClientHello.
+		//
+		// Исключение: если hostname пришёл из IP-cache и это именно YouTube CDN
+		// (googlevideo / c.youtube), разрешаем ранний SYN-data.
+		// Для main/control YouTube-hostов этого НЕ делаем — они уже downgraded
+		// через SelectStrategyForBareIPCachedHost.
+		allowBareCachedCDNSynData := isSYN &&
+			flowHostname == "" &&
+			selectorFromCache &&
+			strats != nil &&
+			strats.ID == 31 &&
+			strats.SynData &&
+			strats.ApplyToTLS &&
+			!strats.ApplyToHTTP &&
+			!strats.AnyProtocol &&
+			strategy.IsYouTubeCDNHostname(selectorHostname)
+
 		skipBareSynData := isSYN &&
 			flowHostname == "" &&
 			strats != nil &&
 			strats.SynData &&
 			strats.ApplyToTLS &&
 			!strats.ApplyToHTTP &&
-			!strats.AnyProtocol
+			!strats.AnyProtocol &&
+			!allowBareCachedCDNSynData
+
+		if allowBareCachedCDNSynData {
+			log.Printf(
+				"[PIPELINE] Allow bare-IP SYN-data for cached YouTube CDN strategy %d (%s) ip=%s:%d host=%q",
+				strats.ID, strats.Name, dstIP.String(), dstPort, selectorHostname,
+			)
+		}
 
 		if skipBareSynData {
 			log.Printf(
-				"[PIPELINE] Skip bare-IP SYN-data for strategy %d (%s) ip=%s:%d; waiting for SNI/Host (cache not enough)",
-				strats.ID, strats.Name, dstIP.String(), dstPort,
+				"[PIPELINE] Skip bare-IP SYN-data for strategy %d (%s) ip=%s:%d; waiting for SNI/Host (flow_host=%q selector_host=%q)",
+				strats.ID, strats.Name, dstIP.String(), dstPort, flowHostname, selectorHostname,
 			)
 			p.sendPacket(pkt.Data, pkt.Addr)
 			return
@@ -1002,18 +1037,14 @@ func shouldPersistBypassStrategyByIP(host string, strategyID int) bool {
 		return false
 	}
 
+	// Main/control YouTube-hostы не приклеиваем к IP-cache для раннего bypass.
+	// Иначе слишком легко снова получить aggressive strategy на bare-IP TCP.
+	if strategy.IsYouTubeControlHostname(h) {
+		return false
+	}
+
 	switch {
-	case h == "youtube.com",
-		h == "www.youtube.com",
-		h == "accounts.youtube.com",
-		strings.HasSuffix(h, ".youtube.com"),
-		strings.HasSuffix(h, ".googlevideo.com"),
-		strings.HasSuffix(h, ".youtubei.googleapis.com"),
-		strings.HasSuffix(h, ".youtube-nocookie.com"),
-		strings.HasSuffix(h, ".ytimg.com"),
-		strings.HasSuffix(h, ".ggpht.com"),
-		strings.HasSuffix(h, ".gvt1.com"),
-		strings.HasSuffix(h, ".gvt2.com"),
+	case strategy.IsYouTubeCDNHostname(h),
 		h == "telegram.org",
 		h == "web.telegram.org",
 		strings.HasSuffix(h, ".telegram.org"),

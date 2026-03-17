@@ -857,6 +857,78 @@ func labelFrom(ip, hostname string) string {
 	return "IP='" + ip + "'"
 }
 
+func normalizeServiceHostname(host string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimSuffix(host, ".")))
+}
+
+func IsYouTubeCDNHostname(host string) bool {
+	h := normalizeServiceHostname(host)
+	if h == "" {
+		return false
+	}
+
+	return strings.HasSuffix(h, ".googlevideo.com") ||
+		strings.HasSuffix(h, ".c.youtube.com")
+}
+
+func IsYouTubeControlHostname(host string) bool {
+	h := normalizeServiceHostname(host)
+	if h == "" || IsYouTubeCDNHostname(h) {
+		return false
+	}
+
+	switch {
+	case h == "youtube.com",
+		h == "www.youtube.com",
+		h == "m.youtube.com",
+		h == "music.youtube.com",
+		h == "studio.youtube.com",
+		strings.HasSuffix(h, ".youtube.com"),
+		strings.HasSuffix(h, ".youtubei.googleapis.com"),
+		strings.HasSuffix(h, ".youtube-nocookie.com"),
+		strings.HasSuffix(h, ".ytimg.com"),
+		strings.HasSuffix(h, ".ggpht.com"):
+		return true
+	default:
+		return false
+	}
+}
+
+// SelectStrategyForBareIPCachedHost используется только когда hostname
+// ещё не появился в flow, а у нас есть hostname из IP-cache.
+// Для main/control YouTube-hostов не даём агрессивный 31 слишком рано;
+// для CDN-hostов оставляем обычный выбор.
+func (m *Manager) SelectStrategyForBareIPCachedHost(ip, cachedHostname string, port int, protocol string) *Strategy {
+	s := m.SelectStrategy(ip, cachedHostname, port, protocol)
+	if s == nil {
+		return nil
+	}
+
+	if protocol != "tcp" {
+		return s
+	}
+
+	if s.ID != 31 {
+		return s
+	}
+
+	if !IsYouTubeControlHostname(cachedHostname) {
+		return s
+	}
+
+	safe, ok := m.GetStrategy(27)
+	if !ok || safe == nil {
+		return s
+	}
+
+	log.Printf(
+		"[SELECT] Bare-IP cached YouTube control host=%q ip=%s:%d: downgrade strategy %d (%s) -> %d (%s) until real SNI/Host appears",
+		cachedHostname, ip, port, s.ID, s.Name, safe.ID, safe.Name,
+	)
+
+	return safe
+}
+
 // inferHostnameForIP возвращает каноническое hostname для IP по builtinHostnameMappings.
 // Используется для QUIC-пакетов где SNI отсутствует: Google IP → "youtube.com".
 // Не выполняет reverse DNS — только проверяет Google-диапазоны.
