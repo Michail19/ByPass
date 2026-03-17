@@ -383,24 +383,24 @@ func (m *Manager) loadDefaultStrategies() {
 		Priority:               17,
 	})
 
-	mustAdd(&Strategy{
-		ID:          212,
-		Name:        "telegram-web-split-data",
-		Description: "Telegram Web: split 1,midsld on handshake + split first appdata packets",
-		ApplyToHTTP: false,
-		ApplyToTLS:  true,
-		ApplyToQUIC: false,
-		AnyProtocol: true,
-
-		SplitMode:      SplitCustom,
-		SplitPositions: []int{1},
-		SplitPosMidSLD: true,
-
-		ApplyToPacketTypes:     []string{"handshake", "data"},
-		ModifyFirstDataPackets: 4,
-		Cutoff:                 4,
-		Priority:               17,
-	})
+	//mustAdd(&Strategy{
+	//	ID:          212,
+	//	Name:        "telegram-web-split-data",
+	//	Description: "Telegram Web: split 1,midsld on handshake + split first appdata packets",
+	//	ApplyToHTTP: false,
+	//	ApplyToTLS:  true,
+	//	ApplyToQUIC: false,
+	//	AnyProtocol: true,
+	//
+	//	SplitMode:      SplitCustom,
+	//	SplitPositions: []int{1},
+	//	SplitPosMidSLD: true,
+	//
+	//	ApplyToPacketTypes:     []string{"handshake", "data"},
+	//	ModifyFirstDataPackets: 4,
+	//	Cutoff:                 4,
+	//	Priority:               17,
+	//})
 
 	mustAdd(&Strategy{
 		ID:          213,
@@ -425,49 +425,49 @@ func (m *Manager) loadDefaultStrategies() {
 		Priority:               18,
 	})
 
-	mustAdd(&Strategy{
-		ID:          221,
-		Name:        "discord-web-badseq-midsld",
-		Description: "Discord web/API: fake + seqovl(681) + split 1,midsld + QUIC fake",
-		ApplyToHTTP: false,
-		ApplyToTLS:  true,
-		ApplyToQUIC: true,
+	//mustAdd(&Strategy{
+	//	ID:          221,
+	//	Name:        "discord-web-badseq-midsld",
+	//	Description: "Discord web/API: fake + seqovl(681) + split 1,midsld + QUIC fake",
+	//	ApplyToHTTP: false,
+	//	ApplyToTLS:  true,
+	//	ApplyToQUIC: true,
+	//
+	//	SplitMode:         SplitSeqOvl,
+	//	SplitPositions:    []int{1},
+	//	SplitPosMidSLD:    true,
+	//	SeqOvlLen:         681,
+	//	SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
+	//
+	//	Fooling:         FoolingBadSeq,
+	//	BadSeqIncrement: 0x80000000,
+	//	FakeTTL:         64,
+	//	FakeRepeats:     2,
+	//	FakeTLSFiles: []string{
+	//		"tls_clienthello_www_google_com.bin",
+	//	},
+	//
+	//	DisorderTTL:        4,
+	//	FakeQUICFile:       "quic_initial_www_google_com.bin",
+	//	FakeQUICRepeats:    11,
+	//	ApplyToPacketTypes: []string{"handshake"},
+	//	Priority:           26,
+	//})
 
-		SplitMode:         SplitSeqOvl,
-		SplitPositions:    []int{1},
-		SplitPosMidSLD:    true,
-		SeqOvlLen:         681,
-		SeqOvlPatternFile: "tls_clienthello_www_google_com.bin",
-
-		Fooling:         FoolingBadSeq,
-		BadSeqIncrement: 0x80000000,
-		FakeTTL:         64,
-		FakeRepeats:     2,
-		FakeTLSFiles: []string{
-			"tls_clienthello_www_google_com.bin",
-		},
-
-		DisorderTTL:        4,
-		FakeQUICFile:       "quic_initial_www_google_com.bin",
-		FakeQUICRepeats:    11,
-		ApplyToPacketTypes: []string{"handshake"},
-		Priority:           26,
-	})
-
-	mustAdd(&Strategy{
-		ID:          222,
-		Name:        "discord-udp-voice",
-		Description: "Discord voice/STUN: fake unknown UDP x6",
-		ApplyToHTTP: false,
-		ApplyToTLS:  false,
-		ApplyToQUIC: false,
-		AnyProtocol: true,
-
-		FakeUnknownUDPFile: "quic_initial_www_google_com.bin",
-		FakeRepeats:        6,
-		Cutoff:             4,
-		Priority:           27,
-	})
+	//mustAdd(&Strategy{
+	//	ID:          222,
+	//	Name:        "discord-udp-voice",
+	//	Description: "Discord voice/STUN: fake unknown UDP x6",
+	//	ApplyToHTTP: false,
+	//	ApplyToTLS:  false,
+	//	ApplyToQUIC: false,
+	//	AnyProtocol: true,
+	//
+	//	FakeUnknownUDPFile: "quic_initial_www_google_com.bin",
+	//	FakeRepeats:        6,
+	//	Cutoff:             4,
+	//	Priority:           27,
+	//})
 
 	mustAdd(&Strategy{
 		ID:          223,
