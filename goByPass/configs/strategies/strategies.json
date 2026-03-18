@@ -939,18 +939,132 @@
   },
   {
     "id": 137,
-    "name": "yt-web-tlsrec-sni",
-    "description": "YouTube control: TLS record split inside SNI",
+    "name": "yt-web-fake-split-midsld",
+    "description": "YouTube web/control: fake badseq + absolute split(1) + midsld, no tlsrec",
     "apply_to_http": false,
     "apply_to_tls": true,
-    "apply_to_quic": false,
+    "apply_to_quic": true,
 
-    "tls_record_split": true,
-    "tls_record_size": 3,
-    "split_sni_offset": true,
+    "split_mode": 1,
+    "split_positions": [1],
+    "split_sni_offset": false,
+    "split_pos_midsld": true,
+    "split_pos_sniext": false,
+
+    "fake_repeats": 2,
+    "fake_ttl": 64,
+    "fooling": 8,
+    "badseq_increment": 2147483648,
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+
+    "fake_quic_file": "quic_initial_www_google_com.bin",
+    "fake_quic_repeats": 6,
 
     "apply_to_packet_types": ["handshake"],
     "priority": 40,
     "modify_first_data_packets": 0
-  }
+  },
+  [
+    {
+      "id": 301,
+      "name": "yt-control-zb-hybrid",
+      "description": "YouTube control/web: byedpi-like split 1+s + zapret-style fake TLS/badseq/midsld + QUIC fake",
+      "apply_to_http": false,
+      "apply_to_tls": true,
+      "apply_to_quic": true,
+
+      "split_mode": 1,
+      "split_positions": [1],
+      "split_sni_offset": true,
+      "split_pos_midsld": true,
+      "split_pos_sniext": false,
+
+      "fake_repeats": 4,
+      "fake_ttl": 6,
+      "fooling": 8,
+      "badseq_increment": 10000000,
+
+      "fake_tls_files": [
+        "tls_clienthello_www_google_com.bin"
+      ],
+      "fake_tls_mod_rnd": true,
+      "fake_tls_mod_dupsid": true,
+      "fake_tls_mod_sni": "www.google.com",
+
+      "fake_quic_file": "quic_initial_www_google_com.bin",
+      "fake_quic_repeats": 6,
+
+      "apply_to_packet_types": ["handshake"],
+      "priority": 33,
+      "modify_first_data_packets": 0
+    },
+
+    {
+      "id": 302,
+      "name": "yt-video-zapret-seqovl",
+      "description": "YouTube video/CDN: zapret-like seqovl=681 + fake TLS badseq + QUIC fake",
+      "apply_to_http": false,
+      "apply_to_tls": true,
+      "apply_to_quic": true,
+
+      "split_mode": 2,
+      "split_positions": [1],
+      "seqovl_len": 681,
+      "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
+
+      "fake_repeats": 3,
+      "fake_ttl": 6,
+      "fooling": 8,
+      "badseq_increment": 10000000,
+
+      "fake_tls_files": [
+        "tls_clienthello_www_google_com.bin"
+      ],
+      "fake_tls_mod_rnd": true,
+      "fake_tls_mod_dupsid": true,
+      "fake_tls_mod_sni": "www.google.com",
+
+      "fake_quic_file": "quic_initial_www_google_com.bin",
+      "fake_quic_repeats": 6,
+
+      "apply_to_packet_types": ["handshake"],
+      "priority": 34,
+      "modify_first_data_packets": 0
+    },
+
+    {
+      "id": 303,
+      "name": "yt-control-fakedsplit-fallback",
+      "description": "YouTube control fallback: fakedsplit + fake TLS badseq + Google SNI mutation + QUIC fake",
+      "apply_to_http": false,
+      "apply_to_tls": true,
+      "apply_to_quic": true,
+
+      "split_mode": 3,
+      "faked_split": true,
+      "faked_split_pos": 1,
+      "faked_split_pattern": 0,
+
+      "fake_repeats": 6,
+      "fake_ttl": 8,
+      "fooling": 8,
+      "badseq_increment": 10000000,
+
+      "fake_tls_files": [
+        "tls_clienthello_www_google_com.bin"
+      ],
+      "fake_tls_mod_rnd": true,
+      "fake_tls_mod_dupsid": true,
+      "fake_tls_mod_sni": "www.google.com",
+
+      "fake_quic_file": "quic_initial_www_google_com.bin",
+      "fake_quic_repeats": 6,
+
+      "apply_to_packet_types": ["handshake"],
+      "priority": 35,
+      "modify_first_data_packets": 0
+    }
+  ]
 ]
