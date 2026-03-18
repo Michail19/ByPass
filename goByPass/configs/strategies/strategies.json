@@ -968,43 +968,50 @@
   },
   {
     "id": 301,
-    "name": "youtube-safe-alt5-ext",
-    "description": "YouTube ALT5 external",
+    "name": "yt-control-snioff-fakedisorder",
+    "description": "YouTube control/web: byedpi-style disorder 3+s + zapret-like fake badseq, optimized for ChainPass Windows engine",
     "apply_to_http": false,
     "apply_to_tls": true,
     "apply_to_quic": true,
-    "syn_data": true,
-    "multi_disorder": true,
-    "disorder_ttl": 4,
-    "disorder_pos": [1, 2, 3, 4, 5],
-    "apply_to_packet_types": ["handshake"],
+
+    "split_mode": 1,
+    "split_positions": [3],
+    "split_sni_offset": true,
+
+    "disorder_mode": 4,
+    "disorder_pos": [3],
+    "disorder_ttl": 6,
+
+    "fooling": 8,
+    "badseq_increment": 2,
+    "fake_ttl": 6,
+
     "fake_quic_file": "quic_initial_www_google_com.bin",
     "fake_quic_repeats": 6,
-    "fake_ttl": 6,
-    "modify_first_data_packets": 1,
-    "priority": 34
+
+    "apply_to_packet_types": ["handshake"],
+    "priority": 34,
+    "modify_first_data_packets": 0
   },
   {
     "id": 302,
-    "name": "yt-video-zapret-seqovl",
-    "description": "YouTube video/CDN: zapret-like seqovl=681 + fake TLS badseq + QUIC fake",
+    "name": "yt-video-snioff-seqovl",
+    "description": "YouTube CDN/video: zapret seqovl=681 + SNI-relative split 3+s, optimized for ChainPass Windows engine",
     "apply_to_http": false,
     "apply_to_tls": true,
     "apply_to_quic": true,
 
     "split_mode": 2,
-    "split_positions": [1],
+    "split_positions": [3],
+    "split_sni_offset": true,
+
     "seqovl_len": 681,
     "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
 
-    "fake_repeats": 3,
+    "fake_repeats": 2,
     "fake_ttl": 6,
     "fooling": 8,
-    "badseq_increment": 10000000,
-
-    "fake_tls_files": [
-      "tls_clienthello_www_google_com.bin"
-    ],
+    "badseq_increment": 1000,
     "fake_tls_mod_rnd": true,
     "fake_tls_mod_dupsid": true,
     "fake_tls_mod_sni": "www.google.com",

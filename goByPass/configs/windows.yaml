@@ -45,34 +45,34 @@ strategy:
   hostname_rules:
     - pattern: "youtube.com"
       strategy_id: 301
-      comment: "YouTube bare web: hybrid control"
+      comment: "YouTube bare web: sni-offset fakedisorder"
     - pattern: "*.youtube.com"
       strategy_id: 301
-      comment: "YouTube web/control: hybrid control"
+      comment: "YouTube web/control: sni-offset fakedisorder"
     - pattern: "*.youtubei.googleapis.com"
       strategy_id: 301
-      comment: "YouTube API/control: hybrid control"
+      comment: "YouTube API/control: sni-offset fakedisorder"
     - pattern: "*.ytimg.com"
       strategy_id: 301
-      comment: "YouTube static/control: hybrid control"
+      comment: "YouTube static/control: sni-offset fakedisorder"
     - pattern: "*.ggpht.com"
       strategy_id: 301
-      comment: "YouTube images/control: hybrid control"
+      comment: "YouTube images/control: sni-offset fakedisorder"
     - pattern: "*.youtube-nocookie.com"
       strategy_id: 301
-      comment: "YouTube embed/control: hybrid control"
+      comment: "YouTube embed/control: sni-offset fakedisorder"
     - pattern: "accounts.youtube.com"
       strategy_id: 27
       comment: "Accounts: keep conservative unless auth still breaks"
     - pattern: "*.googlevideo.com"
       strategy_id: 302
-      comment: "Video CDN: seqovl hybrid"
+      comment: "Video CDN: sni-offset seqovl"
     - pattern: "*.gvt1.com"
       strategy_id: 302
-      comment: "GVT1 CDN: seqovl hybrid"
+      comment: "GVT1 CDN: sni-offset seqovl"
     - pattern: "*.gvt2.com"
       strategy_id: 302
-      comment: "GVT2 CDN: seqovl hybrid"
+      comment: "GVT2 CDN: sni-offset seqovl"
 
     - pattern: "updates.discord.com"
       strategy_id: 222
