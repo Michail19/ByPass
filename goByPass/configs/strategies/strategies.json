@@ -936,5 +936,21 @@
     "apply_to_packet_types": ["handshake"],
     "priority": 39,
     "modify_first_data_packets": 0
+  },
+  {
+    "id": 137,
+    "name": "yt-web-tlsrec-sni",
+    "description": "YouTube control: TLS record split inside SNI",
+    "apply_to_http": false,
+    "apply_to_tls": true,
+    "apply_to_quic": false,
+
+    "tls_record_split": true,
+    "tls_record_size": 3,
+    "split_sni_offset": true,
+
+    "apply_to_packet_types": ["handshake"],
+    "priority": 40,
+    "modify_first_data_packets": 0
   }
 ]

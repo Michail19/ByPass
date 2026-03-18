@@ -165,10 +165,20 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 		effectiveFooling = 0
 	}
 
-	if effectiveFooling != 0 && hasFooling && !fakedSplitEnabled && (isClientHello || strat.AnyProtocol) {
+	if effectiveFooling != 0 &&
+		hasFooling &&
+		!fakedSplitEnabled &&
+		strat.DisorderMode != strategy.DisorderFakedDisorder &&
+		(isClientHello || strat.AnyProtocol) {
 		for rep := 0; rep < fakeRepeats; rep++ {
 			fakePayload := pm.selectFakeTLSPayload(strat, rep, isClientHello, packet, ipHdrLen)
-			fakePkts, err := pm.ApplyFake(packet, strat.FakeTTL, strat.Fooling, strat.BadSeqIncrement, fakePayload)
+			fakePkts, err := pm.ApplyFake(
+				packet,
+				strat.FakeTTL,
+				strat.Fooling,
+				strat.BadSeqIncrement,
+				fakePayload,
+			)
 			if err != nil {
 				pm.stats.Errors.Add(1)
 				continue
