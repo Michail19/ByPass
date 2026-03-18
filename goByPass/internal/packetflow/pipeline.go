@@ -730,19 +730,23 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			pkt.Data[payloadOffset+1] == 0x03 && // TLS major version
 			pkt.Data[payloadOffset+5] == 0x01 // ClientHello
 
-		// For YouTube ALT5-like SYN-data strategies we can trust selectorHostname when it
-		// comes from DNS/IP cache. Otherwise SYN-data for control hosts becomes a no-op:
-		// the SYN is already gone by the time SNI appears on ClientHello.
-		allowBareCachedYouTubeSynData := isSYN &&
+		// Для TLS-only syndata профилей по умолчанию не применяем SYN-data,
+		// пока у flow ещё нет hostname/SNI.
+		//
+		// Исключение: если hostname пришёл из IP-cache и это именно YouTube CDN
+		// (googlevideo / c.youtube), разрешаем ранний SYN-data.
+		// Для main/control YouTube-hostов этого НЕ делаем — они уже downgraded
+		// через SelectStrategyForBareIPCachedHost.
+		allowBareCachedCDNSynData := isSYN &&
 			flowHostname == "" &&
 			selectorFromCache &&
-			selectorHostname != "" &&
 			strats != nil &&
+			strats.ID == 31 &&
 			strats.SynData &&
 			strats.ApplyToTLS &&
 			!strats.ApplyToHTTP &&
 			!strats.AnyProtocol &&
-			(strategy.IsYouTubeControlHostname(selectorHostname) || strategy.IsYouTubeCDNHostname(selectorHostname))
+			strategy.IsYouTubeCDNHostname(selectorHostname)
 
 		skipBareSynData := isSYN &&
 			flowHostname == "" &&
@@ -751,28 +755,19 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 			strats.ApplyToTLS &&
 			!strats.ApplyToHTTP &&
 			!strats.AnyProtocol &&
-			!allowBareCachedYouTubeSynData
+			!allowBareCachedCDNSynData
 
-		if allowBareCachedYouTubeSynData {
+		if allowBareCachedCDNSynData {
 			log.Printf(
-				"[PIPELINE] Allow bare-IP SYN-data for cached YouTube host strategy %d (%s) ip=%s:%d host=%q",
-				strats.ID,
-				strats.Name,
-				dstIP.String(),
-				dstPort,
-				selectorHostname,
+				"[PIPELINE] Allow bare-IP SYN-data for cached YouTube CDN strategy %d (%s) ip=%s:%d host=%q",
+				strats.ID, strats.Name, dstIP.String(), dstPort, selectorHostname,
 			)
 		}
 
 		if skipBareSynData {
 			log.Printf(
 				"[PIPELINE] Skip bare-IP SYN-data for strategy %d (%s) ip=%s:%d; waiting for SNI/Host (flow_host=%q selector_host=%q)",
-				strats.ID,
-				strats.Name,
-				dstIP.String(),
-				dstPort,
-				flowHostname,
-				selectorHostname,
+				strats.ID, strats.Name, dstIP.String(), dstPort, flowHostname, selectorHostname,
 			)
 			p.sendPacket(pkt.Data, pkt.Addr)
 			return
