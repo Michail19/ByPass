@@ -847,5 +847,34 @@
     "apply_to_packet_types": ["handshake"],
     "priority": 36,
     "modify_first_data_packets": 0
+  },
+  {
+    "id": 134,
+    "name": "yt-control-fakedsplit-badseq",
+    "description": "YouTube control hosts: fake+fakedsplit+badseq, safer than seqovl-only on Windows",
+    "apply_to_http": false,
+    "apply_to_tls": true,
+    "apply_to_quic": true,
+
+    "split_mode": 3,
+    "faked_split": true,
+    "faked_split_pos": 1,
+    "faked_split_pattern": 0,
+
+    "fooling": 8,
+    "badseq_increment": 10000000,
+    "fake_repeats": 8,
+    "fake_ttl": 9,
+
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+
+    "fake_quic_file": "quic_initial_www_google_com.bin",
+    "fake_quic_repeats": 6,
+
+    "apply_to_packet_types": ["handshake"],
+    "priority": 38,
+    "modify_first_data_packets": 0
   }
 ]

@@ -44,35 +44,44 @@ strategy:
   append_default_rules: false
   hostname_rules:
     - pattern: "*.youtube.com"
-      strategy_id: 20
-      comment: "YouTube main/web: seqovl safe-first"
+      strategy_id: 134
+      comment: "YouTube main/web: fake+fakedsplit+badseq"
+
     - pattern: "youtube.com"
-      strategy_id: 20
-      comment: "YouTube bare: seqovl safe-first"
+      strategy_id: 134
+      comment: "YouTube bare: fake+fakedsplit+badseq"
+
+    - pattern: "*.youtubei.googleapis.com"
+      strategy_id: 134
+      comment: "YouTube API: fake+fakedsplit+badseq"
+
+    - pattern: "*.youtube-nocookie.com"
+      strategy_id: 134
+      comment: "Embed: fake+fakedsplit+badseq"
+
+    - pattern: "*.ytimg.com"
+      strategy_id: 134
+      comment: "Static assets: fake+fakedsplit+badseq"
+
+    - pattern: "*.ggpht.com"
+      strategy_id: 134
+      comment: "Images/avatars: fake+fakedsplit+badseq"
+
     - pattern: "accounts.youtube.com"
       strategy_id: 27
       comment: "Accounts: conservative split"
-    - pattern: "*.youtubei.googleapis.com"
-      strategy_id: 20
-      comment: "YouTube API: seqovl safe-first"
-    - pattern: "*.youtube-nocookie.com"
-      strategy_id: 20
-      comment: "Embed: seqovl safe-first"
-    - pattern: "*.ytimg.com"
-      strategy_id: 20
-      comment: "Static assets: seqovl safe-first"
-    - pattern: "*.ggpht.com"
-      strategy_id: 20
-      comment: "Images/avatars: seqovl safe-first"
+
     - pattern: "*.googlevideo.com"
       strategy_id: 132
-      comment: "Video CDN: seqovl+badseq"
+      comment: "Video CDN: keep seqovl+badseq for now"
+
     - pattern: "*.gvt1.com"
       strategy_id: 132
-      comment: "GVT1: seqovl+badseq"
+      comment: "GVT1: keep seqovl+badseq for now"
+
     - pattern: "*.gvt2.com"
       strategy_id: 132
-      comment: "GVT2: seqovl+badseq"
+      comment: "GVT2: keep seqovl+badseq for now"
 
     - pattern: "updates.discord.com"
       strategy_id: 222
