@@ -45,34 +45,34 @@ strategy:
   hostname_rules:
     - pattern: "youtube.com"
       strategy_id: 301
-      comment: "YouTube bare web: fake + fakedsplit + badseq"
+      comment: "YouTube bare web: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.youtube.com"
       strategy_id: 301
-      comment: "YouTube web/control: fake + fakedsplit + badseq"
+      comment: "YouTube web/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.youtubei.googleapis.com"
       strategy_id: 301
-      comment: "YouTube API/control: fake + fakedsplit + badseq"
+      comment: "YouTube API/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.ytimg.com"
       strategy_id: 301
-      comment: "YouTube static/control: fake + fakedsplit + badseq"
+      comment: "YouTube static/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.ggpht.com"
       strategy_id: 301
-      comment: "YouTube images/control: fake + fakedsplit + badseq"
+      comment: "YouTube images/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.youtube-nocookie.com"
       strategy_id: 301
-      comment: "YouTube embed/control: fake + fakedsplit + badseq"
+      comment: "YouTube embed/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "accounts.youtube.com"
       strategy_id: 301
-      comment: "Accounts: same safer control path, no split-only fallback"
+      comment: "Accounts: same syndata-only path"
     - pattern: "*.googlevideo.com"
       strategy_id: 302
-      comment: "Video CDN: fake + fakedsplit + badseq"
+      comment: "Video CDN: syndata only first, keep TLS handshake intact"
     - pattern: "*.gvt1.com"
       strategy_id: 302
-      comment: "GVT1 CDN: fake + fakedsplit + badseq"
+      comment: "GVT1 CDN: syndata only first, keep TLS handshake intact"
     - pattern: "*.gvt2.com"
       strategy_id: 302
-      comment: "GVT2 CDN: fake + fakedsplit + badseq"
+      comment: "GVT2 CDN: syndata only first, keep TLS handshake intact"
 
     - pattern: "updates.discord.com"
       strategy_id: 222
