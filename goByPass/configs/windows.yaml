@@ -45,34 +45,34 @@ strategy:
   hostname_rules:
     - pattern: "youtube.com"
       strategy_id: 301
-      comment: "YouTube bare web: sni-offset fakedisorder"
+      comment: "YouTube bare web: fake + fakedsplit + badseq"
     - pattern: "*.youtube.com"
       strategy_id: 301
-      comment: "YouTube web/control: sni-offset fakedisorder"
+      comment: "YouTube web/control: fake + fakedsplit + badseq"
     - pattern: "*.youtubei.googleapis.com"
       strategy_id: 301
-      comment: "YouTube API/control: sni-offset fakedisorder"
+      comment: "YouTube API/control: fake + fakedsplit + badseq"
     - pattern: "*.ytimg.com"
       strategy_id: 301
-      comment: "YouTube static/control: sni-offset fakedisorder"
+      comment: "YouTube static/control: fake + fakedsplit + badseq"
     - pattern: "*.ggpht.com"
       strategy_id: 301
-      comment: "YouTube images/control: sni-offset fakedisorder"
+      comment: "YouTube images/control: fake + fakedsplit + badseq"
     - pattern: "*.youtube-nocookie.com"
       strategy_id: 301
-      comment: "YouTube embed/control: sni-offset fakedisorder"
+      comment: "YouTube embed/control: fake + fakedsplit + badseq"
     - pattern: "accounts.youtube.com"
-      strategy_id: 27
-      comment: "Accounts: keep conservative unless auth still breaks"
+      strategy_id: 301
+      comment: "Accounts: same safer control path, no split-only fallback"
     - pattern: "*.googlevideo.com"
       strategy_id: 302
-      comment: "Video CDN: sni-offset seqovl"
+      comment: "Video CDN: fake + fakedsplit + badseq"
     - pattern: "*.gvt1.com"
       strategy_id: 302
-      comment: "GVT1 CDN: sni-offset seqovl"
+      comment: "GVT1 CDN: fake + fakedsplit + badseq"
     - pattern: "*.gvt2.com"
       strategy_id: 302
-      comment: "GVT2 CDN: sni-offset seqovl"
+      comment: "GVT2 CDN: fake + fakedsplit + badseq"
 
     - pattern: "updates.discord.com"
       strategy_id: 222

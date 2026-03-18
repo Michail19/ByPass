@@ -266,17 +266,23 @@ func (m *Manager) loadDefaultStrategies() {
 	mustAdd(&Strategy{
 		ID:          27,
 		Name:        "yt-safe-2026",
-		Description: "YouTube conservative TCP: split pos=1 only; QUIC fake kept",
+		Description: "YouTube conservative fallback: fake + fakedsplit + badseq; no seqovl, no disorder",
 		ApplyToHTTP: false,
 		ApplyToTLS:  true,
 		ApplyToQUIC: true,
 
-		SplitMode:      SplitCustom,
-		SplitPositions: []int{1},
-		SplitSNIOffset: false,
+		SplitMode:         SplitFakedSplit,
+		FakedSplit:        true,
+		FakedSplitPos:     1,
+		FakedSplitPattern: 0,
 
-		TLSRecordSplit: false,
-		TLSRecordSize:  0,
+		Fooling:         FoolingBadSeq,
+		BadSeqIncrement: 10000000,
+		FakeTTL:         6,
+		FakeRepeats:     2,
+		FakeTLSFiles: []string{
+			"tls_clienthello_www_google_com.bin",
+		},
 
 		FakeQUICFile:    "quic_initial_www_google_com.bin",
 		FakeQUICRepeats: 6,
