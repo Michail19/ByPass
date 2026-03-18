@@ -790,5 +790,62 @@
 
     "priority": 27,
     "modify_first_data_packets": 0
+  },
+  {
+    "id": 132,
+    "name": "yt-seqovl-badseq-2026",
+    "description": "YouTube Windows: seqovl + fake badseq x2 + QUIC fake",
+    "apply_to_http": false,
+    "apply_to_tls": true,
+    "apply_to_quic": true,
+
+    "split_mode": 2,
+    "split_positions": [1],
+    "split_pos_midsld": true,
+
+    "seqovl_len": 681,
+    "seqovl_pattern_file": "tls_clienthello_www_google_com.bin",
+
+    "fake_repeats": 2,
+    "fake_ttl": 6,
+    "fooling": 8,
+    "badseq_increment": 10000000,
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+
+    "fake_quic_file": "quic_initial_www_google_com.bin",
+    "fake_quic_repeats": 6,
+
+    "apply_to_packet_types": ["handshake"],
+    "priority": 37,
+    "modify_first_data_packets": 0
+  },
+  {
+    "id": 133,
+    "name": "yt-fakedsplit-badseq-2026",
+    "description": "YouTube Windows: fakedsplit + badseq fake + QUIC fake",
+    "apply_to_http": false,
+    "apply_to_tls": true,
+    "apply_to_quic": true,
+
+    "split_mode": 3,
+    "faked_split": true,
+    "faked_split_pos": 1,
+    "faked_split_pattern": 0,
+
+    "fake_ttl": 6,
+    "fooling": 8,
+    "badseq_increment": 10000000,
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+
+    "fake_quic_file": "quic_initial_www_google_com.bin",
+    "fake_quic_repeats": 6,
+
+    "apply_to_packet_types": ["handshake"],
+    "priority": 36,
+    "modify_first_data_packets": 0
   }
 ]
