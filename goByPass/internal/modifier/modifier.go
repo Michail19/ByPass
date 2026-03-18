@@ -324,9 +324,29 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 		if len(disorderPos) == 0 {
 			disorderPos = []int{1}
 		}
+
+		// NEW: поддержка позиций относительно SNI для disorder,
+		// чтобы можно было выразить byedpi-подобные 1+s / 3+s.
+		resolvedDisorderPos := disorderPos
+		if strat.SplitSNIOffset || strat.SplitPosMidSLD || strat.SplitPosSNIExt {
+			if rp, err := resolveSplitPositions(
+				packet[payloadOffset:],
+				disorderPos,
+				strat.SplitSNIOffset,
+				strat.SplitPosMidSLD,
+				strat.SplitPosSNIExt,
+			); err == nil && len(rp) > 0 {
+				resolvedDisorderPos = rp
+			}
+		}
+
 		dPkts, err := pm.ApplyDisorder(
-			packet, disorderPos, strat.DisorderTTL, strat.DisorderMode,
-			strat.Fooling, strat.BadSeqIncrement,
+			packet,
+			resolvedDisorderPos,
+			strat.DisorderTTL,
+			strat.DisorderMode,
+			strat.Fooling,
+			strat.BadSeqIncrement,
 		)
 		if err != nil {
 			pm.stats.Errors.Add(1)
@@ -334,7 +354,7 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 		if err == nil && len(dPkts) > 0 {
 			packets = append(packets, dPkts...)
 			pm.stats.DisorderCount.Add(uint64(len(dPkts)))
-			originalReplaced = true // dPkts содержит реальные сегменты после decoy
+			originalReplaced = true
 			goto finalize
 		}
 	}

@@ -905,5 +905,36 @@
     "apply_to_packet_types": ["handshake"],
     "priority": 36,
     "modify_first_data_packets": 0
+  },
+  {
+    "id": 136,
+    "name": "yt-web-sni-disorder-md5",
+    "description": "YouTube control: SNI-relative split/disorder for Windows",
+    "apply_to_http": false,
+    "apply_to_tls": true,
+    "apply_to_quic": true,
+
+    "split_mode": 1,
+    "split_positions": [1, 3],
+    "split_sni_offset": true,
+    "split_pos_midsld": true,
+
+    "disorder_mode": 4,
+    "disorder_pos": [1, 3],
+    "disorder_ttl": 6,
+
+    "fooling": 2,
+    "fake_ttl": 6,
+    "fake_repeats": 2,
+    "fake_tls_files": [
+      "tls_clienthello_www_google_com.bin"
+    ],
+
+    "fake_quic_file": "quic_initial_www_google_com.bin",
+    "fake_quic_repeats": 6,
+
+    "apply_to_packet_types": ["handshake"],
+    "priority": 39,
+    "modify_first_data_packets": 0
   }
 ]
