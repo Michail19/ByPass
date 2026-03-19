@@ -120,3 +120,8 @@ ByPass/
 ├── README.md
 └── LICENSE
 ```
+
+Поиск стратегий:
+```bash
+go run ./cmd/mydpi-discovery-candidates -config ./configs/windows.yaml -domains youtube.com,googlevideo.com,discord.com,telegram.org -samples 3 -timeout 5s -max-candidates 64 -output candidate-discovery-report.json
+```

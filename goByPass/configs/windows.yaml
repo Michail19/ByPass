@@ -44,34 +44,34 @@ strategy:
   append_default_rules: false
   hostname_rules:
     - pattern: "youtube.com"
-      strategy_id: 301
+      strategy_id: 10052
       comment: "YouTube bare web: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.youtube.com"
-      strategy_id: 301
+      strategy_id: 10052
       comment: "YouTube web/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.youtubei.googleapis.com"
-      strategy_id: 301
+      strategy_id: 10052
       comment: "YouTube API/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.ytimg.com"
-      strategy_id: 301
+      strategy_id: 10052
       comment: "YouTube static/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.ggpht.com"
-      strategy_id: 301
+      strategy_id: 10052
       comment: "YouTube images/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "*.youtube-nocookie.com"
-      strategy_id: 301
+      strategy_id: 10052
       comment: "YouTube embed/control: syndata only (ALT5 core), no split/fakedsplit"
     - pattern: "accounts.youtube.com"
-      strategy_id: 301
+      strategy_id: 10052
       comment: "Accounts: same syndata-only path"
     - pattern: "*.googlevideo.com"
-      strategy_id: 302
+      strategy_id: 10039
       comment: "Video CDN: syndata only first, keep TLS handshake intact"
     - pattern: "*.gvt1.com"
-      strategy_id: 302
+      strategy_id: 10039
       comment: "GVT1 CDN: syndata only first, keep TLS handshake intact"
     - pattern: "*.gvt2.com"
-      strategy_id: 302
+      strategy_id: 10039
       comment: "GVT2 CDN: syndata only first, keep TLS handshake intact"
 
     - pattern: "updates.discord.com"
