@@ -138,6 +138,7 @@ type Strategy struct {
 	SeqOvlLen         int    `json:"seqovl_len"`          // длина перекрытия (568, 652, 664, 679, 681)
 	SeqOvlPatternFile string `json:"seqovl_pattern_file"` // имя .bin файла (без пути)
 	SeqOvlPatternData []byte `json:"-"`                   // загружается при старте
+	SeqOvlTTL         int    `json:"seqovl_ttl,omitempty"`
 
 	// FakedSplit: отправить fake-пакет, затем сплит в позиции FakedSplitPos.
 	// --dpi-desync=fake,fakedsplit --dpi-desync-fakedsplit-pattern=0x00

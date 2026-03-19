@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"sync/atomic"
 )
 
@@ -188,6 +189,11 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 		}
 	}
 
+	if strat.Fooling == strategy.FoolingTS && effectiveFooling == 0 && hasFooling {
+		log.Printf("[MODIFIER] strategy %d (%s): TS fooling disabled, packet has no TCP timestamp option",
+			strat.ID, strat.Name)
+	}
+
 	// ── 3–8. Split/Disorder (только для ClientHello или AnyProtocol) ──────────
 	//
 	// originalReplaced = true означает что packets[] уже содержит полную замену
@@ -274,8 +280,13 @@ func (pm *PacketModifier) ModifyPacket(packet []byte, flow *conntrack.Flow, stra
 			// SeqOvl TTL: предпочитаем DisorderTTL (запретовский default=1), fallback FakeTTL.
 			// ovl-пакет идёт с seq < ISN — должен умереть до сервера, но дойти до DPI.
 			func() int {
-				if strat.DisorderTTL > 0 {
-					return strat.DisorderTTL
+				seqOvlTTL := strat.SeqOvlTTL
+				if seqOvlTTL <= 0 {
+					if strat.DisorderTTL > 0 {
+						seqOvlTTL = strat.DisorderTTL
+					} else {
+						seqOvlTTL = 4
+					}
 				}
 				if strat.FakeTTL > 0 {
 					return strat.FakeTTL

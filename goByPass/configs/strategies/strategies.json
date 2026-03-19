@@ -1267,7 +1267,8 @@
     "modify_first_data_packets": 1,
     "apply_to_packet_types": [
       "handshake"
-    ]
+    ],
+    "seqovl_ttl": 4
   },
   {
     "id": 10043,

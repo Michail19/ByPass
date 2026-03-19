@@ -783,10 +783,10 @@ func (p *Pipeline) processPacket(pkt *capture.Packet) {
 		// Для TLS-only стратегий модифицируем только SYN и ClientHello.
 		modifyAppData := false
 		if packetTypeAllowed && isData && !isClientHello {
-			if strats.AnyProtocol || strats.ApplyToHTTP {
-				modifyAppData = (strats.ModifyFirstDataPackets > 0 &&
-					flow.DataPacketsModified < strats.ModifyFirstDataPackets) ||
-					(strats.ModifyFirstDataPackets == 0)
+			if strats.AnyProtocol || strats.ApplyToHTTP || strats.ApplyToTLS {
+				modifyAppData =
+					(strats.ModifyFirstDataPackets > 0 && flow.DataPacketsModified < strats.ModifyFirstDataPackets) ||
+						(strats.ModifyFirstDataPackets == 0)
 			}
 		}
 
