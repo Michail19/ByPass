@@ -65,13 +65,13 @@ strategy:
       strategy_id: 10052
       comment: "Accounts: same syndata-only path"
     - pattern: "*.googlevideo.com"
-      strategy_id: 10052
+      strategy_id: 304
       comment: "Video CDN: syndata only first, keep TLS handshake intact"
     - pattern: "*.gvt1.com"
-      strategy_id: 10052
+      strategy_id: 304
       comment: "GVT1 CDN: syndata only first, keep TLS handshake intact"
     - pattern: "*.gvt2.com"
-      strategy_id: 10052
+      strategy_id: 304
       comment: "GVT2 CDN: syndata only first, keep TLS handshake intact"
 
     - pattern: "updates.discord.com"

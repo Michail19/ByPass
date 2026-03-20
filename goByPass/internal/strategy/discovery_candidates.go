@@ -40,20 +40,20 @@ type CandidateProbeResult struct {
 
 // CandidateDiscoveryResult агрегирует результаты кандидата по конкретному домену/протоколу.
 type CandidateDiscoveryResult struct {
-	StrategyID           int             `json:"strategy_id"`
-	StrategyName         string          `json:"strategy_name"`
-	SourceStrategyID     int             `json:"source_strategy_id"`
-	Domain               string          `json:"domain"`
-	Protocol             string          `json:"protocol"`
-	Samples              int             `json:"samples"`
-	HandshakeSuccesses   int             `json:"handshake_successes"`
-	AppSuccesses         int             `json:"app_successes"`
-	HandshakeSuccessRate float64         `json:"handshake_success_rate"`
-	AppSuccessRate       float64         `json:"app_success_rate"`
-	AvgHandshakeRTT      time.Duration   `json:"avg_handshake_rtt"`
-	AvgAppRTT            time.Duration   `json:"avg_app_rtt"`
-	Errors               []string        `json:"errors,omitempty"`
-	Strategy             *Strategy       `json:"strategy,omitempty"`
+	StrategyID           int                    `json:"strategy_id"`
+	StrategyName         string                 `json:"strategy_name"`
+	SourceStrategyID     int                    `json:"source_strategy_id"`
+	Domain               string                 `json:"domain"`
+	Protocol             string                 `json:"protocol"`
+	Samples              int                    `json:"samples"`
+	HandshakeSuccesses   int                    `json:"handshake_successes"`
+	AppSuccesses         int                    `json:"app_successes"`
+	HandshakeSuccessRate float64                `json:"handshake_success_rate"`
+	AppSuccessRate       float64                `json:"app_success_rate"`
+	AvgHandshakeRTT      time.Duration          `json:"avg_handshake_rtt"`
+	AvgAppRTT            time.Duration          `json:"avg_app_rtt"`
+	Errors               []string               `json:"errors,omitempty"`
+	Strategy             *Strategy              `json:"strategy,omitempty"`
 	Probes               []CandidateProbeResult `json:"probes,omitempty"`
 }
 
@@ -129,6 +129,8 @@ func (r *CandidateDiscoveryRunner) Run(ctx context.Context) (*CandidateDiscovery
 				case <-time.After(r.config.Interval + jitter):
 				}
 			}
+
+			fmt.Printf("Candidate: %v for domain: %v \n", cand.ID, domain)
 		}
 	}
 
