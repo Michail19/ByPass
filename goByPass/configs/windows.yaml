@@ -45,37 +45,37 @@ strategy:
   hostname_rules:
     - pattern: "youtube.com"
       strategy_id: 10052
-      comment: "YouTube bare web: syndata only (ALT5 core), no split/fakedsplit"
+      comment: "YouTube bare web/control"
     - pattern: "*.youtube.com"
       strategy_id: 10052
-      comment: "YouTube web/control: syndata only (ALT5 core), no split/fakedsplit"
+      comment: "YouTube web/control"
     - pattern: "*.youtubei.googleapis.com"
       strategy_id: 10052
-      comment: "YouTube API/control: syndata only (ALT5 core), no split/fakedsplit"
-    - pattern: "*.ytimg.com"
-      strategy_id: 10052
-      comment: "YouTube static/control: syndata only (ALT5 core), no split/fakedsplit"
-    - pattern: "*.ggpht.com"
-      strategy_id: 10052
-      comment: "YouTube images/control: syndata only (ALT5 core), no split/fakedsplit"
+      comment: "YouTube API/control"
     - pattern: "*.youtube-nocookie.com"
       strategy_id: 10052
-      comment: "YouTube embed/control: syndata only (ALT5 core), no split/fakedsplit"
+      comment: "YouTube embed/control"
     - pattern: "accounts.youtube.com"
       strategy_id: 10052
-      comment: "Accounts: same syndata-only path"
+      comment: "Accounts/control"
     - pattern: "*.googlevideo.com"
       strategy_id: 305
-      comment: "Video CDN: syndata only first, keep TLS handshake intact"
+      comment: "YouTube CDN/video: zapret-like fake+multidisorder"
     - pattern: "*.gvt1.com"
       strategy_id: 305
-      comment: "GVT1 CDN: syndata only first, keep TLS handshake intact"
+      comment: "Google video transport CDN"
     - pattern: "*.gvt2.com"
       strategy_id: 305
-      comment: "GVT2 CDN: syndata only first, keep TLS handshake intact"
+      comment: "Google video transport CDN"
     - pattern: "*.gvt3.com"
       strategy_id: 305
       comment: "Google video transport CDN"
+    - pattern: "*.ytimg.com"
+      strategy_id: 306
+      comment: "YouTube static/img: lighter split+fake"
+    - pattern: "*.ggpht.com"
+      strategy_id: 306
+      comment: "YouTube avatar/thumb/img CDN"
     - pattern: "yt3.ggpht.com"
       strategy_id: 306
       comment: "Explicit image/avatar host"
