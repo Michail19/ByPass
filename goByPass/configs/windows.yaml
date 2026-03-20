@@ -44,19 +44,19 @@ strategy:
   append_default_rules: false
   hostname_rules:
     - pattern: "youtube.com"
-      strategy_id: 10052
+      strategy_id: 10035
       comment: "YouTube bare web/control"
     - pattern: "*.youtube.com"
-      strategy_id: 10052
+      strategy_id: 10035
       comment: "YouTube web/control"
     - pattern: "*.youtubei.googleapis.com"
-      strategy_id: 10052
+      strategy_id: 10035
       comment: "YouTube API/control"
     - pattern: "*.youtube-nocookie.com"
-      strategy_id: 10052
+      strategy_id: 10035
       comment: "YouTube embed/control"
     - pattern: "accounts.youtube.com"
-      strategy_id: 10052
+      strategy_id: 10035
       comment: "Accounts/control"
     - pattern: "*.googlevideo.com"
       strategy_id: 305
